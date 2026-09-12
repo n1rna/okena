@@ -9,11 +9,13 @@
 //! [`knowledge_project_sources`].
 
 use super::ActionResult;
+use super::briefs::{self, PromptRoot};
 use crate::workspace::persistence::{AppSettings, get_config_dir};
 use crate::workspace::state::ProjectData;
 use okena_core::api::ActionRequest;
 use okena_core::knowledge::{KnowledgeDocument, KnowledgeRoot, KnowledgeRootKind, KnowledgeStores};
 use okena_knowledge::discover::{self, ProjectSource, Sources};
+use okena_knowledge::prompts::{self, Flow, Vars};
 use okena_knowledge::registry::{self, RegisterOutcome};
 use okena_knowledge::setup::{self, SetupRequest};
 use okena_knowledge::{KnowledgeError, git, tree};
@@ -51,12 +53,33 @@ pub fn execute_knowledge_action(
     projects: &[ProjectSource],
     settings: &AppSettings,
 ) -> Option<ActionResult> {
-    execute_at(
-        &registry::registry_path(&get_config_dir()),
-        action,
-        projects,
-        settings,
-    )
+    let registry = registry::registry_path(&get_config_dir());
+    ensure_defaults(&registry);
+    execute_at(&registry, action, projects, settings)
+}
+
+/// Put okena's own briefs on disk and in the registry, once per run.
+///
+/// Here rather than at startup because this is the first moment anything cares
+/// that knowledge exists, and a user who never opens the Knowledge view should
+/// not have folders appear for it. Failures are swallowed on purpose: a
+/// read-only config directory should cost you the ability to *read* the
+/// defaults, not the ability to use knowledge at all — launches still fall
+/// back to the same templates compiled in.
+fn ensure_defaults(registry: &Path) {
+    use std::sync::OnceLock;
+    static DONE: OnceLock<()> = OnceLock::new();
+    DONE.get_or_init(|| {
+        let dir = get_config_dir()
+            .join("knowledge")
+            .join(prompts::defaults::DEFAULT_STORE_DIR);
+        if prompts::defaults::ensure_store(&dir).is_err() {
+            return;
+        }
+        // Registering is what makes it appear in the Knowledge view. Already
+        // registered is the ordinary case and not an error worth reporting.
+        let _ = registry::register(registry, &dir.to_string_lossy(), None);
+    });
 }
 
 fn execute_at(
@@ -369,39 +392,35 @@ fn sync(
 
 /// Brief an agent to add to or update a knowledge root.
 ///
-/// States the layout inline rather than assuming the agent knows it: most have
-/// never seen it, and a wrong guess produces a plausible file in the wrong
-/// place.
-fn draft_brief(request: &str, root: &KnowledgeRoot) -> String {
-    let what = match root.kind {
-        KnowledgeRootKind::Store => "knowledge store",
-        KnowledgeRootKind::Project => "project's knowledge folder",
-    };
-    let mut out = format!(
-        "Add to or update this knowledge base: {request}\n\n\
-         You are in `{path}`, a {what}. Its layout:\n\
-         - `docs/**/*.md` — engineering principles, processes, architecture and runbooks.\n\
-         - `skills/<name>/SKILL.md` — one skill per directory, in the Agent Skills format \
-         (frontmatter `name` and `description`), with its supporting files beside it.\n\
-         - `agents/<name>.md` — one subagent per file, in the Claude Code subagent format \
-         (frontmatter `name`, `description`, optional `tools` and `model`).\n\
-         - `templates/**/*.md` — prompt templates: frontmatter `for:` lists the launch flows \
-         they apply to, and the body uses `{{placeholder}}` names.\n\n\
-         Give every file frontmatter with a one-line `description` (plus `title` and `tags` \
-         for docs): people and agents choose entries by it. Read the existing entries first, \
-         and extend one rather than duplicating it. Keep it short and specific to how this \
-         team works, and ask me about anything ambiguous rather than inventing policy.",
-        path = root.path,
+/// The prose is a template now (`knowledge-draft`). What stays here is what a
+/// template cannot decide: what kind of root this is, and therefore who is
+/// expected to commit.
+fn draft_brief(request: &str, root: &KnowledgeRoot, prompts: PromptRoot) -> String {
+    let mut vars = Vars::new();
+    vars.insert("request", request.to_string());
+    vars.insert("path", root.path.clone());
+    vars.insert(
+        "what",
+        match root.kind {
+            KnowledgeRootKind::Store => "knowledge store",
+            KnowledgeRootKind::Project => "project's knowledge folder",
+        }
+        .to_string(),
     );
-    match root.kind {
-        KnowledgeRootKind::Store => out.push_str(
-            "\n\nThis is a shared git repository. Work on a new branch named \
-             `knowledge/<short-topic>`, commit when done, and do not push unless I ask.",
-        ),
-        KnowledgeRootKind::Project => out
-            .push_str("\n\nThese files live inside a project repository. Leave committing to me."),
-    }
-    out
+    vars.insert("commit_note", commit_note(root.kind, &prompts));
+    briefs::build(Flow::KnowledgeDraft, prompts.as_ref(), &vars)
+        .rendered
+        .text
+}
+
+/// Who commits, which depends on whose repository this is. The decision is
+/// here; the words are the `knowledge-commit-*` partials.
+fn commit_note(kind: KnowledgeRootKind, prompts: &PromptRoot) -> String {
+    let name = match kind {
+        KnowledgeRootKind::Store => "knowledge-commit-store",
+        KnowledgeRootKind::Project => "knowledge-commit-project",
+    };
+    briefs::block(&briefs::fragment(name, prompts.as_ref(), &Vars::new()))
 }
 
 /// The agent a draft session runs. Unlike a spec draft there is nothing to
@@ -445,7 +464,11 @@ pub(super) fn draft(
     let shell = match draft_shell(
         settings,
         agent_command.as_deref(),
-        &draft_brief(&request, &root),
+        &draft_brief(
+            &request,
+            &root,
+            briefs::prompt_root(&ws.data.projects, settings),
+        ),
     ) {
         Ok(s) => s,
         Err(e) => return ActionResult::Err(e),
@@ -472,6 +495,9 @@ pub(super) fn draft(
     // out of knowledge discovery from the first snapshot.
     if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id) {
         p.custom_session = Some(format!("Knowledge: {request}"));
+        // The root it writes into, so the Knowledge view can list it beside
+        // the entries rather than matching on the goal text.
+        p.knowledge_root = Some(root.key.clone());
         p.default_shell = Some(shell);
     }
     if let ActionResult::Err(e) = super::spawn_uninitialized_terminals(
@@ -521,6 +547,7 @@ mod draft_tests {
         let brief = draft_brief(
             "document how CI caches work",
             &root(KnowledgeRootKind::Store),
+            None,
         );
         for needle in [
             "document how CI caches work",
@@ -540,7 +567,7 @@ mod draft_tests {
             );
         }
 
-        let project = draft_brief("x", &root(KnowledgeRootKind::Project));
+        let project = draft_brief("x", &root(KnowledgeRootKind::Project), None);
         assert!(!project.contains("knowledge/<short-topic>"));
         assert!(project.contains("Leave committing to me"));
     }

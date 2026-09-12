@@ -909,7 +909,7 @@ impl PtyManager {
             pixel_height: 0,
         })?;
 
-        let launch_environment = self.launch_environment(plan);
+        let launch_environment = self.launch_environment(plan, terminal_id);
 
         #[cfg(unix)]
         if self.session_backend() == ResolvedBackend::Dtach {
@@ -1070,13 +1070,12 @@ impl PtyManager {
         Ok(())
     }
 
-    fn launch_environment(&self, plan: &TerminalLaunchPlan) -> Vec<(String, Option<String>)> {
-        let mut environment = self.extra_env.lock().clone();
-        for (key, value) in &plan.environment {
-            environment.retain(|(existing, _)| existing != key);
-            environment.push((key.clone(), Some(value.clone())));
-        }
-        environment
+    fn launch_environment(
+        &self,
+        plan: &TerminalLaunchPlan,
+        terminal_id: &str,
+    ) -> Vec<(String, Option<String>)> {
+        terminal_launch_environment(&self.extra_env.lock(), &plan.environment, terminal_id)
     }
 
     /// Build the command to run in the terminal.
@@ -2472,10 +2471,82 @@ fn first_proc_child(_pid: u32) -> Option<u32> {
     None
 }
 
+/// The environment a terminal launches with.
+///
+/// `OKENA_TERMINAL_ID` belongs here, with everything else that has to reach
+/// the process, and not only on the outer command. A session backend such as
+/// tmux starts the shell from its *server's* environment, not from the client
+/// that asked: the terminal id set on `tmux new-session` itself was dropped,
+/// and every session inherited whichever id the tmux server had been started
+/// with. Every agent's MCP server then resolved to that one terminal's project
+/// — reporting status against it, and refusing to start sub-agents because it
+/// was not linked to a task. Values in this list are forwarded with `-e`,
+/// which is the only way through.
+///
+/// Last, so no inherited or configured value can shadow it.
+pub(crate) fn terminal_launch_environment(
+    extra: &[(String, Option<String>)],
+    plan: &[(String, String)],
+    terminal_id: &str,
+) -> Vec<(String, Option<String>)> {
+    let mut environment = extra.to_vec();
+    for (key, value) in plan {
+        environment.retain(|(existing, _)| existing != key);
+        environment.push((key.clone(), Some(value.clone())));
+    }
+    environment.retain(|(existing, _)| existing != "OKENA_TERMINAL_ID");
+    environment.push((
+        "OKENA_TERMINAL_ID".to_string(),
+        Some(terminal_id.to_string()),
+    ));
+    environment
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn a_terminal_launches_knowing_its_own_id() {
+        let env = terminal_launch_environment(&[], &[], "t-1");
+        assert!(
+            env.contains(&("OKENA_TERMINAL_ID".to_string(), Some("t-1".to_string()))),
+            "{env:?}"
+        );
+    }
+
+    #[test]
+    fn no_other_value_can_shadow_the_terminal_id() {
+        // A stale id from the process that started okena, or one a launch
+        // plan happened to carry, must lose to the terminal's own.
+        let env = terminal_launch_environment(
+            &[("OKENA_TERMINAL_ID".to_string(), Some("stale".to_string()))],
+            &[("OKENA_TERMINAL_ID".to_string(), "plan".to_string())],
+            "t-1",
+        );
+        let ids: Vec<_> = env
+            .iter()
+            .filter(|(k, _)| k == "OKENA_TERMINAL_ID")
+            .collect();
+        assert_eq!(ids.len(), 1, "{env:?}");
+        assert_eq!(ids[0].1.as_deref(), Some("t-1"));
+    }
+
+    #[test]
+    fn a_tmux_session_is_handed_the_terminal_id_explicitly() {
+        // tmux starts the shell from its server's environment, so the id only
+        // arrives if it is passed with `-e`.
+        let env = terminal_launch_environment(&[], &[], "t-42");
+        let (_, args) = crate::session_backend::ResolvedBackend::Tmux
+            .build_command("tm-t42", "/home/user", None, &env)
+            .expect("tmux command");
+        assert!(
+            args[1].contains("-e 'OKENA_TERMINAL_ID=t-42'"),
+            "{}",
+            args[1]
+        );
+    }
 
     #[test]
     fn generation_rejects_delayed_and_duplicate_exits() {

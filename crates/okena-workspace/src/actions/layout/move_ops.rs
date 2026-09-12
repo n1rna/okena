@@ -696,6 +696,8 @@ mod tests {
         ProjectData {
             task_ref: None,
             spec_change: None,
+            knowledge_root: None,
+            task_draft: None,
             custom_session: None,
             agent: None,
             id: id.to_string(),

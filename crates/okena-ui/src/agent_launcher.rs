@@ -40,6 +40,22 @@ impl LaunchOption {
     }
 }
 
+/// One way of launching, when a launcher has more than one.
+///
+/// Not another agent to pick — the agents are the buttons on the right. This
+/// is what pressing one of them will *do*: start a single session, or fan out,
+/// or hand the decision to the agent. It belongs inside the card because it
+/// changes what that card's buttons mean, and a control that changes a
+/// button's meaning while sitting outside it is a control people press by
+/// accident.
+#[derive(Clone)]
+pub struct LaunchMode {
+    /// Handed back to `on_mode`.
+    pub id: SharedString,
+    pub label: SharedString,
+    pub selected: bool,
+}
+
 /// A session already running for whatever the launcher starts.
 #[derive(Clone, Debug)]
 pub struct LauncherSession {
@@ -76,6 +92,10 @@ pub struct AgentLauncher {
     id: SharedString,
     title: SharedString,
     subtitle: Option<SharedString>,
+    modes: Vec<LaunchMode>,
+    /// One line under the modes saying what the chosen one will do.
+    mode_hint: Option<SharedString>,
+    on_mode: Option<CommandHandler>,
     style: LauncherStyle,
     options: Vec<LaunchOption>,
     /// Command drawn as the default, so a quick start is not a guess.
@@ -97,6 +117,9 @@ impl AgentLauncher {
             id: id.into(),
             title: title.into(),
             subtitle: None,
+            modes: Vec::new(),
+            mode_hint: None,
+            on_mode: None,
             style: LauncherStyle::default(),
             options: Vec::new(),
             preferred: None,
@@ -107,6 +130,27 @@ impl AgentLauncher {
             on_configure: None,
             on_open: None,
         }
+    }
+
+    /// Offer a choice of what launching will do. Empty hides the row.
+    pub fn modes(mut self, modes: Vec<LaunchMode>) -> Self {
+        self.modes = modes;
+        self
+    }
+
+    /// One line under the modes, saying what the chosen one will do.
+    pub fn mode_hint(mut self, hint: impl Into<SharedString>) -> Self {
+        self.mode_hint = Some(hint.into());
+        self
+    }
+
+    /// Called with a mode's id when it is picked.
+    pub fn on_mode(
+        mut self,
+        handler: impl Fn(&SharedString, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_mode = Some(Rc::new(handler));
+        self
     }
 
     pub fn subtitle(mut self, subtitle: impl Into<SharedString>) -> Self {
@@ -403,6 +447,64 @@ impl AgentLauncher {
     }
 }
 
+impl AgentLauncher {
+    /// The mode row: what launching will do, and a line saying so.
+    fn render_modes(&self, cx: &App) -> Option<AnyElement> {
+        if self.modes.is_empty() {
+            return None;
+        }
+        let t = theme(cx);
+        let mut row = h_flex().gap(px(4.0)).flex_wrap();
+        for mode in &self.modes {
+            let handler = self.on_mode.clone();
+            let id = mode.id.clone();
+            let selected = mode.selected;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("{}-mode-{}", self.id, mode.id)))
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .text_size(ui_text_ms(cx))
+                    .map(|el| {
+                        if selected {
+                            el.bg(with_alpha(t.border_active, 0.22))
+                                .text_color(rgb(t.text_primary))
+                        } else {
+                            el.bg(rgb(t.bg_primary))
+                                .text_color(rgb(t.text_muted))
+                                .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_secondary)))
+                        }
+                    })
+                    .child(mode.label.clone())
+                    .on_click(move |_, window, cx| {
+                        if let Some(handler) = handler.as_ref() {
+                            cx.stop_propagation();
+                            handler(&id, window, cx);
+                        }
+                    }),
+            );
+        }
+        Some(
+            v_flex()
+                .w_full()
+                .gap(px(3.0))
+                .child(row)
+                .children(self.mode_hint.clone().map(|hint| {
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child(hint)
+                }))
+                .into_any_element(),
+        )
+    }
+}
+
 /// Every round button, so the row reads as one set.
 const BUTTON_SIZE: f32 = 28.0;
 const ICON_SIZE: f32 = 14.0;
@@ -443,6 +545,8 @@ impl RenderOnce for AgentLauncher {
             )
             .when(self.shows_buttons(), |d| d.child(self.render_buttons(cx)));
 
+        let modes = self.render_modes(cx);
+
         let sessions: Vec<AnyElement> = self
             .sessions
             .iter()
@@ -463,6 +567,7 @@ impl RenderOnce for AgentLauncher {
                     .bg(rgb(t.bg_secondary))
             })
             .child(header)
+            .children(modes)
             .children(sessions)
     }
 }

@@ -130,6 +130,8 @@ mod tests {
             task_ref: None,
             agent: None,
             spec_change: None,
+            knowledge_root: None,
+            task_draft: None,
             custom_session: None,
             id: id.to_string(),
             name: id.to_string(),

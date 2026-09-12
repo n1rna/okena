@@ -127,6 +127,85 @@ pub(super) fn switch_shell(
     spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, None, cx)
 }
 
+/// Restart a session's agent, resuming its conversation.
+///
+/// The agent's terminal is torn down — its tmux session with it, so the old
+/// process cannot keep running beside the resumed one — and respawned as the
+/// agent's resume command. A stopped session, with no terminal, gets one.
+///
+/// The session's own `default_shell` is left as the original launch: it still
+/// carries the conversation id every later restart resumes by, and "Start
+/// agent" still means a fresh start from the brief.
+pub(super) fn restart_agent(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    project_id: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let Some(project) = ws.project(&project_id) else {
+        return ActionResult::Err(format!("project not found: {project_id}"));
+    };
+    let Some(launch) = project.default_shell.clone() else {
+        return ActionResult::Err("this session was not started with an agent".into());
+    };
+    let shares_dir = ws.projects().iter().any(|p| {
+        p.id != project.id
+            && p.path == project.path
+            && p.worktree_info.is_none()
+            && p.is_any_agent_session()
+    });
+    if !super::agent_resume::resumable(&launch, shares_dir) {
+        return ActionResult::Err(if shares_dir {
+            "this session shares its directory with another agent and was started before \
+             okena named conversations, so resuming could pick up the wrong one — start it \
+             again instead"
+                .into()
+        } else {
+            "okena does not know how to resume this agent".into()
+        });
+    }
+    let Some(resume) = super::agent_resume::resume_shell(&launch, settings) else {
+        return ActionResult::Err("okena does not know how to resume this agent".into());
+    };
+    let current = project.layout.as_ref().and_then(|l| {
+        l.visible_terminal_id()
+            .or_else(|| l.collect_terminal_ids().into_iter().next())
+    });
+
+    let path = match current {
+        Some(terminal_id) => {
+            let Some(path) = find_terminal_path(ws, &project_id, &terminal_id) else {
+                return ActionResult::Err(format!("terminal not found: {terminal_id}"));
+            };
+            if terminals.lock().contains_key(&terminal_id) {
+                ws.remember_closing_terminal_owner(&project_id, &terminal_id);
+            }
+            backend.kill(&terminal_id);
+            terminals.lock().remove(&terminal_id);
+            // A new id means a new tmux session: reusing the old one would
+            // reattach to whatever it was running instead of resuming.
+            ws.clear_terminal_id(&project_id, &path, cx);
+            path
+        }
+        None => {
+            ws.add_terminal(focus_manager, &project_id, cx);
+            match ws
+                .project(&project_id)
+                .and_then(|p| p.layout.as_ref())
+                .and_then(|l| l.find_uninitialized_terminal_path())
+            {
+                Some(path) => path,
+                None => return ActionResult::Err("could not add a terminal to resume in".into()),
+            }
+        }
+    };
+    ws.set_terminal_shell(&project_id, &path, resume, cx);
+    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, None, cx)
+}
+
 pub(super) fn close(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,

@@ -246,6 +246,8 @@ mod tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            knowledge_root: None,
+            task_draft: None,
             custom_session: None,
             agent: None,
             folder_color: FolderColor::default(),
@@ -301,6 +303,8 @@ mod tests {
             display_key: task_key.to_string(),
             title: "t".to_string(),
             url: "http://x".to_string(),
+            parent_id: None,
+            parent_key: None,
         });
         p
     }

@@ -19,7 +19,8 @@ mod render;
 pub use detect::{AGENT_COMMANDS, detect_agent};
 pub use launch::{launch_option, launch_options, launcher_session, no_agent_option};
 pub use model::{
-    AgentSessionInfo, AgentSessionKind, RelatedWorkspace, SessionActivity, session_kind,
+    AgentSessionInfo, AgentSessionKind, RelatedAgent, RelatedWorkspace, SessionActivity,
+    session_kind,
 };
 
 use crate::workspace::focus::FocusManager;
@@ -105,6 +106,8 @@ pub struct AgentSessionPanel {
     /// that never show the terminal tab.
     remote_manager: Option<Entity<okena_remote_client::RemoteConnectionManager>>,
     terminal_focus: FocusHandle,
+    /// An instruction on its way, so a double click does not send it twice.
+    sending: bool,
 }
 
 struct EmbeddedTerminal {
@@ -134,6 +137,7 @@ impl AgentSessionPanel {
             terminal: None,
             remote_manager: None,
             terminal_focus: cx.focus_handle(),
+            sending: false,
         }
     }
 
@@ -164,7 +168,48 @@ impl AgentSessionPanel {
         // otherwise point at the newly-shown one.
         self.pending_delete = None;
         self.terminal = None;
+        self.sending = false;
         cx.notify();
+    }
+
+    /// Type `text` into the agent and submit it.
+    ///
+    /// Through the daemon rather than straight into the terminal: it knows
+    /// which terminal runs the agent, submits the way an agent's prompt needs,
+    /// and clears the "waiting on you" flag in the same step.
+    fn send_instruction(&mut self, text: String, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
+        if text.is_empty() || self.sending {
+            return;
+        }
+        self.sending = true;
+        cx.notify();
+        let client = self.client.clone();
+        let daemon_id =
+            okena_transport::client::strip_prefix(&self.project_id, client.connection_id());
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client.post_action(okena_core::api::ActionRequest::AgentSendInstruction {
+                    project_id: daemon_id,
+                    text,
+                })
+            })
+            .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.sending = false;
+                    match result {
+                        Ok(_) => {}
+                        Err(error) => crate::views::panels::toast::ToastManager::error(
+                            format!("Could not reach the agent: {error}"),
+                            cx,
+                        ),
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
     }
 
     /// Everything shown, read fresh from the workspace mirror each frame.
@@ -230,6 +275,35 @@ impl AgentSessionPanel {
             })
             .await;
 
+            if let Err(error) = result {
+                cx.update(|cx| {
+                    crate::views::panels::toast::ToastManager::error(
+                        format!("Could not restart the agent: {error}"),
+                        cx,
+                    );
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Restart the agent and resume its conversation.
+    ///
+    /// Unlike "Start agent", which begins again from the brief, this brings
+    /// back the conversation the agent was having — what it had read, decided
+    /// and been told. It is also how an agent picks up a rebuilt okena: the
+    /// restarted process reconnects okena's tools on the current build.
+    fn resume_agent(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let daemon_id =
+            okena_transport::client::strip_prefix(&self.project_id, client.connection_id());
+        cx.spawn(async move |_this, cx| {
+            let result = smol::unblock(move || {
+                client.post_action(okena_core::api::ActionRequest::AgentRestart {
+                    project_id: daemon_id,
+                })
+            })
+            .await;
             if let Err(error) = result {
                 cx.update(|cx| {
                     crate::views::panels::toast::ToastManager::error(

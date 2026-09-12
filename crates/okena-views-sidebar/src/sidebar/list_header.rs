@@ -34,11 +34,11 @@ struct HeaderIcon {
 use okena_workspace::state::WindowId;
 
 impl Sidebar {
-    /// Whether the main area is showing everything in the current list.
-    fn overview_is_active(&self, cx: &App) -> bool {
+    /// Whether the main area is showing everything in `list`.
+    pub(super) fn overview_is_active(&self, list: SidebarList, cx: &App) -> bool {
         let ws = self.workspace.read(cx);
         overview_is_showing(
-            self.list,
+            list,
             self.focus_manager.read(cx).focused_project_id().is_some(),
             ws.data()
                 .window(self.window_id)
@@ -47,13 +47,17 @@ impl Sidebar {
         )
     }
 
-    /// Show everything in the current list in the main area.
-    fn open_overview(&mut self, cx: &mut Context<Self>) {
+    /// Show everything in `list` in the main area.
+    ///
+    /// Reached from the HARNESS nav's Projects and Agents entries. It does not
+    /// switch the sidebar's list tab: which list you browse and what the main
+    /// area shows are separate choices.
+    pub(super) fn open_overview(&mut self, list: SidebarList, cx: &mut Context<Self>) {
         // A harness view covering the grid would make this look like it did
         // nothing, the same reason selecting a project leaves one.
         self.leave_harness_view(cx);
         let window_id = self.window_id;
-        let agents = self.list == SidebarList::Agents;
+        let agents = list == SidebarList::Agents;
         let workspace = self.workspace.clone();
         self.focus_manager.update(cx, |fm, cx| {
             workspace.update(cx, |ws, cx| {
@@ -171,7 +175,6 @@ impl Sidebar {
     /// The list header: selector, overview, overflow menu, add.
     pub(super) fn render_list_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let agents = self.list == SidebarList::Agents;
-        let overview_active = self.overview_is_active(cx);
         let overflow_open = self.header_menu == Some(SidebarHeaderMenu::Overflow);
         let create_open = self.header_menu == Some(SidebarHeaderMenu::Create);
         let entity = cx.entity().clone();
@@ -187,20 +190,9 @@ impl Sidebar {
                     .gap(px(4.0))
                     .pl(px(12.0))
                     .pr(px(8.0))
-                    .child(self.list_tab("PROJECTS", SidebarList::Projects, cx))
                     .child(self.list_tab("AGENTS", SidebarList::Agents, cx))
+                    .child(self.list_tab("PROJECTS", SidebarList::Projects, cx))
                     .child(div().flex_1().min_w_0())
-                    .child(self.header_icon(
-                        HeaderIcon {
-                            id: "list-overview",
-                            icon: "icons/select-all.svg",
-                            tooltip: "Show everything in the main area",
-                            active: overview_active,
-                            capture_bounds: None,
-                        },
-                        |this, _, _window, cx| this.open_overview(cx),
-                        cx,
-                    ))
                     .child(self.header_icon(
                         HeaderIcon {
                             id: "list-overflow",

@@ -41,8 +41,6 @@ pub(crate) struct TasksState {
     /// concurrent create, which would race on the worktree path and git's
     /// index lock.
     pub(crate) starting: Option<String>,
-    pub(crate) error: Option<String>,
-    pub(crate) status: Option<String>,
     pub(crate) api_key_input: Entity<SimpleInputState>,
     /// Share of the board width given to the Todo lane, 0..1.
     pub(crate) lane_fraction: f32,
@@ -75,6 +73,17 @@ pub(crate) struct TasksState {
     pub(crate) new_task_body: Entity<SimpleInputState>,
     /// Open "Start work" dialog, if any.
     pub(crate) start_form: Option<StartWorkForm>,
+    /// Starts waiting their turn.
+    ///
+    /// Creating a worktree takes git's index lock, so two at once race. A
+    /// fan-out is several starts asked for at once, which makes the queue the
+    /// only honest way to do it — the alternative was a guard that silently
+    /// dropped every start after the first.
+    pub(crate) queued_starts: Vec<QueuedStart>,
+    /// How the selected task should be split among agents, when it has
+    /// sub-tasks. Per-task, so switching tasks does not carry a choice made
+    /// about a different breakdown.
+    pub(crate) strategy: std::collections::HashMap<String, tasks_view::StartStrategy>,
     /// What the list is narrowed to. Empty means everything.
     pub(crate) filter: task_filter::TaskFilter,
     /// Whether the facet panel is open. Shut by default: the filters are a
@@ -112,11 +121,11 @@ pub(crate) struct SpecsState {
     pub(crate) content_error: Option<String>,
     /// The idea a new change is drafted from.
     pub(crate) idea_input: Entity<SimpleInputState>,
-    /// Whether the view is showing the new-change form instead of the specs.
+    /// Whether the document panel is showing the new-change form.
     ///
-    /// A full-view swap rather than a pane: configuring a session and reading
-    /// specs are separate tasks, and splitting the space between them served
-    /// neither well.
+    /// It stands where a document's text stands rather than taking the whole
+    /// view, which hid the tree you were adding to and the specs you are meant
+    /// to read before proposing.
     pub(crate) composing: bool,
     /// Directory name for the change being configured. Blank derives one from
     /// the prompt.
@@ -165,15 +174,52 @@ impl SpecsState {
     }
 }
 
+/// A start that has been asked for and is waiting for the one before it.
+pub(crate) struct QueuedStart {
+    pub(crate) task: Task,
+    pub(crate) project_ids: Vec<String>,
+    pub(crate) agent_command: String,
+    pub(crate) extras: StartExtras,
+}
+
+/// How a start differs from a plain one. Facts only: okena words them itself,
+/// from knowledge, so the client never composes what an agent is told.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StartExtras {
+    /// Brief the agent to split the task among sub-agents.
+    pub(crate) coordinate: bool,
+    /// Other sub-tasks being worked in parallel, for a fan-out.
+    pub(crate) siblings: Vec<String>,
+}
+
 /// State of the "Start work" dialog.
 ///
 /// Everything the run needs is decided here rather than inferred from the view,
 /// so what the user sees is exactly what gets dispatched.
 pub(crate) struct StartWorkForm {
     pub(crate) task: Task,
+    /// What the dialog is configuring. One dialog for every agent a task can
+    /// have, so starting work and breaking down offer the same things in the
+    /// same places rather than being two unrelated forms.
+    pub(crate) flow: LaunchFlow,
     pub(crate) project_ids: Vec<String>,
     /// Branch name, which also determines each worktree's directory name.
+    /// Only read for `LaunchFlow::Work`: a breakdown gets no worktrees.
     pub(crate) branch_input: Entity<SimpleInputState>,
+    /// Which template will brief the agent, once the daemon has said.
+    ///
+    /// Shown instead of an editable goal: the instructions live in knowledge,
+    /// and a text box here would be a second, unversioned place to keep them.
+    pub(crate) brief_source: Option<String>,
+}
+
+/// The agents a task's launch dialog can configure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaunchFlow {
+    /// Doing the task, in worktrees.
+    Work,
+    /// Breaking the task into sub-tasks, or refining the ones it has.
+    BreakDown,
 }
 
 /// Smallest share either lane may be squeezed to, so a drag can never collapse
@@ -195,11 +241,17 @@ pub struct HarnessPane {
         Rc<RefCell<Option<okena_views_terminal::layout::split_pane::DragState>>>,
     /// Board width from the last frame, used to turn a drag into a fraction.
     pub(crate) board_width: Rc<RefCell<f32>>,
+    /// Scroll position of each multi-line form field, by its element id.
+    ///
+    /// Held here rather than in the fields' own state because the scrolling is
+    /// the wrapper's job, not the input's — the input grows to fit its text
+    /// and knows nothing about the box it is shown in.
+    pub(crate) field_scrolls: RefCell<std::collections::HashMap<&'static str, gpui::ScrollHandle>>,
     pub(crate) section: HarnessSection,
     pub(crate) tasks: TasksState,
     pub(crate) specs: SpecsState,
     pub(crate) knowledge: knowledge_view::KnowledgeState,
-    /// The Knowledge view's "New with agent" form.
+    /// The Knowledge view's "New" form.
     pub(crate) knowledge_draft: knowledge_draft::DraftForm,
     /// Creating, renaming and deleting files in the Specs tree.
     pub(crate) spec_files: file_ops::FileOps,
@@ -229,11 +281,13 @@ impl HarnessPane {
         let new_task_title =
             cx.new(|cx| SimpleInputState::new(cx).placeholder("What needs doing?"));
         let new_task_body = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("What it covers, and what finishing it means")
+            SimpleInputState::new(cx)
+                .multiline()
+                .placeholder("What it covers, and what finishing it means")
         });
         let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("add-login"));
         let idea_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder(
+            SimpleInputState::new(cx).multiline().placeholder(
                 "e.g. let users sign in with Google, alongside the existing \
                      email flow",
             )
@@ -252,6 +306,7 @@ impl HarnessPane {
             terminals: ctx.terminals,
             active_drag: ctx.active_drag,
             board_width: Rc::new(RefCell::new(0.0)),
+            field_scrolls: RefCell::new(std::collections::HashMap::new()),
             section,
             tasks: TasksState {
                 provider: "linear".to_string(),
@@ -260,8 +315,6 @@ impl HarnessPane {
                 tasks: Vec::new(),
                 loading: false,
                 starting: None,
-                error: None,
-                status: None,
                 api_key_input,
                 lane_fraction: 0.5,
                 collapsed: std::collections::HashSet::new(),
@@ -275,6 +328,8 @@ impl HarnessPane {
                 new_task_title,
                 new_task_body,
                 start_form: None,
+                queued_starts: Vec::new(),
+                strategy: std::collections::HashMap::new(),
                 filter: task_filter::TaskFilter::default(),
                 filter_open: false,
                 sort: tasks_view::TaskSort::default(),
@@ -316,7 +371,7 @@ impl HarnessPane {
             }
             HarnessSection::Knowledge => {
                 pane.refresh_knowledge(cx);
-                // So "New with agent" defaults to the configured agent.
+                // So "New" defaults to the configured agent.
                 pane.refresh_default_agent(cx);
             }
         }

@@ -115,12 +115,49 @@ fn tool_definitions() -> Value {
         {
             "name": "okena_report_status",
             "description":
-                "Report what this agent is currently doing. Shown on the agent's \
-                 card in okena's Agents view. Replaces the previous status.",
+                "Report what this agent is doing and whether it needs the user. \
+                 Shown on the agent's panel in okena, and used to flag agents \
+                 that are waiting on someone. Replaces the previous report. \
+                 Call it whenever you stop to wait: with `needs_input` and a \
+                 `question` when you need a decision, or `ready_for_review` when \
+                 work is done and you are waiting to be told what next. Offer \
+                 the likely next steps as `suggestions` — for finished changes, \
+                 typically committing and opening a pull request — so the user \
+                 can pick one instead of typing it. Report `working` when you \
+                 carry on.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "status": { "type": "string", "description": "Short status line." }
+                    "status": { "type": "string", "description": "Short status line." },
+                    "state": {
+                        "type": "string",
+                        "enum": ["working", "needs_input", "ready_for_review", "blocked", "done"],
+                        "description":
+                            "Why you are where you are. Anything but `working` or \
+                             `done` flags you as waiting on the user."
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "What you need decided, when `needs_input`."
+                    },
+                    "suggestions": {
+                        "type": "array",
+                        "description":
+                            "Next steps the user can send you with one click. The \
+                             instruction is typed into your prompt verbatim.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Short button text." },
+                                "instruction": {
+                                    "type": "string",
+                                    "description": "The exact message you will receive."
+                                }
+                            },
+                            "required": ["label", "instruction"],
+                            "additionalProperties": false
+                        }
+                    }
                 },
                 "required": ["status"],
                 "additionalProperties": false
@@ -176,6 +213,43 @@ fn tool_definitions() -> Value {
                     }
                 },
                 "required": ["title"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_start_work",
+            "description":
+                "Start an agent on one or more sub-tasks, in their own worktrees. \
+                 Use this after deciding how a parent task splits: one call per \
+                 group of sub-tasks that can be built and tested together. The \
+                 first key is the group's own task; the rest are named to it as \
+                 part of the same piece of work.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "description":
+                            "Provider ids or keys of the sub-tasks in this group. \
+                             The first one is where the agent's worktree and branch \
+                             come from."
+                    },
+                    "note": {
+                        "type": "string",
+                        "description":
+                            "What this group is for, and what the neighbouring \
+                             groups are handling, so the agent does not go looking \
+                             for work that is somebody else's."
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description":
+                            "Agent to launch. Omit for okena's configured default."
+                    }
+                },
+                "required": ["tasks"],
                 "additionalProperties": false
             }
         },
@@ -244,6 +318,7 @@ fn call_tool(params: &Value) -> Result<Value, Value> {
         "okena_report_status" => report_status(&args),
         "okena_list_subtasks" => list_subtasks(&args),
         "okena_create_subtask" => create_subtask(&args),
+        "okena_start_work" => start_work(&args),
         "okena_register_asset" => register_asset(&args),
         other => {
             return Err(rpc_error(
@@ -357,6 +432,9 @@ fn report_status(args: &Value) -> Result<Value, String> {
             "action": "agent_report_status",
             "project_id": session.project.id,
             "status": status,
+            "state": args.get("state"),
+            "question": args.get("question"),
+            "suggestions": args.get("suggestions").cloned().unwrap_or_else(|| json!([])),
         })
         .to_string(),
     )?;
@@ -407,6 +485,109 @@ fn list_subtasks(args: &Value) -> Result<Value, String> {
         .to_string(),
     )?;
     Ok(json!({ "parent": task, "children": response }))
+}
+
+/// Start one agent on a group of sub-tasks.
+///
+/// The group is the point: a coordinating agent decides that two sub-tasks
+/// cannot be tested apart and hands both to one agent. okena starts the
+/// session on the first of them — that is where the branch and worktrees come
+/// from — and the rest reach the agent through the note, because a session
+/// belongs to one task even when the work does not.
+fn start_work(args: &Value) -> Result<Value, String> {
+    let tasks: Vec<String> = args
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let (primary, rest) = tasks
+        .split_first()
+        .ok_or("`tasks` needs at least one sub-task key")?;
+
+    let session = current_session()?;
+    let provider = session
+        .project
+        .task_ref
+        .as_ref()
+        .map(|t| t.id.provider.clone())
+        .unwrap_or_else(|| "linear".to_string());
+    // The repos this session was given. A sub-agent works in the same ones —
+    // it is a share of this task, not a different project.
+    let project_ids = sibling_repo_ids(&session)?;
+
+    // Only what the agent itself wrote. That the group also covers other
+    // sub-tasks is okena's to say, in its `group-note` partial.
+    let note = args
+        .get("note")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+
+    let token = super::ensure_token()?;
+    let response = super::api_action(
+        &token,
+        &json!({
+            "action": "task_start_work",
+            "provider": provider,
+            "task_external_id": primary,
+            "project_ids": project_ids,
+            "agent_command": args.get("agent").and_then(|a| a.as_str()),
+            "note": (!note.is_empty()).then_some(note),
+            "also": rest,
+        })
+        .to_string(),
+    )?;
+    Ok(json!({ "started": response, "task": primary, "also": rest }))
+}
+
+/// The repositories the current session's worktrees were cut from.
+///
+/// Read off the session's own workspace rather than asked for, so a
+/// coordinating agent does not have to know okena's project ids to start a
+/// sub-agent beside itself.
+fn sibling_repo_ids(session: &Session) -> Result<Vec<String>, String> {
+    let task = session.project.task_ref.as_ref().ok_or(
+        "this session is not linked to a task, so okena cannot tell which repos a \
+         sub-agent should work in",
+    )?;
+    let token = super::ensure_token()?;
+    let state = super::commands::fetch_state(&token)?;
+    let ids: Vec<String> = state
+        .projects
+        .iter()
+        .filter(|p| {
+            p.task_ref
+                .as_ref()
+                .is_some_and(|t| t.id.external_id == task.id.external_id)
+        })
+        .filter_map(|p| {
+            p.worktree_info
+                .as_ref()
+                .map(|w| w.parent_project_id.clone())
+        })
+        .collect();
+    let mut unique = Vec::new();
+    for id in ids {
+        if !unique.contains(&id) {
+            unique.push(id);
+        }
+    }
+    if unique.is_empty() {
+        return Err(
+            "this session has no worktrees, so okena cannot tell which repos a \
+                    sub-agent should work in"
+                .to_string(),
+        );
+    }
+    Ok(unique)
 }
 
 fn create_subtask(args: &Value) -> Result<Value, String> {
@@ -521,6 +702,7 @@ mod tests {
                 "okena_list_subtasks",
                 "okena_register_asset",
                 "okena_report_status",
+                "okena_start_work",
                 "okena_whoami",
             ]
         );

@@ -122,6 +122,15 @@ impl SimpleInputState {
         self
     }
 
+    /// Whether the caret sits at the very end of the text.
+    ///
+    /// What a scrolling wrapper needs to decide whether to follow it: someone
+    /// typing at the end wants the bottom kept in view, and someone editing
+    /// higher up does not want the view yanked away from them.
+    pub fn caret_at_end(&self) -> bool {
+        self.cursor_position >= self.value.chars().count()
+    }
+
     pub fn value(&self) -> &str {
         &self.value
     }

@@ -9,10 +9,12 @@
 //! worse than a slow one. Only the task↔worktree link persists, on the project.
 
 use super::ActionResult;
+use super::briefs::{self, PromptRoot};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{WindowId, Workspace};
 use okena_core::tasks::{TaskAuthState, TaskAuthStatusResponse, TaskProviderStatus};
+use okena_knowledge::prompts::{Flow, Vars};
 use okena_tasks::provider::{AuthStatus, Credential, TaskError, TaskProvider};
 use okena_terminal::TerminalsRegistry;
 use okena_terminal::backend::TerminalBackend;
@@ -221,11 +223,16 @@ fn substitute(arg: &str, task: &okena_core::tasks::Task, branch: &str) -> String
 ///
 /// `None` when no agent command is configured — starting work then just creates
 /// worktrees and leaves an ordinary shell. Launching an AI agent is opt-in.
+#[allow(clippy::too_many_arguments)]
 fn agent_shell(
     settings: &AppSettings,
     override_command: Option<&str>,
     task: &okena_core::tasks::Task,
     branch: &str,
+    context: &[(String, String)],
+    note: Option<&str>,
+    children: Option<&str>,
+    prompts: PromptRoot,
 ) -> Option<okena_terminal::shell_config::ShellType> {
     // An explicit override wins, including an explicit empty string, which is
     // how a caller says "worktrees only" despite a configured default.
@@ -240,12 +247,25 @@ fn agent_shell(
     if command.is_empty() {
         return None;
     }
-    let mut args: Vec<String> = settings
-        .harness
-        .agent_args
-        .iter()
-        .map(|a| substitute(a, task, branch))
-        .collect();
+    // Configured arguments win: they are an explicit instruction about how to
+    // launch this agent, and more specific than any template. Without them the
+    // agent used to start on a task having been told nothing at all.
+    let mut args: Vec<String> =
+        match task_brief(settings, task, branch, context, note, children, prompts) {
+            Some(brief) => super::specs::prompt_args(&command, &brief),
+            None => settings
+                .harness
+                .agent_args
+                .iter()
+                .map(|a| substitute(a, task, branch))
+                .collect(),
+        };
+    // Named, so a restart can resume this exact conversation. Before the
+    // brief rather than after: a flag after a positional prompt is not
+    // guaranteed to be read as a flag by every agent CLI.
+    let mut named = super::agent_resume::session_args(&command);
+    named.append(&mut args);
+    let mut args = named;
     // Hand the agent okena's MCP server so it can ask what task it is on and
     // report back without the user configuring anything.
     args.extend(super::agent_mcp::injection_args(&command, settings));
@@ -282,6 +302,19 @@ fn resolve_agent_root(
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Where a task's agent session runs.
+///
+/// Inside the worktree when there is exactly one — that is the checkout the
+/// agent is changing, and rooting it anywhere else makes every path it reads
+/// relative to the wrong place. Above them when there are several, so it can
+/// reach them all; `above` is that directory, already resolved.
+fn session_root(worktree_paths: &[String], above: Option<String>) -> Option<String> {
+    match worktree_paths {
+        [only] => Some(only.clone()),
+        _ => above,
+    }
+}
+
 /// Start work on a task across one or more projects.
 ///
 /// Order matters: worktrees are created first and links written second, so a
@@ -297,6 +330,10 @@ pub(super) fn start_work(
     agent_root: Option<String>,
     branch_override: Option<String>,
     agent_command: Option<String>,
+    note: Option<String>,
+    coordinate: bool,
+    also: Vec<String>,
+    siblings: Vec<String>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -347,7 +384,34 @@ pub(super) fn start_work(
         ));
     }
 
+    // Resolved once: every launch below briefs from the same root, and
+    // discovery walks the disk.
+    let prompts = briefs::prompt_root(&ws.data.projects, settings);
     let task_ref = okena_core::tasks::TaskRef::from(&task);
+
+    // Everything the agent is told beyond its task. The agent-written note
+    // arrives as-is — an agent wrote those words. okena's own notes are
+    // partials, so how it describes a group or a fan-out is editable.
+    let note = compose_note(note, &also, &siblings, &task, &prompts);
+
+    // A coordinator is told its children. Fetched here rather than handed in
+    // by the client: the provider's list is the authority, and the client's
+    // may be a refresh behind a breakdown that just landed.
+    let children_listed = if coordinate {
+        let id = okena_core::tasks::TaskId::new(provider.clone(), task.id.external_id.clone());
+        match p.list_children(&id) {
+            Ok(children) if !children.is_empty() => Some(list_children(&children, &prompts)),
+            Ok(_) => {
+                return ActionResult::Err(format!(
+                    "{} has no sub-tasks to split",
+                    task.display_key
+                ));
+            }
+            Err(e) => return ActionResult::Err(describe(e)),
+        }
+    } else {
+        None
+    };
     let first_project_path = ws
         .project(&project_ids[0])
         .map(|p| p.path.clone())
@@ -371,12 +435,12 @@ pub(super) fn start_work(
             // New work by definition. An existing branch surfaces as a create
             // error rather than silently attaching to someone else's work.
             true,
-            // Single-project work runs the agent in the worktree itself; with
-            // several projects the agent session below is its home instead, so
-            // the per-worktree terminals stay ordinary shells for the human.
-            (project_ids.len() == 1)
-                .then(|| agent_shell(settings, agent_command.as_deref(), &task, &branch))
-                .flatten(),
+            // Never the agent. A worktree copies its repo's layout, so an
+            // agent set as the worktree's shell started once per terminal in
+            // that layout — four identical agents for a four-pane repo — and
+            // again in every terminal opened there later. The worktree stays
+            // the human's; the agent gets the session below.
+            None,
             backend,
             terminals,
             settings,
@@ -429,18 +493,50 @@ pub(super) fn start_work(
 
     // ── Agent session ────────────────────────────────────────────────────────
     //
-    // Only for a multi-project task: with a single project the worktree itself
-    // is the working directory, and an extra project rooted above it would just
-    // be clutter.
+    // Always its own project, for one repo as much as for several. A session
+    // is what okena recognizes as an agent: it is listed under AGENTS, nested
+    // under its task's parent, and found by the task's launcher. An agent run
+    // inside a worktree was none of those things.
+    //
+    // The brief names the worktrees, not the repos they were cut from — the
+    // agent is meant to change the checkout, and pointing it at the original
+    // repo sent it to the wrong directory.
+    let worktrees: Vec<(String, String)> = created
+        .iter()
+        .filter_map(|c| {
+            let name = c.get("project")?.as_str()?.to_string();
+            let path = c.get("path")?.as_str()?.to_string();
+            Some((name, path))
+        })
+        .collect();
+    let shell = agent_shell(
+        settings,
+        agent_command.as_deref(),
+        &task,
+        &branch,
+        &worktrees,
+        note.as_deref(),
+        children_listed.as_deref(),
+        prompts.clone(),
+    );
     let mut agent_session: Option<serde_json::Value> = None;
-    if created.len() > 1
-        && let Some(root) = resolve_agent_root(agent_root, settings, &first_project_path)
+    // No agent and one worktree: nothing would run in a session, so there is
+    // no session. Several worktrees still get one — it is the place above them.
+    let wants_session = shell.is_some() || created.len() > 1;
+    let worktree_paths: Vec<String> = worktrees.iter().map(|(_, p)| p.clone()).collect();
+    if wants_session
+        && let Some(root) = session_root(
+            &worktree_paths,
+            resolve_agent_root(agent_root, settings, &first_project_path),
+        )
     {
-        let name = format!("{} (agent)", task.display_key);
+        // No "(agent)" suffix: the sidebar badges the row with what it is,
+        // and a name repeating the badge said the same thing twice.
+        let name = task.display_key.clone();
         match ws.add_project(
             name.clone(),
             root.clone(),
-            // With a terminal: this is where the agent runs.
+            // One terminal: this is where the agent runs, once.
             true,
             &settings.hooks,
             window_id,
@@ -450,7 +546,7 @@ pub(super) fn start_work(
                 link_task(ws, &session_id, &task_ref);
                 // Set before spawning: the terminal reads the project's default
                 // shell as it starts.
-                if let Some(shell) = agent_shell(settings, agent_command.as_deref(), &task, &branch)
+                if let Some(shell) = shell
                     && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id)
                 {
                     p.default_shell = Some(shell);
@@ -491,6 +587,70 @@ pub(super) fn start_work(
         "failed": failed,
         "agent_session": agent_session,
     })))
+}
+
+/// The note an agent starts with: what an agent wrote, then what okena adds.
+fn compose_note(
+    written: Option<String>,
+    also: &[String],
+    siblings: &[String],
+    task: &okena_core::tasks::Task,
+    prompts: &PromptRoot,
+) -> Option<String> {
+    let mut parts: Vec<String> = written
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .into_iter()
+        .collect();
+    if !also.is_empty() {
+        parts.push(briefs::fragment(
+            "group-note",
+            prompts.as_ref(),
+            &Vars::from([("also", also.join(", "))]),
+        ));
+    }
+    if !siblings.is_empty() {
+        let parent = task
+            .parent_key
+            .clone()
+            .unwrap_or_else(|| "the parent task".to_string());
+        parts.push(briefs::fragment(
+            "fan-out-note",
+            prompts.as_ref(),
+            &Vars::from([("parent", parent), ("siblings", siblings.join(", "))]),
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+/// A coordinator's sub-tasks, one `coordinate-child` partial each.
+///
+/// The first lines of a description ride along: enough to judge whether two
+/// children touch the same thing, not so much that the list stops being one.
+fn list_children(children: &[okena_core::tasks::Task], prompts: &PromptRoot) -> String {
+    children
+        .iter()
+        .map(|c| {
+            let summary = c
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .map(|d| format!("\n  {}", d.lines().take(3).collect::<Vec<_>>().join(" ")))
+                .unwrap_or_default();
+            briefs::fragment(
+                "coordinate-child",
+                prompts.as_ref(),
+                &Vars::from([
+                    ("key", c.display_key.clone()),
+                    ("kind", c.kind.label().to_string()),
+                    ("title", c.title.clone()),
+                    ("summary", summary),
+                ]),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Point a project at the task it was created for.
@@ -672,14 +832,14 @@ pub(super) mod agent_shell_tests {
     fn no_agent_configured_means_no_launch() {
         // Starting work must not spawn an AI agent unless asked to.
         let s = AppSettings::default();
-        assert!(agent_shell(&s, None, &task(), "b").is_none());
+        assert!(agent_shell(&s, None, &task(), "b", &[], None, None, None).is_none());
     }
 
     #[test]
     fn blank_command_is_treated_as_unset() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("   ".into());
-        assert!(agent_shell(&s, None, &task(), "b").is_none());
+        assert!(agent_shell(&s, None, &task(), "b", &[], None, None, None).is_none());
     }
 
     #[test]
@@ -687,23 +847,86 @@ pub(super) mod agent_shell_tests {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
         s.harness.agent_args = vec!["Work on {key}: {title}".into()];
-        match agent_shell(&s, None, &task(), "b1").expect("configured") {
+        match agent_shell(&s, None, &task(), "b1", &[], None, None, None).expect("configured") {
             ShellType::Custom { path, args } => {
                 assert_eq!(path, "claude");
-                assert_eq!(args, vec!["Work on LIN-42: Ship the harness".to_string()]);
+                // Configured arguments are passed through untouched, after the
+                // conversation id okena names so a restart can resume it.
+                assert_eq!(args[0], "--session-id");
+                assert!(uuid::Uuid::parse_str(&args[1]).is_ok(), "{args:?}");
+                assert_eq!(args[2..], ["Work on LIN-42: Ship the harness".to_string()]);
             }
             other => panic!("expected a custom shell, got {other:?}"),
         }
     }
 
     #[test]
-    fn command_without_args_still_launches() {
+    fn a_single_worktree_is_where_its_agent_runs() {
+        // The agent changes that checkout; rooting it above would make every
+        // relative path it reads point at the wrong place.
+        assert_eq!(
+            super::session_root(&["/wt/qbl-1".to_string()], Some("/p".to_string())),
+            Some("/wt/qbl-1".to_string())
+        );
+    }
+
+    #[test]
+    fn several_worktrees_put_the_agent_above_them() {
+        let paths = ["/wt/a".to_string(), "/wt/b".to_string()];
+        assert_eq!(
+            super::session_root(&paths, Some("/wt".to_string())),
+            Some("/wt".to_string())
+        );
+        assert_eq!(super::session_root(&paths, None), None);
+    }
+
+    #[test]
+    fn a_command_with_no_configured_args_gets_the_task_start_brief() {
+        // This used to launch the agent having told it nothing at all: with no
+        // `agent_args` there was no prompt, and the agent opened in a worktree
+        // with no idea what it was for. The template fills that gap.
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("codex".into());
-        match agent_shell(&s, None, &task(), "b").expect("configured") {
+        match agent_shell(&s, None, &task(), "b1", &[], None, None, None).expect("configured") {
             ShellType::Custom { path, args } => {
                 assert_eq!(path, "codex");
-                assert!(args.is_empty());
+                let brief = args.first().expect("a brief was passed");
+                for needle in ["LIN-42", "Ship the harness", "b1"] {
+                    assert!(
+                        brief.contains(needle),
+                        "brief is missing {needle}:\n{brief}"
+                    );
+                }
+            }
+            other => panic!("expected a custom shell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configured_args_still_win_over_the_template() {
+        // They are an explicit instruction about how to launch this agent, and
+        // more specific than any template. Somebody who set them must keep
+        // getting exactly them.
+        let mut s = AppSettings::default();
+        s.harness.agent_command = Some("codex".into());
+        s.harness.agent_args = vec!["--task".into(), "{key}".into()];
+        match agent_shell(&s, None, &task(), "b1", &[], None, None, None).expect("configured") {
+            ShellType::Custom { args, .. } => assert_eq!(args, ["--task", "LIN-42"]),
+            other => panic!("expected a custom shell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_brief_names_the_repos_the_agent_was_given() {
+        // A multi-repo task opens the agent above the worktrees, where "the
+        // project" is ambiguous until they are listed.
+        let mut s = AppSettings::default();
+        s.harness.agent_command = Some("codex".into());
+        let given = [("okena".to_string(), "/p/okena".to_string())];
+        match agent_shell(&s, None, &task(), "b1", &given, None, None, None).expect("configured") {
+            ShellType::Custom { args, .. } => {
+                let brief = args.first().expect("a brief was passed");
+                assert!(brief.contains("- okena (/p/okena)"), "{brief}");
             }
             other => panic!("expected a custom shell, got {other:?}"),
         }
@@ -767,17 +990,177 @@ pub(super) fn report_status(
     ws: &mut Workspace,
     project_id: String,
     status: String,
+    reported: Option<okena_core::harness::AgentState>,
+    question: Option<String>,
+    suggestions: Vec<okena_core::harness::AgentSuggestion>,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let status = status.trim().to_string();
     let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id) else {
         return ActionResult::Err(format!("project not found: {project_id}"));
     };
-    let state = p.agent.get_or_insert_with(Default::default);
-    // An empty status clears it rather than displaying a blank line.
-    state.status = (!status.is_empty()).then_some(status);
+    let agent = p.agent.get_or_insert_with(Default::default);
+    apply_report(agent, &status, reported, question, suggestions);
     ws.notify_data(cx);
     ActionResult::Ok(Some(serde_json::json!({ "project_id": project_id })))
+}
+
+/// Replace what an agent last said about itself.
+///
+/// A report replaces the previous one whole. Leaving an old question or old
+/// suggestions in place when the agent reports that it is working again would
+/// keep offering you answers to a question it has stopped asking.
+fn apply_report(
+    agent: &mut okena_core::harness::AgentSessionState,
+    status: &str,
+    reported: Option<okena_core::harness::AgentState>,
+    question: Option<String>,
+    suggestions: Vec<okena_core::harness::AgentSuggestion>,
+) {
+    let status = status.trim();
+    // An empty status clears it rather than displaying a blank line.
+    agent.status = (!status.is_empty()).then(|| status.to_string());
+    agent.state = reported;
+    agent.question = question
+        .map(|q| q.trim().to_string())
+        .filter(|q| !q.is_empty());
+    agent.suggestions = suggestions
+        .into_iter()
+        .filter(|s| !s.label.trim().is_empty() && !s.instruction.trim().is_empty())
+        .collect();
+}
+
+/// Type `text` into a session's agent and submit it.
+///
+/// The Enter goes separately, a moment after the text. A terminal agent reads
+/// a burst of characters arriving together as a paste, and a carriage return
+/// inside a paste is a newline in the prompt rather than a submit — sent in
+/// one write, the instruction would sit typed but unsent.
+pub(super) fn send_instruction(
+    ws: &mut Workspace,
+    project_id: String,
+    text: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return ActionResult::Err("say what to tell the agent first".into());
+    }
+    let Some(project) = ws.project(&project_id) else {
+        return ActionResult::Err(format!("project not found: {project_id}"));
+    };
+    // A session runs its agent in its one terminal; the visible one is the
+    // right choice if a session ever grows more.
+    let Some(terminal_id) = project.layout.as_ref().and_then(|l| {
+        l.visible_terminal_id()
+            .or_else(|| l.collect_terminal_ids().into_iter().next())
+    }) else {
+        return ActionResult::Err("this session has no terminal to send to".into());
+    };
+    let Some(terminal) = super::ensure_terminal(&terminal_id, terminals, backend, ws, settings)
+    else {
+        return ActionResult::Err(format!("terminal not found: {terminal_id}"));
+    };
+    terminal.send_input(&text);
+    let submit = terminal.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(SUBMIT_DELAY_MS));
+        submit.send_bytes(b"\r");
+    });
+
+    // Answered: it is no longer waiting on you. Without this the attention
+    // flag would stay until the agent next reported, as though the answer had
+    // not arrived. The status line stays — it is still the last thing it said.
+    if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id)
+        && let Some(agent) = p.agent.as_mut()
+    {
+        agent.state = Some(okena_core::harness::AgentState::Working);
+        agent.question = None;
+        agent.suggestions.clear();
+    }
+    ws.notify_data(cx);
+    ActionResult::Ok(Some(
+        serde_json::json!({ "project_id": project_id, "terminal_id": terminal_id }),
+    ))
+}
+
+/// How long after the text the Enter follows. Long enough that the two do not
+/// arrive as one burst, short enough to feel like a single action.
+const SUBMIT_DELAY_MS: u64 = 150;
+
+#[cfg(test)]
+mod report_tests {
+    use super::apply_report;
+    use okena_core::harness::{AgentSessionState, AgentState, AgentSuggestion};
+
+    fn suggestion(label: &str) -> AgentSuggestion {
+        AgentSuggestion {
+            label: label.into(),
+            instruction: format!("please {label}"),
+        }
+    }
+
+    #[test]
+    fn a_report_carries_why_the_agent_stopped() {
+        let mut agent = AgentSessionState::default();
+        apply_report(
+            &mut agent,
+            "changes ready",
+            Some(AgentState::ReadyForReview),
+            None,
+            vec![suggestion("commit and open a PR")],
+        );
+        assert_eq!(agent.state, Some(AgentState::ReadyForReview));
+        assert_eq!(agent.suggestions.len(), 1);
+    }
+
+    #[test]
+    fn a_new_report_drops_the_old_question_and_suggestions() {
+        // Otherwise okena keeps offering answers to a question the agent has
+        // stopped asking.
+        let mut agent = AgentSessionState::default();
+        apply_report(
+            &mut agent,
+            "which db?",
+            Some(AgentState::NeedsInput),
+            Some("Postgres or SQLite?".into()),
+            vec![suggestion("use postgres")],
+        );
+        apply_report(
+            &mut agent,
+            "migrating",
+            Some(AgentState::Working),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(agent.question, None);
+        assert!(agent.suggestions.is_empty());
+        assert_eq!(agent.status.as_deref(), Some("migrating"));
+    }
+
+    #[test]
+    fn a_suggestion_with_nothing_to_send_is_dropped() {
+        // A button that types nothing into the agent is a button that does
+        // nothing.
+        let mut agent = AgentSessionState::default();
+        apply_report(
+            &mut agent,
+            "s",
+            Some(AgentState::ReadyForReview),
+            Some("   ".into()),
+            vec![
+                AgentSuggestion {
+                    label: "Commit".into(),
+                    instruction: "  ".into(),
+                },
+                suggestion("open a PR"),
+            ],
+        );
+        assert_eq!(agent.suggestions.len(), 1);
+        assert_eq!(agent.question, None, "a blank question is no question");
+    }
 }
 
 #[cfg(test)]
@@ -791,7 +1174,9 @@ mod agent_override_tests {
     fn an_explicit_command_overrides_the_configured_one() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        match agent_shell(&s, Some("codex"), &task(), "b").expect("override applies") {
+        match agent_shell(&s, Some("codex"), &task(), "b", &[], None, None, None)
+            .expect("override applies")
+        {
             ShellType::Custom { path, .. } => assert_eq!(path, "codex"),
             other => panic!("expected a custom shell, got {other:?}"),
         }
@@ -802,15 +1187,15 @@ mod agent_override_tests {
         // "Worktrees only" must be expressible even when a default is set.
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        assert!(agent_shell(&s, Some(""), &task(), "b").is_none());
-        assert!(agent_shell(&s, Some("   "), &task(), "b").is_none());
+        assert!(agent_shell(&s, Some(""), &task(), "b", &[], None, None, None).is_none());
+        assert!(agent_shell(&s, Some("   "), &task(), "b", &[], None, None, None).is_none());
     }
 
     #[test]
     fn no_override_falls_back_to_the_setting() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        match agent_shell(&s, None, &task(), "b").expect("falls back") {
+        match agent_shell(&s, None, &task(), "b", &[], None, None, None).expect("falls back") {
             ShellType::Custom { path, .. } => assert_eq!(path, "claude"),
             other => panic!("expected a custom shell, got {other:?}"),
         }
@@ -831,6 +1216,7 @@ pub(super) fn start_custom_session(
     root: String,
     project_ids: Vec<String>,
     agent_command: Option<String>,
+    task_draft: Option<String>,
     task: Option<okena_core::tasks::TaskRef>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
@@ -863,7 +1249,7 @@ pub(super) fn start_custom_session(
     }
 
     let label = session_label(&name, &goal);
-    let display = format!("{label} (agent)");
+    let display = label.clone();
 
     let session_id = match ws.add_project(
         display.clone(),
@@ -886,9 +1272,16 @@ pub(super) fn start_custom_session(
         // does not read as work in progress) that is nonetheless about a task,
         // so the task can list it and the agent's own MCP calls resolve it.
         p.task_ref = task;
+        // Or about a task that does not exist yet, which the list shows as a
+        // placeholder until the agent files it.
+        p.task_draft = task_draft;
     }
 
-    let brief = custom_brief(&goal, &context);
+    let brief = custom_brief(
+        &goal,
+        &context,
+        briefs::prompt_root(&ws.data.projects, settings),
+    );
     if let Some(shell) = custom_agent_shell(settings, agent_command.as_deref(), &brief)
         && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id)
     {
@@ -993,16 +1386,60 @@ fn session_label(name: &str, goal: &str) -> String {
 /// The goal verbatim, plus the projects the user pointed the agent at. The
 /// paths matter: the session may be rooted above them, where "the project" is
 /// ambiguous until they are named.
-fn custom_brief(goal: &str, context: &[(String, String)]) -> String {
-    if context.is_empty() {
-        return goal.to_string();
+fn custom_brief(goal: &str, context: &[(String, String)], prompts: PromptRoot) -> String {
+    let mut vars = Vars::new();
+    vars.insert("goal", goal.to_string());
+    vars.insert(
+        "projects",
+        briefs::project_block("given-projects", context, prompts.as_ref()),
+    );
+    briefs::build(Flow::AgentSession, prompts.as_ref(), &vars)
+        .rendered
+        .text
+}
+
+/// The opening prompt for starting work on a task.
+///
+/// `None` when `harness.agent_args` is configured: those are an explicit
+/// instruction about how to launch this agent, and they are more specific than
+/// any template. Without them, every agent used to start on a task with no
+/// prompt at all.
+fn task_brief(
+    settings: &AppSettings,
+    task: &okena_core::tasks::Task,
+    branch: &str,
+    context: &[(String, String)],
+    note: Option<&str>,
+    children: Option<&str>,
+    prompts: PromptRoot,
+) -> Option<String> {
+    if !settings.harness.agent_args.is_empty() {
+        return None;
     }
-    let list = context
-        .iter()
-        .map(|(name, path)| format!("- {name} ({path})"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("{goal}\n\nProjects you were given:\n{list}")
+    let mut vars = Vars::new();
+    vars.insert("key", task.display_key.clone());
+    vars.insert("title", task.title.clone());
+    vars.insert("url", task.url.clone());
+    vars.insert("branch", branch.to_string());
+    vars.insert(
+        "description",
+        briefs::block(task.description.as_deref().unwrap_or_default()),
+    );
+    vars.insert(
+        "projects",
+        briefs::project_block("given-worktrees", context, prompts.as_ref()),
+    );
+    vars.insert("note", briefs::block(note.unwrap_or_default()));
+    // A coordinator is briefed to split the work rather than do it, so it gets
+    // that flow's template — not the work brief with the split tucked in.
+    let flow = match children {
+        Some(listed) => {
+            vars.insert("children", listed.to_string());
+            Flow::TaskCoordinate
+        }
+        None => Flow::TaskStart,
+    };
+    Some(briefs::build(flow, prompts.as_ref(), &vars).rendered.text)
 }
 
 /// Shell for a custom agent session.
@@ -1022,7 +1459,9 @@ fn custom_agent_shell(
     if command.is_empty() {
         return None;
     }
-    let mut args = super::specs::prompt_args(&command, brief);
+    // Named first, so a restart can resume this exact conversation.
+    let mut args = super::agent_resume::session_args(&command);
+    args.extend(super::specs::prompt_args(&command, brief));
     args.extend(super::agent_mcp::injection_args(&command, settings));
     Some(okena_terminal::shell_config::ShellType::Custom {
         path: command,
@@ -1393,14 +1832,19 @@ mod custom_session_tests {
     fn the_brief_names_the_projects_it_was_given() {
         // The session may be rooted above them, where "the project" is
         // ambiguous until they are named.
-        let b = custom_brief("Do the thing", &ctx(&[("okena", "/p/okena")]));
+        let b = custom_brief("Do the thing", &ctx(&[("okena", "/p/okena")]), None);
         assert!(b.starts_with("Do the thing"));
         assert!(b.contains("/p/okena"), "the path is what disambiguates");
     }
 
     #[test]
-    fn a_brief_without_projects_is_just_the_goal() {
-        assert_eq!(custom_brief("Do the thing", &[]), "Do the thing");
+    fn a_brief_without_projects_is_the_goal_and_the_reporting_rule() {
+        // No project list when none were given — and, like every brief, the
+        // shared instruction to report when it stops to wait.
+        let b = custom_brief("Do the thing", &[], None);
+        let reporting = okena_knowledge::prompts::defaults::partial_body("reporting")
+            .expect("reporting partial");
+        assert_eq!(b, format!("Do the thing\n\n{reporting}"));
     }
 }
 
