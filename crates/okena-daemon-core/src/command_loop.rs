@@ -2974,11 +2974,53 @@ pub async fn daemon_command_loop(
                 });
                 continue;
             }
+            // ── OpenSpec store git: off the queue and the workspace lock ──
+            // The listing runs `git status` in every store checkout; fetch,
+            // pull and push reach the network, and commit runs the user's
+            // hooks. None of them changes the workspace, so discovery's sources
+            // are copied under a brief lock, as knowledge's are.
+            RemoteCommand::Action(
+                action @ (ActionRequest::SpecStores
+                | ActionRequest::SpecStoreFetch { .. }
+                | ActionRequest::SpecStorePull { .. }
+                | ActionRequest::SpecStoreCommit { .. }
+                | ActionRequest::SpecStorePush { .. }),
+            ) => {
+                let app_settings = settings.lock().clone();
+                let sources = okena_app_core::workspace::actions::execute::spec_sources(
+                    &workspace.lock().data.projects,
+                    &app_settings,
+                );
+                let worker_runtime = runtime.clone();
+                let _task = runtime.spawn(async move {
+                    let result = worker_runtime
+                        .spawn_blocking(move || {
+                            okena_app_core::workspace::actions::execute::execute_spec_git_action(
+                                &action,
+                                &sources,
+                                &app_settings,
+                            )
+                            .map(|r| r.into_command_result())
+                            .unwrap_or_else(|| {
+                                CommandResult::Err("not an OpenSpec git action".into())
+                            })
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            CommandResult::Err(format!("OpenSpec git worker failed: {e}"))
+                        });
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
+                    }
+                });
+                continue;
+            }
             // ── Knowledge: off the queue and the workspace lock ──
             // Every knowledge action runs git — `status` in each store even for
-            // a listing, `clone` and `fetch` over the network — and none of them
-            // changes the workspace. The project list is copied under a brief
-            // lock; the work runs on the blocking pool with a settings snapshot.
+            // a listing, `clone`, `fetch` and `push` over the network, `commit`
+            // with the user's hooks — and none of them changes the workspace.
+            // The project list is copied under a brief lock; the work runs on
+            // the blocking pool with a settings snapshot.
             RemoteCommand::Action(
                 action @ (ActionRequest::KnowledgeStores
                 | ActionRequest::KnowledgeTree { .. }
@@ -2989,7 +3031,9 @@ pub async fn daemon_command_loop(
                 | ActionRequest::KnowledgeStoreUnregister { .. }
                 | ActionRequest::KnowledgeStoreSetup { .. }
                 | ActionRequest::KnowledgeStoreFetch { .. }
-                | ActionRequest::KnowledgeStorePull { .. }),
+                | ActionRequest::KnowledgeStorePull { .. }
+                | ActionRequest::KnowledgeStoreCommit { .. }
+                | ActionRequest::KnowledgeStorePush { .. }),
             ) => {
                 let app_settings = settings.lock().clone();
                 let projects =

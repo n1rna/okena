@@ -41,15 +41,26 @@ pub fn init_repository(path: &Path) -> GitResult<()> {
 ///
 /// Anything else the user had staged stays out of the commit and stays staged.
 /// When the commit itself fails (a hook, signing) the paths are unstaged again,
-/// so a failure leaves the index as it was.
+/// so a failure leaves the index as it was. Pathspecs are literal: a file
+/// named with `*` or `?` matches only itself.
 pub fn commit_paths(path: &Path, message: &str, pathspecs: &[&str]) -> GitResult<()> {
     let p = path_str(path)?;
     require_success(safe_output(
-        command("git").args(["-C", p, "add", "--"]).args(pathspecs),
+        command("git")
+            .args(["-C", p, "--literal-pathspecs", "add", "--"])
+            .args(pathspecs),
     )?)?;
     let committed = safe_output(
         command("git")
-            .args(["-C", p, "commit", "-m", message, "--"])
+            .args([
+                "-C",
+                p,
+                "--literal-pathspecs",
+                "commit",
+                "-m",
+                message,
+                "--",
+            ])
             .args(pathspecs),
     )
     .map_err(Into::into)
@@ -59,7 +70,7 @@ pub fn commit_paths(path: &Path, message: &str, pathspecs: &[&str]) -> GitResult
         // the caller removing the repository is the cleanup that matters.
         let _ = safe_output(
             command("git")
-                .args(["-C", p, "reset", "-q", "--"])
+                .args(["-C", p, "--literal-pathspecs", "reset", "-q", "--"])
                 .args(pathspecs),
         );
     }

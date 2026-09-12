@@ -29,7 +29,11 @@ fn dirs(settings: &AppSettings) -> OpenSpecDirs {
     OpenSpecDirs::detect(specs.data_dir.as_deref(), specs.config_dir.as_deref())
 }
 
-fn sources(projects: &[ProjectData], settings: &AppSettings) -> Sources {
+/// What discovery looks at: the registry, the projects and the folders.
+///
+/// Copied out of the workspace, so the daemon can run discovery — and the git
+/// a listing runs in every store — without holding the workspace lock.
+pub fn spec_sources(projects: &[ProjectData], settings: &AppSettings) -> Sources {
     let specs = &settings.harness.specs;
     let projects = if specs.projects {
         projects
@@ -53,10 +57,6 @@ fn sources(projects: &[ProjectData], settings: &AppSettings) -> Sources {
     }
 }
 
-fn snapshot(projects: &[ProjectData], settings: &AppSettings) -> SpecStores {
-    discover::discover(&dirs(settings), &sources(projects, settings))
-}
-
 fn to_result(value: serde_json::Result<serde_json::Value>, what: &str) -> ActionResult {
     match value {
         Ok(v) => ActionResult::Ok(Some(v)),
@@ -66,10 +66,86 @@ fn to_result(value: serde_json::Result<serde_json::Value>, what: &str) -> Action
 
 /// Every root okena can see.
 pub(super) fn stores(ws: &Workspace, settings: &AppSettings) -> ActionResult {
+    listing_result(&spec_sources(&ws.data.projects, settings), settings)
+}
+
+fn listing_result(sources: &Sources, settings: &AppSettings) -> ActionResult {
     to_result(
-        serde_json::to_value(snapshot(&ws.data.projects, settings)),
+        serde_json::to_value(listing(sources, settings)),
         "spec stores",
     )
+}
+
+/// Every root, with sync state on each store and folder at the top of a git
+/// checkout. A project root carries none: its project's own git owns it.
+fn listing(sources: &Sources, settings: &AppSettings) -> SpecStores {
+    let mut stores = discover::discover(&dirs(settings), sources);
+    for root in stores
+        .roots
+        .iter_mut()
+        .filter(|r| r.kind != SpecRootKind::Project && r.healthy)
+    {
+        root.git = okena_git::store::status(Path::new(&root.path));
+    }
+    stores
+}
+
+/// Run an OpenSpec action that runs git in store checkouts — the listing
+/// (`git status` in every store), fetch, pull, commit and push — against
+/// discovery sources copied out of the workspace. `None` for any other action.
+///
+/// None of them touches the workspace, so the daemon runs them on its blocking
+/// pool rather than under the workspace lock.
+pub fn execute_spec_git_action(
+    action: &okena_core::api::ActionRequest,
+    sources: &Sources,
+    settings: &AppSettings,
+) -> Option<ActionResult> {
+    use okena_core::api::ActionRequest;
+    use okena_git::store;
+    Some(match action {
+        ActionRequest::SpecStores => listing_result(sources, settings),
+        ActionRequest::SpecStoreFetch { root } => sync(sources, settings, root, |path| {
+            store::fetch(path).map(|()| store::status(path).unwrap_or_default())
+        }),
+        ActionRequest::SpecStorePull { root } => sync(sources, settings, root, store::pull),
+        ActionRequest::SpecStoreCommit {
+            root,
+            paths,
+            message,
+        } => sync(sources, settings, root, |path| {
+            store::commit(path, paths, message)
+        }),
+        ActionRequest::SpecStorePush { root } => sync(sources, settings, root, store::push),
+        _ => return None,
+    })
+}
+
+/// Run `op` in the checkout of the store or folder root `key` names. Replies
+/// with its sync state after.
+fn sync(
+    sources: &Sources,
+    settings: &AppSettings,
+    key: &str,
+    op: impl FnOnce(
+        &Path,
+    )
+        -> Result<okena_core::store_git::StoreGitStatus, okena_git::store::StoreGitError>,
+) -> ActionResult {
+    let root = match resolve_root_in(sources, settings, Some(key)) {
+        Ok(r) => r,
+        Err(e) => return ActionResult::Err(e),
+    };
+    if root.kind == SpecRootKind::Project {
+        return ActionResult::Err(format!(
+            "`{}` is part of a project, not a store; commit and sync it with the project's own git",
+            root.name
+        ));
+    }
+    match op(Path::new(&root.path)) {
+        Ok(status) => to_result(serde_json::to_value(status), "sync state"),
+        Err(e) => ActionResult::Err(e.to_string()),
+    }
 }
 
 /// A root the client named, checked against what discovery found — never a
@@ -79,7 +155,15 @@ fn resolve_root(
     settings: &AppSettings,
     key: Option<&str>,
 ) -> Result<SpecRoot, String> {
-    let stores = snapshot(projects, settings);
+    resolve_root_in(&spec_sources(projects, settings), settings, key)
+}
+
+fn resolve_root_in(
+    sources: &Sources,
+    settings: &AppSettings,
+    key: Option<&str>,
+) -> Result<SpecRoot, String> {
+    let stores = discover::discover(&dirs(settings), sources);
     match key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(key) => stores.root(key).cloned().ok_or_else(|| {
             format!(
@@ -831,6 +915,7 @@ mod tests {
             schema: None,
             healthy: true,
             is_default: false,
+            git: None,
             references: vec![okena_core::specs::SpecReference {
                 id: "design-system".into(),
                 remote: None,

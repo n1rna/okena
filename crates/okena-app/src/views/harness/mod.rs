@@ -12,6 +12,7 @@ mod markdown;
 mod new_task_form;
 mod sections;
 mod specs_view;
+mod store_git;
 mod task_filter;
 mod tasks_view;
 
@@ -126,6 +127,8 @@ pub(crate) struct SpecsState {
     /// Change names whose documents are hidden. Collapsed rather than expanded
     /// state, so a fresh view shows everything.
     pub(crate) collapsed: std::collections::HashSet<String>,
+    /// The open store's fetch, pull, commit and push.
+    pub(crate) git: store_git::StoreGitPanel,
 }
 
 impl SpecsState {
@@ -230,6 +233,7 @@ impl HarnessPane {
                      email flow",
             )
         });
+        let specs_git = store_git::StoreGitPanel::new(cx);
         let knowledge = knowledge_view::KnowledgeState::new(cx);
         let knowledge_draft = knowledge_draft::DraftForm::new(cx);
         let mut pane = Self {
@@ -286,6 +290,7 @@ impl HarnessPane {
                 draft_root: None,
                 drafting: false,
                 collapsed: std::collections::HashSet::new(),
+                git: specs_git,
             },
             knowledge,
             knowledge_draft,

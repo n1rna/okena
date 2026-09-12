@@ -152,6 +152,11 @@ pub struct SpecRoot {
     /// This store is OpenSpec's machine-wide `defaultStore`.
     #[serde(default)]
     pub is_default: bool,
+    /// Sync state and changed files, when the root is a store or folder at the
+    /// top of a git checkout. A project root has none: its project's own git
+    /// owns it. Filled in by the daemon's listing, not by discovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<crate::store_git::StoreGitStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<SpecReference>,
     /// okena projects that resolve to this root through a `store:` pointer.
@@ -353,6 +358,7 @@ mod tests {
             schema: None,
             healthy,
             is_default,
+            git: None,
             references: Vec::new(),
             used_by: Vec::new(),
             status: Vec::new(),

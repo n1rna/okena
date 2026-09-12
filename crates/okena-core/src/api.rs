@@ -1257,8 +1257,9 @@ pub enum ActionRequest {
     // settings. The daemon reads and writes those files itself
     // (`okena-openspec`), so nothing here needs the `openspec` CLI installed,
     // and whatever okena writes the CLI reads back.
-    /// Every OpenSpec root okena can see, with health, references, pointers
-    /// and the machine `defaultStore` — an `okena_core::specs::SpecStores`.
+    /// Every OpenSpec root okena can see, with health, references, pointers,
+    /// sync state on each store and folder checkout, and the machine
+    /// `defaultStore` — an `okena_core::specs::SpecStores`.
     SpecStores,
     /// One root's planning tree: capabilities, active changes and the archive.
     ///
@@ -1325,6 +1326,35 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
+    /// `git fetch` in a store or folder root's checkout. Replies with its sync
+    /// state — an `okena_core::store_git::StoreGitStatus`. A project root is
+    /// refused: its project's own git owns it.
+    SpecStoreFetch {
+        root: String,
+    },
+    /// Fetch, then fast-forward a store or folder checkout. Anything but a
+    /// fast-forward of a clean checkout is refused with the reason. Replies
+    /// with the sync state.
+    SpecStorePull {
+        root: String,
+    },
+    /// Commit exactly `paths` in a store or folder checkout with `message`.
+    ///
+    /// Every path must be one the sync state lists as changed — relative to
+    /// the checkout, as listed — so a client cannot commit anything it was not
+    /// shown. Anything else, staged or not, stays out of the commit. Nothing is
+    /// pushed. Replies with the sync state after.
+    SpecStoreCommit {
+        root: String,
+        paths: Vec<String>,
+        message: String,
+    },
+    /// Push a store or folder checkout's branch to its upstream: a step of its
+    /// own, so a failed push keeps the commit. Replies with the sync state
+    /// after.
+    SpecStorePush {
+        root: String,
+    },
     /// Draft a new OpenSpec change from a free-text idea, with an agent.
     ///
     /// Scaffolds `openspec/changes/<slug>/` in the chosen root — the
@@ -1356,9 +1386,10 @@ pub enum ActionRequest {
     //
     // Knowledge stores (ADR-0003) are git repositories of engineering docs,
     // skills, agents and prompt templates, registered in okena's per-profile
-    // registry, plus the kind folders projects carry. The daemon reads, clones
-    // and fast-forwards them through `okena-knowledge`; none of these touch the
-    // workspace, so the daemon runs them off its lock.
+    // registry, plus the kind folders projects carry. The daemon reads and
+    // clones them through `okena-knowledge`, and fast-forwards, commits and
+    // pushes them with the store git OpenSpec stores share (ADR-0004); none of
+    // these touch the workspace, so the daemon runs them off its lock.
     /// Every knowledge root okena can see, with health, sync state and project
     /// pointers — an `okena_core::knowledge::KnowledgeStores`.
     KnowledgeStores,
@@ -1429,8 +1460,25 @@ pub enum ActionRequest {
         root: String,
     },
     /// Fetch, then fast-forward a store's checkout. Anything but a
-    /// fast-forward is refused with the reason. Replies with the sync state.
+    /// fast-forward of a clean checkout is refused with the reason. Replies
+    /// with the sync state.
     KnowledgeStorePull {
+        root: String,
+    },
+    /// Commit exactly `paths` in a store's checkout with `message`.
+    ///
+    /// Every path must be one the sync state lists as changed — relative to
+    /// the checkout, as listed — so a client cannot commit anything it was not
+    /// shown. Anything else, staged or not, stays out of the commit. Nothing is
+    /// pushed. Replies with the sync state after.
+    KnowledgeStoreCommit {
+        root: String,
+        paths: Vec<String>,
+        message: String,
+    },
+    /// Push a store's checked-out branch to its upstream: a step of its own,
+    /// so a failed push keeps the commit. Replies with the sync state after.
+    KnowledgeStorePush {
         root: String,
     },
     /// Open an agent session in a knowledge root, briefed to add to or update

@@ -138,37 +138,9 @@ pub enum KnowledgeRootKind {
     Project,
 }
 
-/// A checkout's sync state, from local git only — nothing here touches the
-/// network, so it is only as fresh as the last fetch ([`Self::fetched_at`]).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KnowledgeGitStatus {
-    /// Checked-out branch; `None` when HEAD is detached.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    /// The branch's upstream, e.g. `origin/main`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upstream: Option<String>,
-    #[serde(default)]
-    pub ahead: u32,
-    #[serde(default)]
-    pub behind: u32,
-    /// Uncommitted changes, staged or not, including untracked files.
-    #[serde(default)]
-    pub dirty: bool,
-    /// When the checkout last fetched, in Unix seconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fetched_at: Option<u64>,
-}
-
-impl KnowledgeGitStatus {
-    /// Whether a fast-forward pull has anything to do and can do it: there is
-    /// an upstream, it has commits we lack, and we have none it lacks. Pull
-    /// refuses anything else, so the view disables it rather than offering a
-    /// button that can only fail.
-    pub fn can_fast_forward(&self) -> bool {
-        self.upstream.is_some() && self.behind > 0 && self.ahead == 0
-    }
-}
+/// A store checkout's sync state and changed files. The shape is shared with
+/// OpenSpec stores (ADR-0004).
+pub type KnowledgeGitStatus = crate::store_git::StoreGitStatus;
 
 /// How many entries of each kind a root holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -366,20 +338,6 @@ mod tests {
     }
 
     #[test]
-    fn fast_forward_needs_an_upstream_and_only_incoming_commits() {
-        let status = |upstream: bool, ahead, behind| KnowledgeGitStatus {
-            upstream: upstream.then(|| "origin/main".to_string()),
-            ahead,
-            behind,
-            ..Default::default()
-        };
-        assert!(status(true, 0, 3).can_fast_forward());
-        assert!(!status(true, 0, 0).can_fast_forward(), "nothing to pull");
-        assert!(!status(true, 1, 3).can_fast_forward(), "diverged");
-        assert!(!status(false, 0, 3).can_fast_forward(), "no upstream");
-    }
-
-    #[test]
     fn stores_and_trees_round_trip() {
         let mut store = root("store:acme-eng", KnowledgeRootKind::Store, true);
         store.store_id = Some("acme-eng".into());
@@ -390,6 +348,13 @@ mod tests {
             ahead: 0,
             behind: 3,
             dirty: true,
+            changes: vec![crate::store_git::StoreChange {
+                path: "docs/ci/pipeline.md".into(),
+                kind: crate::store_git::StoreChangeKind::Modified,
+                staged: false,
+                unstaged: true,
+            }],
+            changes_truncated: false,
             fetched_at: Some(1_757_500_000),
         });
         store.counts = KnowledgeCounts {

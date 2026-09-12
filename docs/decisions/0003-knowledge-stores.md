@@ -1,7 +1,7 @@
 ---
 id: 0003
 title: Knowledge stores are kind-folder git repos with an okena-owned registry
-status: accepted
+status: accepted; commit and push superseded by 0004
 date: 2026-09-10
 ---
 
