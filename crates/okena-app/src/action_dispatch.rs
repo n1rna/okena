@@ -922,6 +922,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             agent_root,
             branch,
             agent_command,
+            note,
+            coordinate,
+            also,
+            siblings,
         } => ActionRequest::TaskStartWork {
             provider,
             task_external_id,
@@ -932,6 +936,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             agent_root,
             branch,
             agent_command,
+            note,
+            coordinate,
+            also,
+            siblings,
         },
         ActionRequest::AgentRegisterAsset {
             project_id,
@@ -948,12 +956,28 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             // okena id — nothing to translate.
             project,
         },
-        ActionRequest::AgentReportStatus { project_id, status } => {
-            ActionRequest::AgentReportStatus {
+        ActionRequest::AgentReportStatus {
+            project_id,
+            status,
+            state,
+            question,
+            suggestions,
+        } => ActionRequest::AgentReportStatus {
+            project_id: s(&project_id),
+            status,
+            state,
+            question,
+            suggestions,
+        },
+        ActionRequest::AgentSendInstruction { project_id, text } => {
+            ActionRequest::AgentSendInstruction {
                 project_id: s(&project_id),
-                status,
+                text,
             }
         }
+        ActionRequest::AgentRestart { project_id } => ActionRequest::AgentRestart {
+            project_id: s(&project_id),
+        },
         ActionRequest::TaskDeleteWorkspace { project_id, force } => {
             ActionRequest::TaskDeleteWorkspace {
                 project_id: s(&project_id),
@@ -967,6 +991,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             root,
             project_ids,
             agent_command,
+            task_draft,
             task,
         } => ActionRequest::AgentStartSession {
             goal,
@@ -974,10 +999,13 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             root,
             project_ids: project_ids.iter().map(|id| s(id)).collect(),
             agent_command,
+            task_draft,
             task,
         },
         // Spec actions carry no ids — root keys and paths are the daemon's
         // own, discovered and checked on its side.
+        // Carries no ids, so nothing to strip.
+        ActionRequest::PromptRender { flow, vars } => ActionRequest::PromptRender { flow, vars },
         ActionRequest::SpecStores => ActionRequest::SpecStores,
         ActionRequest::SpecsTree { root } => ActionRequest::SpecsTree { root },
         ActionRequest::SpecRead { root, path } => ActionRequest::SpecRead { root, path },

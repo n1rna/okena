@@ -23,6 +23,7 @@ mod focusable;
 pub mod header_buttons;
 pub mod icon_action_button;
 pub mod icon_button;
+pub mod identity_color;
 pub mod input;
 pub mod list_row;
 pub mod menu;

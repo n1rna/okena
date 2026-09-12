@@ -9,6 +9,7 @@
 // unreachable for well-formed types, and callers cannot recover anyway.
 #![allow(clippy::expect_used)]
 
+mod briefs;
 mod document_files;
 mod files;
 mod git;
@@ -17,6 +18,8 @@ mod project;
 // Public so the Agents view can tell whether a session was handed okena's
 // MCP config, rather than guessing from the agent's name.
 pub mod agent_mcp;
+// Public so the agent panel can tell whether a session can be resumed.
+pub mod agent_resume;
 mod review;
 mod session;
 mod specs;
@@ -674,9 +677,25 @@ pub fn execute_action(
             url,
             project,
         } => tasks::register_asset(ws, project_id, kind, title, url, project, cx),
-        ActionRequest::AgentReportStatus { project_id, status } => {
-            tasks::report_status(ws, project_id, status, cx)
+        ActionRequest::AgentReportStatus {
+            project_id,
+            status,
+            state,
+            question,
+            suggestions,
+        } => tasks::report_status(ws, project_id, status, state, question, suggestions, cx),
+        ActionRequest::AgentSendInstruction { project_id, text } => {
+            tasks::send_instruction(ws, project_id, text, backend, terminals, settings, cx)
         }
+        ActionRequest::AgentRestart { project_id } => terminal::restart_agent(
+            ws,
+            focus_manager,
+            project_id,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
         ActionRequest::TaskDeleteWorkspace { project_id, force } => {
             tasks::delete_workspace(ws, focus_manager, project_id, force, settings, cx)
         }
@@ -686,6 +705,7 @@ pub fn execute_action(
             root,
             project_ids,
             agent_command,
+            task_draft,
             task,
         } => tasks::start_custom_session(
             ws,
@@ -695,12 +715,16 @@ pub fn execute_action(
             root,
             project_ids,
             agent_command,
+            task_draft,
             task,
             backend,
             terminals,
             settings,
             cx,
         ),
+        ActionRequest::PromptRender { flow, vars } => {
+            briefs::render_action(&flow, &vars, &ws.data.projects, settings)
+        }
         // ── Engineering harness: OpenSpec ──────────────────────────────────
         // The daemon runs the listing and the store git off the workspace lock
         // before they reach this match; these arms keep any other caller of
@@ -835,6 +859,10 @@ pub fn execute_action(
             agent_root,
             branch,
             agent_command,
+            note,
+            coordinate,
+            also,
+            siblings,
         } => tasks::start_work(
             ws,
             window_id,
@@ -844,6 +872,10 @@ pub fn execute_action(
             agent_root,
             branch,
             agent_command,
+            note,
+            coordinate,
+            also,
+            siblings,
             backend,
             terminals,
             settings,
@@ -1581,6 +1613,8 @@ mod reconnect_shell_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            knowledge_root: None,
+            task_draft: None,
             custom_session: None,
             agent: None,
             folder_color: Default::default(),

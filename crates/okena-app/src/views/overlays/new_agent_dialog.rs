@@ -160,6 +160,9 @@ impl NewAgentDialog {
                         // An explicit empty string is the daemon's "no agent,
                         // just a shell".
                         agent_command: Some(agent_command),
+                        // This dialog configures a session about work that
+                        // exists; drafting a task is its own flow.
+                        task_draft: None,
                         task,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing session result".to_string()))

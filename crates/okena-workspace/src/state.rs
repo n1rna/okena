@@ -22,8 +22,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub use okena_layout::{LayoutNode, SplitDirection};
+pub use okena_state::agent_tree;
 pub use okena_state::{
-    AgentSortMode, DropZone, FocusedTerminalState, FolderData, HookTerminalEntry,
+    AgentRole, AgentSortMode, DropZone, FocusedTerminalState, FolderData, HookTerminalEntry,
     HookTerminalStatus, PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds,
     WindowId, WindowState, WorkspaceData, WorktreeMetadata, now_unix_seconds,
 };
@@ -2829,6 +2830,8 @@ mod workspace_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            knowledge_root: None,
+            task_draft: None,
             custom_session: None,
             agent: None,
             folder_color: FolderColor::default(),
@@ -3880,6 +3883,8 @@ mod gpui_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            knowledge_root: None,
+            task_draft: None,
             custom_session: None,
             agent: None,
             folder_color: FolderColor::default(),
@@ -4057,6 +4062,8 @@ mod gpui_tests {
                     task_ref: None,
                     agent: None,
                     spec_change: None,
+                    knowledge_root: None,
+                    task_draft: None,
                     custom_session: None,
                     id: "p1".to_string(),
                     name: "proj-p1".to_string(),

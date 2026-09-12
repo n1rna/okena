@@ -1,21 +1,21 @@
-//! "New with agent" in the Knowledge view: say what to write, pick where and
-//! with which agent, and okena opens an agent session there briefed on the
-//! store layout.
+//! "New" in the Knowledge view: say what to write, pick where and with which
+//! agent, and okena opens an agent session there briefed on the store layout.
 //!
-//! A full-view form rather than a pane, like drafting a spec change:
-//! configuring a session and reading knowledge are separate tasks.
+//! It stands in the entry panel rather than taking the whole view, the way a
+//! new spec change and a new task do. Taking the view hid the entries you are
+//! meant to read before adding to them.
 
 use super::HarnessPane;
 use crate::theme::theme;
 use crate::ui::tokens::ui_text;
-use crate::views::components::{SimpleInput, SimpleInputState};
+use crate::views::components::SimpleInputState;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
 use okena_core::knowledge::{KnowledgeRootKind, KnowledgeStores};
 
-/// State of the "New with agent" form.
+/// State of the Knowledge view's "New" form.
 pub(crate) struct DraftForm {
     pub(crate) open: bool,
     pub(crate) request: Entity<SimpleInputState>,
@@ -47,10 +47,22 @@ impl DraftForm {
 
 impl HarnessPane {
     pub(super) fn open_knowledge_draft(&mut self, cx: &mut Context<Self>) {
+        // The form takes the entry panel, so nothing is selected while it is
+        // open: a highlighted entry whose text you cannot see reads as a bug.
+        // Unsaved edits to it are kept, and come back when it is reopened.
+        self.knowledge.clear_selection();
         self.knowledge_draft.open = true;
         self.knowledge_draft.root = None;
         self.knowledge_draft.error = None;
         self.knowledge_draft.notice = None;
+        cx.notify();
+    }
+
+    /// Shut the form, leaving the panel on the root overview.
+    pub(super) fn close_knowledge_draft(&mut self, cx: &mut Context<Self>) {
+        self.knowledge_draft.open = false;
+        self.knowledge_draft.root = None;
+        self.knowledge_draft.error = None;
         cx.notify();
     }
 
@@ -163,17 +175,42 @@ impl HarnessPane {
 
         let starting = self.knowledge_draft.starting;
         let mut body = v_flex()
-            .w_full()
-            .max_w(px(720.0))
-            .gap(px(18.0))
+            .id("knowledge-draft-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap(px(14.0))
+            .px(px(16.0))
+            .py(px(14.0))
             .child(
                 v_flex()
                     .gap(px(4.0))
                     .child(
-                        div()
-                            .text_size(ui_text(15.0, cx))
-                            .text_color(rgb(t.text_primary))
-                            .child("Write with an agent"),
+                        // Cancel belongs with the heading, not beside the
+                        // launcher: leaving the form and starting an agent are
+                        // opposite intents, and putting them side by side made
+                        // the destructive one a neighbour of the one you came
+                        // to press.
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(ui_text(15.0, cx))
+                                    .text_color(rgb(t.text_primary))
+                                    .child("Write with an agent"),
+                            )
+                            .child(self.small_button(
+                                "knowledge-draft-cancel",
+                                "Cancel",
+                                cx.listener(|this, _, _window, cx| {
+                                    this.close_knowledge_draft(cx);
+                                }),
+                                cx,
+                            )),
                     )
                     .child(self.field_hint(
                         "okena opens an agent session in the knowledge root, briefed on its \
@@ -193,17 +230,12 @@ impl HarnessPane {
                 v_flex()
                     .gap(px(5.0))
                     .child(self.field_label("What to write", cx))
-                    .child(
-                        okena_ui::input::input_container(&t, None)
-                            .w_full()
-                            .h(px(140.0))
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .child(
-                                SimpleInput::new(&self.knowledge_draft.request)
-                                    .text_size(ui_text(13.0, cx)),
-                            ),
-                    )
+                    .child(self.multiline_field(
+                        "knowledge-request",
+                        &self.knowledge_draft.request,
+                        110.0,
+                        cx,
+                    ))
                     .child(self.field_hint(
                         "A new doc, a skill, a subagent or a template — or what to change in \
                          one. This is the agent's brief, so context beats brevity.",
@@ -234,31 +266,15 @@ impl HarnessPane {
             this.start_knowledge_draft(command.to_string(), cx);
         }));
 
-        body = body.child(
-            h_flex()
-                .items_center()
-                .gap(px(12.0))
-                .child(self.small_button(
-                    "knowledge-draft-cancel",
-                    "Cancel",
-                    cx.listener(|this, _, _window, cx| {
-                        this.knowledge_draft.open = false;
-                        this.knowledge_draft.root = None;
-                        this.knowledge_draft.error = None;
-                        cx.notify();
-                    }),
-                    cx,
-                ))
-                .child(div().flex_1().min_w_0().child(launcher)),
-        );
+        body = body.child(launcher);
 
         v_flex()
             .id("knowledge-draft-form")
-            .size_full()
-            .overflow_y_scroll()
-            .items_center()
-            .px(px(24.0))
-            .py(px(24.0))
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .border_l_1()
+            .border_color(rgb(t.border))
             .child(body)
             .into_any_element()
     }

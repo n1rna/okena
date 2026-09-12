@@ -235,6 +235,17 @@ pub struct KnowledgeConfig {
     /// `~/knowledge`, beside OpenSpec's `~/openspec` convention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_dir: Option<String>,
+
+    /// Knowledge root whose `templates/` folder supplies okena's launch
+    /// briefs, by store key.
+    ///
+    /// Unset means okena's own built-in templates, which are also written to
+    /// the `okena-defaults` store so they can be read and copied. A store that
+    /// is set but has no template for a given flow falls through to the
+    /// built-in for that flow alone — overriding one brief must not mean
+    /// supplying all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompts: Option<String>,
 }
 
 impl Default for KnowledgeConfig {
@@ -243,11 +254,23 @@ impl Default for KnowledgeConfig {
             // Must match the serde default above.
             projects: true,
             clone_dir: None,
+            prompts: None,
         }
     }
 }
 
 impl KnowledgeConfig {
+    /// The store key briefs are read from, if one is configured.
+    ///
+    /// Blank counts as unset, because that is what clearing a text field in
+    /// settings leaves behind.
+    pub fn prompt_root(&self) -> Option<&str> {
+        self.prompts
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+    }
+
     /// The clone folder with `~` expanded; blank counts as unset.
     pub fn clone_dir(&self) -> std::path::PathBuf {
         let dir = self

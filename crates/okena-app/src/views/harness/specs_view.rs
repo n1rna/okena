@@ -164,6 +164,10 @@ impl HarnessPane {
         if self.specs.selected.as_deref() != Some(path.as_str()) {
             self.specs.leave_selection();
         }
+        // The form and a document share the one panel, so picking a document
+        // is how you leave the form. Without this, clicking one while drafting
+        // looked like nothing had happened.
+        self.specs.composing = false;
         self.specs.selected = Some(path.clone());
         self.specs.content_error = None;
         cx.notify();
@@ -526,7 +530,7 @@ impl HarnessPane {
         col.into_any_element()
     }
 
-    fn section_label(&self, label: &str, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn section_label(&self, label: &str, cx: &Context<Self>) -> AnyElement {
         let t = theme(cx);
         div()
             .px(px(6.0))
@@ -632,7 +636,26 @@ impl HarnessPane {
                 col = col.child(self.render_change(change, cx));
             }
         }
-        col.into_any_element()
+        // Last, under the material they are writing: what is running matters
+        // less than what exists, right up until you want to know.
+        col.children(self.render_related_agents(self.spec_session_ids(cx), cx))
+            .into_any_element()
+    }
+
+    /// Sessions drafting a spec change, newest last.
+    ///
+    /// Every spec session, not only ones in the open root: a session is marked
+    /// with the change it drafts rather than the root it sits in, and a user
+    /// switching roots to check on an agent would have to guess which one it
+    /// was under.
+    fn spec_session_ids(&self, cx: &App) -> Vec<String> {
+        self.workspace
+            .read(cx)
+            .projects()
+            .iter()
+            .filter(|p| p.is_spec_session())
+            .map(|p| p.id.clone())
+            .collect()
     }
 
     pub(super) fn fact_row(&self, label: &str, value: String, cx: &Context<Self>) -> AnyElement {
@@ -860,7 +883,6 @@ impl HarnessPane {
 
     /// Toolbar actions for the Specs view.
     fn spec_actions(&self, stores: &SpecStores, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let t = theme(cx);
         let mut actions = vec![
             self.toolbar_icon(
                 "specs-settings",
@@ -882,29 +904,14 @@ impl HarnessPane {
         ];
         // Only offered where a change could go.
         if stores.roots.iter().any(|r| r.healthy) {
-            actions.push(
-                div()
-                    .id("spec-new-change")
-                    .cursor_pointer()
-                    .flex_shrink_0()
-                    .px(px(12.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.button_primary_bg))
-                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                    .text_size(ui_text_md(cx))
-                    .text_color(rgb(t.button_primary_fg))
-                    .child("New change")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.specs.composing = true;
-                            this.specs.error = None;
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-            );
+            actions.push(self.primary_button(
+                "spec-new-change",
+                "New",
+                cx.listener(move |this, _, _window, cx| {
+                    this.open_new_change(cx);
+                }),
+                cx,
+            ));
         }
         actions
     }
@@ -994,17 +1001,42 @@ impl HarnessPane {
 
         let drafting = self.specs.drafting;
         let mut body = v_flex()
-            .w_full()
-            .max_w(px(720.0))
-            .gap(px(18.0))
+            .id("spec-new-change-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap(px(14.0))
+            .px(px(16.0))
+            .py(px(14.0))
             .child(
                 v_flex()
                     .gap(px(4.0))
                     .child(
-                        div()
-                            .text_size(ui_text(15.0, cx))
-                            .text_color(rgb(t.text_primary))
-                            .child("New change"),
+                        // Cancel belongs with the heading, not beside the
+                        // launcher: leaving the form and starting an agent are
+                        // opposite intents, and putting them side by side made
+                        // the destructive one a neighbour of the one you came
+                        // to press.
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(ui_text(15.0, cx))
+                                    .text_color(rgb(t.text_primary))
+                                    .child("New change"),
+                            )
+                            .child(self.small_button(
+                                "spec-cancel",
+                                "Cancel",
+                                cx.listener(move |this, _, _window, cx| {
+                                    this.close_new_change(cx);
+                                }),
+                                cx,
+                            )),
                     )
                     .child(self.field_hint(
                         "okena scaffolds the change under openspec/changes/ — the \
@@ -1045,17 +1077,7 @@ impl HarnessPane {
                 v_flex()
                     .gap(px(5.0))
                     .child(self.field_label("Prompt", cx))
-                    .child(
-                        okena_ui::input::input_container(&t, None)
-                            .w_full()
-                            .h(px(140.0))
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .child(
-                                SimpleInput::new(&self.specs.idea_input)
-                                    .text_size(ui_text(13.0, cx)),
-                            ),
-                    )
+                    .child(self.multiline_field("spec-idea", &self.specs.idea_input, 110.0, cx))
                     .child(self.field_hint(
                         "What the change is for. This is what the agent is \
                          briefed with, so context beats brevity.",
@@ -1090,33 +1112,36 @@ impl HarnessPane {
             this.draft_spec_change(command.to_string(), cx);
         }));
 
-        body = body.child(
-            h_flex()
-                .items_center()
-                .gap(px(12.0))
-                .child(self.small_button(
-                    "spec-cancel",
-                    "Cancel",
-                    cx.listener(move |this, _, _window, cx| {
-                        this.specs.composing = false;
-                        this.specs.draft_root = None;
-                        this.specs.error = None;
-                        cx.notify();
-                    }),
-                    cx,
-                ))
-                .child(div().flex_1().min_w_0().child(launcher)),
-        );
+        body = body.child(launcher);
 
         v_flex()
             .id("spec-new-change-form")
-            .size_full()
-            .overflow_y_scroll()
-            .items_center()
-            .px(px(24.0))
-            .py(px(24.0))
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .border_l_1()
+            .border_color(rgb(t.border))
             .child(body)
             .into_any_element()
+    }
+
+    /// Shut the new-change form, leaving the panel on the root overview.
+    fn close_new_change(&mut self, cx: &mut Context<Self>) {
+        self.specs.composing = false;
+        self.specs.draft_root = None;
+        self.specs.error = None;
+        cx.notify();
+    }
+
+    /// Open the new-change form in the document panel.
+    fn open_new_change(&mut self, cx: &mut Context<Self>) {
+        // The form takes the panel, so nothing is selected while it is open: a
+        // highlighted document whose text you cannot see reads as a bug.
+        // Unsaved edits to it are kept, and come back when it is reopened.
+        self.specs.leave_selection();
+        self.specs.composing = true;
+        self.specs.error = None;
+        cx.notify();
     }
 
     /// Nothing discovered: say where okena looked and where to fix it.
@@ -1178,15 +1203,6 @@ impl HarnessPane {
                 .into_any_element();
         };
 
-        // The new-change form takes the whole view: configuring a session is a
-        // separate task from reading specs, and splitting the space between
-        // them served neither.
-        if self.specs.composing {
-            return root
-                .child(self.render_new_change_form(&stores, cx))
-                .into_any_element();
-        }
-
         let actions = self.spec_actions(&stores, cx);
         let mut root = root.child(self.render_toolbar(actions, cx));
         if let Some(err) = self.specs.error.clone() {
@@ -1211,7 +1227,14 @@ impl HarnessPane {
                 .w_full()
                 .bg(rgb(t.bg_primary))
                 .child(self.render_spec_tree(&stores, cx))
-                .child(self.render_spec_document(open_root.as_ref(), cx)),
+                // The form stands where a document's text stands. It used to
+                // take the whole view, which hid the tree you were adding to
+                // and the specs you were meant to be reading before proposing.
+                .child(if self.specs.composing {
+                    self.render_new_change_form(&stores, cx)
+                } else {
+                    self.render_spec_document(open_root.as_ref(), cx)
+                }),
         )
         .into_any_element()
     }

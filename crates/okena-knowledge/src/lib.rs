@@ -14,7 +14,8 @@
 //! - [`discover`]: every root on this machine, with health;
 //! - [`git`]: clone, plus the store git shared with OpenSpec stores — sync
 //!   state with changed files, fetch, fast-forward pull, commit and push;
-//! - [`setup`]: creating a new store.
+//! - [`setup`]: creating a new store;
+//! - [`prompts`]: the launch briefs okena builds from a store's templates.
 //!
 //! Every problem that doesn't stop a listing becomes a diagnostic on the thing
 //! it concerns, so one broken checkout never hides the rest.
@@ -24,6 +25,7 @@ pub mod frontmatter;
 pub mod git;
 pub mod identity;
 pub mod project;
+pub mod prompts;
 pub mod registry;
 pub mod setup;
 pub mod tree;

@@ -357,30 +357,17 @@ fn first_heading(body: &str) -> Option<String> {
     None
 }
 
-/// `{name}` placeholders in a template body, sorted and unique. A name is an
-/// identifier, so JSON (`{"a": 1}`) and prose braces don't count.
+/// `{name}` placeholders in a template body, sorted and unique.
+///
+/// The renderer's own reading, so what the Knowledge view lists and what
+/// okena fills cannot disagree. `{name|partial}` lists `name`; `{>partial}` is
+/// an include, not something the template asks to be filled.
 fn placeholders(body: &str) -> Vec<String> {
-    let mut found = BTreeSet::new();
-    let mut rest = body;
-    while let Some(open) = rest.find('{') {
-        rest = &rest[open + 1..];
-        let Some(close) = rest.find(['}', '{']) else {
-            break;
-        };
-        if rest.as_bytes()[close] == b'}' {
-            let name = &rest[..close];
-            let mut chars = name.chars();
-            if chars
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-            {
-                found.insert(name.to_string());
-            }
-        }
-        rest = &rest[close..];
-    }
-    found.into_iter().collect()
+    crate::prompts::placeholders(body)
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 #[cfg(test)]
@@ -493,7 +480,10 @@ mod tests {
         assert!(doc.flows.is_empty() && doc.variables.is_empty());
         let template = tree.entry("templates/spec.md").expect("template");
         assert_eq!(template.flows, ["spec-draft", "agent-session"]);
-        assert_eq!(template.variables, ["change_dir", "idea", "nested"]);
+        // `{{nested}}` is an escape: it renders as the literal text `{nested}`
+        // and is never filled, so listing it as a variable would tell a
+        // template author something okena does not do.
+        assert_eq!(template.variables, ["change_dir", "idea"]);
     }
 
     #[test]

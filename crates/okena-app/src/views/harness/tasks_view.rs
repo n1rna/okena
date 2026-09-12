@@ -64,16 +64,18 @@ pub(super) fn order_by_hierarchy(
     }
 
     let mut emitted = vec![false; tasks.len()];
-    let mut ordered: Vec<(usize, usize)> = Vec::new();
+    // (task, depth, index of the root of its subtree)
+    let mut ordered: Vec<(usize, usize, usize)> = Vec::new();
     // Explicit stack, not recursion: a malformed parent chain from a provider
     // must not be able to blow the render thread's stack.
-    let mut stack: Vec<(usize, usize)> = roots.into_iter().rev().map(|i| (i, 0)).collect();
-    while let Some((index, depth)) = stack.pop() {
+    let mut stack: Vec<(usize, usize, usize)> =
+        roots.into_iter().rev().map(|i| (i, 0, i)).collect();
+    while let Some((index, depth, root)) = stack.pop() {
         if emitted[index] {
             continue;
         }
         emitted[index] = true;
-        ordered.push((index, depth));
+        ordered.push((index, depth, root));
         if collapsed.contains(&tasks[index].id.external_id) {
             // A collapsed parent still renders; its subtree is hidden. Mark the
             // whole subtree as accounted for — otherwise the unreachable sweep
@@ -94,7 +96,7 @@ pub(super) fn order_by_hierarchy(
             }
         } else if let Some(kids) = children.get(&tasks[index].id.external_id) {
             for kid in kids.iter().rev() {
-                stack.push((*kid, depth + 1));
+                stack.push((*kid, depth + 1, root));
             }
         }
     }
@@ -102,7 +104,7 @@ pub(super) fn order_by_hierarchy(
     // rather than silently losing it.
     for (i, done) in emitted.iter().enumerate() {
         if !done {
-            ordered.push((i, 0));
+            ordered.push((i, 0, i));
         }
     }
 
@@ -116,13 +118,16 @@ pub(super) fn order_by_hierarchy(
         })
         .collect();
 
+    let ids: Vec<String> = tasks.iter().map(|t| t.id.external_id.clone()).collect();
+
     let mut slots: Vec<Option<Task>> = tasks.into_iter().map(Some).collect();
     ordered
         .into_iter()
-        .filter_map(|(i, depth)| {
+        .filter_map(|(i, depth, root)| {
             slots[i].take().map(|task| TaskRow {
                 task,
                 depth,
+                family: ids[root].clone(),
                 has_children: has_children[i],
             })
         })
@@ -139,6 +144,9 @@ pub(super) struct TaskRow {
     pub task: Task,
     pub depth: usize,
     pub has_children: bool,
+    /// External id of the top of its subtree in this lane. Rows are coloured
+    /// by it, so a sub-task carries its parent's colour.
+    pub family: String,
 }
 
 /// Colour for a breakdown level.
@@ -187,6 +195,19 @@ pub(super) struct TaskSignals {
     pub waiting: bool,
     /// One of those projects has an open pull request.
     pub open_pr: bool,
+}
+
+/// The branch a start should use, given whether the task already has one.
+///
+/// git refuses two worktrees on one branch, so the provider's own name is only
+/// free the first time. A second run is suffixed rather than refused: running
+/// a second agent on a task is a reasonable thing to want, and the first one
+/// having taken the obvious name is not a reason to say no.
+pub(super) fn next_branch(provider_branch: &str, taken: bool) -> String {
+    if !taken || provider_branch.is_empty() {
+        return provider_branch.to_string();
+    }
+    format!("{provider_branch}-2")
 }
 
 /// Whether a task belongs in the Active section.
@@ -249,6 +270,101 @@ impl Facet {
             Facet::Group(axis) => axis.wire_name(),
             Facet::Label => "label",
             Facet::Status => "status",
+        }
+    }
+}
+
+/// Say where a launch brief's template comes from, for the launch dialog.
+///
+/// `source` is the daemon's `PromptRender` answer: `{"builtin": true}` or
+/// `{"root": key, "path": path}`. Named so the user knows what to edit, which
+/// is the whole reason the dialog shows it instead of a goal box.
+pub(super) fn describe_brief_source(flow: &str, source: &serde_json::Value) -> String {
+    match (
+        source.get("root").and_then(|v| v.as_str()),
+        source.get("path").and_then(|v| v.as_str()),
+    ) {
+        (Some(root), Some(path)) => format!("`{path}` in {root}"),
+        _ => format!("okena's built-in `{flow}` template"),
+    }
+}
+
+/// How to put agents on a task that has sub-tasks.
+///
+/// A parent with children can be worked three ways, and which one is right is
+/// a judgement about the work, not a setting: three stories that touch
+/// different files and can each be tested alone want three agents; three that
+/// only make sense together want one; and often nobody knows which until
+/// somebody has read them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum StartStrategy {
+    /// One agent on the parent, doing the whole thing. What okena has always
+    /// done, and right whenever the children are steps rather than pieces.
+    #[default]
+    Single,
+    /// One agent per sub-task, started now. Deterministic: okena fans out and
+    /// nothing decides anything.
+    PerSubtask,
+    /// One agent on the parent, briefed to read the children and start as many
+    /// sub-agents as the work actually splits into — which may be fewer than
+    /// there are children.
+    Coordinated,
+}
+
+impl StartStrategy {
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            StartStrategy::Single => "One agent",
+            StartStrategy::PerSubtask => "One per sub-task",
+            StartStrategy::Coordinated => "Let the parent split it",
+        }
+    }
+
+    /// What choosing it will actually do, given `children` sub-tasks.
+    pub(super) fn hint(self, children: usize) -> String {
+        match self {
+            StartStrategy::Single => {
+                "One session on this task. The sub-tasks are context, not separate work."
+                    .to_string()
+            }
+            StartStrategy::PerSubtask => format!(
+                "{children} sessions, one per sub-task, each on its own branch. \
+                 Pick this when they can be built and tested apart."
+            ),
+            StartStrategy::Coordinated => {
+                "One session on this task, told to read the sub-tasks and start \
+                 sub-agents for whatever groups can be tested independently."
+                    .to_string()
+            }
+        }
+    }
+
+    /// Read a strategy back from the label a launcher mode carries.
+    pub(super) fn from_label(label: &str) -> Option<StartStrategy> {
+        [
+            StartStrategy::Single,
+            StartStrategy::PerSubtask,
+            StartStrategy::Coordinated,
+        ]
+        .into_iter()
+        .find(|s| s.label() == label)
+    }
+
+    /// The strategies worth offering for a task with `children` sub-tasks.
+    ///
+    /// Nothing to split with no children, so the choice is not shown at all
+    /// rather than shown with two options that do the same thing. One child is
+    /// the same case: fanning out to a single agent, or asking one to decide
+    /// how to divide one thing, are both just "one agent" with extra steps.
+    pub(super) fn offered(children: usize) -> &'static [StartStrategy] {
+        if children < 2 {
+            &[]
+        } else {
+            &[
+                StartStrategy::Single,
+                StartStrategy::PerSubtask,
+                StartStrategy::Coordinated,
+            ]
         }
     }
 }
@@ -330,13 +446,15 @@ impl HarnessPane {
                                 }
                             }
                             None => {
-                                this.tasks.error =
-                                    Some(format!("This daemon doesn't know `{provider}`"));
+                                this.report_error(
+                                    format!("This daemon doesn't know `{provider}`"),
+                                    cx,
+                                );
                                 this.tasks.connection = TaskAuthState::Disconnected;
                             }
                         },
                         Err(e) => {
-                            this.tasks.error = Some(e);
+                            this.report_error(e, cx);
                             this.tasks.connection = TaskAuthState::Disconnected;
                         }
                     }
@@ -349,7 +467,6 @@ impl HarnessPane {
 
     pub(super) fn refresh_tasks(&mut self, cx: &mut Context<Self>) {
         self.tasks.loading = true;
-        self.tasks.error = None;
         cx.notify();
 
         let client = self.client.clone();
@@ -372,7 +489,6 @@ impl HarnessPane {
                     match result {
                         Ok(tasks) => {
                             this.tasks.tasks = tasks;
-                            this.tasks.error = None;
                             // Children may have been created since — by an
                             // agent through MCP, or by someone else entirely —
                             // so a refresh drops what was cached rather than
@@ -401,7 +517,7 @@ impl HarnessPane {
                             if e.contains("rejected the stored credential") {
                                 this.tasks.connection = TaskAuthState::Expired;
                             }
-                            this.tasks.error = Some(e);
+                            this.report_error(e, cx);
                         }
                     }
                     this.tasks.loading = false;
@@ -415,14 +531,11 @@ impl HarnessPane {
     pub(super) fn connect(&mut self, cx: &mut Context<Self>) {
         let api_key = self.tasks.api_key_input.read(cx).value().trim().to_string();
         if api_key.is_empty() {
-            self.tasks.error = Some("Enter an API key first".to_string());
-            cx.notify();
+            self.report_error("Enter an API key first", cx);
             return;
         }
 
         self.tasks.loading = true;
-        self.tasks.error = None;
-        self.tasks.status = Some("Verifying key…".to_string());
         cx.notify();
 
         let client = self.client.clone();
@@ -439,7 +552,6 @@ impl HarnessPane {
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     this.tasks.loading = false;
-                    this.tasks.status = None;
                     match result {
                         Ok(_) => {
                             // Clear the key from the field as soon as it's
@@ -449,7 +561,7 @@ impl HarnessPane {
                             });
                             this.refresh_auth(cx);
                         }
-                        Err(e) => this.tasks.error = Some(e),
+                        Err(e) => this.report_error(e, cx),
                     }
                     cx.notify();
                 });
@@ -465,7 +577,25 @@ impl HarnessPane {
     /// start would have used. When those cannot be told, none are picked —
     /// guessing one would start work in a repo nobody chose.
     pub(super) fn open_start_form(&mut self, task: &Task, cx: &mut Context<Self>) {
-        let branch = task.branch_name.clone();
+        self.open_launch_form(task, super::LaunchFlow::Work, cx);
+    }
+
+    /// Open the launch dialog for one of a task's agents.
+    ///
+    /// The same dialog whichever agent it is, so the options sit in the same
+    /// places. What differs is only what a flow genuinely needs: work wants a
+    /// branch and a way to split, a breakdown wants neither.
+    pub(super) fn open_launch_form(
+        &mut self,
+        task: &Task,
+        flow: super::LaunchFlow,
+        cx: &mut Context<Self>,
+    ) {
+        // A second run cannot reuse the first's branch: git refuses two
+        // worktrees on one branch, so the provider's name is only free the
+        // first time.
+        let taken = self.links_for(task, cx).signals.linked;
+        let branch = next_branch(&task.branch_name, taken);
         let branch_input = cx.new(|cx| {
             SimpleInputState::new(cx)
                 .placeholder("Branch / worktree name")
@@ -475,11 +605,65 @@ impl HarnessPane {
 
         self.tasks.start_form = Some(super::StartWorkForm {
             task: task.clone(),
+            flow,
             project_ids,
             branch_input,
+            brief_source: None,
         });
-        self.tasks.error = None;
         cx.notify();
+        self.load_brief_source(task, cx);
+    }
+
+    /// The template id that will brief the agent the dialog is configuring.
+    fn launch_template(&self, flow: super::LaunchFlow, task_id: &str) -> &'static str {
+        match flow {
+            super::LaunchFlow::BreakDown => "break-down",
+            super::LaunchFlow::Work => match self.strategy_for(task_id) {
+                StartStrategy::Coordinated => "task-coordinate",
+                StartStrategy::Single | StartStrategy::PerSubtask => "task-start",
+            },
+        }
+    }
+
+    /// Ask the daemon which template the dialog's agent will be briefed from.
+    ///
+    /// Only the source, not the text: the dialog says where the instructions
+    /// live so you know what to edit, and the body is rendered at start.
+    fn load_brief_source(&mut self, task: &Task, cx: &mut Context<Self>) {
+        let Some(form) = self.tasks.start_form.as_ref() else {
+            return;
+        };
+        let flow = self.launch_template(form.flow, &task.id.external_id);
+        let client = self.client.clone();
+        let wanted = task.id.external_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client.post_action(ActionRequest::PromptRender {
+                    flow: flow.to_string(),
+                    vars: Default::default(),
+                })
+            })
+            .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    let Some(form) = this.tasks.start_form.as_mut() else {
+                        return;
+                    };
+                    // The dialog may have moved on to another task meanwhile.
+                    if form.task.id.external_id != wanted {
+                        return;
+                    }
+                    form.brief_source = Some(match result {
+                        Ok(Some(value)) => {
+                            describe_brief_source(flow, value.get("source").unwrap_or(&value))
+                        }
+                        _ => format!("okena's built-in `{flow}` template"),
+                    });
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
     }
 
     /// Projects that can hold a task's worktrees: repos, not worktrees of
@@ -522,12 +706,112 @@ impl HarnessPane {
         agent_command: String,
         cx: &mut Context<Self>,
     ) {
-        match self.quick_start_projects(cx) {
-            Some(project_ids) => self.start_work(task, project_ids, None, agent_command, cx),
+        let Some(project_ids) = self.quick_start_projects(cx) else {
             // The dialog's own launcher says to pick a project, and offers
             // the agents once one is picked.
-            None => self.open_start_form(task, cx),
+            self.open_start_form(task, cx);
+            return;
+        };
+        match self.strategy_for(&task.id.external_id) {
+            StartStrategy::Single => self.start_work(
+                task,
+                project_ids,
+                None,
+                agent_command,
+                Default::default(),
+                cx,
+            ),
+            StartStrategy::PerSubtask => self.fan_out(task, project_ids, agent_command, cx),
+            StartStrategy::Coordinated => {
+                self.start_coordinator(task, project_ids, agent_command, cx)
+            }
         }
+    }
+
+    /// Begin the next queued start, if nothing is running.
+    fn drain_starts(&mut self, cx: &mut Context<Self>) {
+        if self.tasks.starting.is_some() || self.tasks.queued_starts.is_empty() {
+            return;
+        }
+        let next = self.tasks.queued_starts.remove(0);
+        self.start_work(
+            &next.task,
+            next.project_ids,
+            None,
+            next.agent_command,
+            next.extras,
+            cx,
+        );
+    }
+
+    /// One agent per sub-task, each on its own branch.    /// One agent per sub-task, each on its own branch.
+    ///
+    /// okena decides nothing here beyond "one each" — that is the point of
+    /// offering it beside the coordinated option. Each child starts exactly as
+    /// it would if you had opened it and pressed start yourself, so a failure
+    /// on one is a failure on one.
+    fn fan_out(
+        &mut self,
+        task: &Task,
+        project_ids: Vec<String>,
+        agent_command: String,
+        cx: &mut Context<Self>,
+    ) {
+        let children = self.children_of(&task.id.external_id, cx);
+        if children.is_empty() {
+            self.report_error("No sub-tasks to fan out to.", cx);
+            return;
+        }
+        let keys: Vec<String> = children.iter().map(|c| c.display_key.clone()).collect();
+        for child in &children {
+            // Each is told what the others are doing: they share a parent and
+            // will meet in the same repos, and an agent that does not know
+            // that goes looking for work already assigned.
+            let siblings = keys
+                .iter()
+                .filter(|k| *k != &child.display_key)
+                .cloned()
+                .collect();
+            self.start_work(
+                child,
+                project_ids.clone(),
+                None,
+                agent_command.clone(),
+                super::StartExtras {
+                    coordinate: false,
+                    siblings,
+                },
+                cx,
+            );
+        }
+    }
+
+    /// One agent on the parent, briefed to split the work itself.
+    ///
+    /// It gets the parent's worktrees like any work session — it may well do
+    /// some of the work — and the `task-coordinate` brief, which tells it how
+    /// to group the children and to start them with `okena_start_work`.
+    fn start_coordinator(
+        &mut self,
+        task: &Task,
+        project_ids: Vec<String>,
+        agent_command: String,
+        cx: &mut Context<Self>,
+    ) {
+        // The daemon lists the sub-tasks and renders the `task-coordinate`
+        // brief itself: the provider's list is the authority, and the words
+        // are knowledge's, not this view's.
+        self.start_work(
+            task,
+            project_ids,
+            None,
+            agent_command,
+            super::StartExtras {
+                coordinate: true,
+                siblings: Vec::new(),
+            },
+            cx,
+        );
     }
 
     /// Focus an existing session for a task and leave the harness view.
@@ -581,21 +865,41 @@ impl HarnessPane {
         let Some(form) = self.tasks.start_form.as_ref() else {
             return;
         };
-        if form.project_ids.is_empty() {
-            self.tasks.error = Some("Pick at least one project to work in".to_string());
-            cx.notify();
-            return;
-        }
         let task = form.task.clone();
         let project_ids = form.project_ids.clone();
-        let branch = form.branch_input.read(cx).value().trim().to_string();
-        self.start_work(
-            &task,
-            project_ids,
-            (!branch.is_empty()).then_some(branch),
-            agent_command,
-            cx,
-        );
+        match form.flow {
+            super::LaunchFlow::BreakDown => {
+                self.tasks.start_form = None;
+                self.break_down_with_agent(&task, agent_command, project_ids, cx);
+            }
+            super::LaunchFlow::Work => {
+                if project_ids.is_empty() {
+                    self.report_error("Pick at least one project to work in", cx);
+                    return;
+                }
+                let branch = form.branch_input.read(cx).value().trim().to_string();
+                self.tasks.start_form = None;
+                // The dialog honours the split exactly as the one-click start
+                // does; configuring first must not quietly mean "one agent".
+                match self.strategy_for(&task.id.external_id) {
+                    StartStrategy::Single => self.start_work(
+                        &task,
+                        project_ids,
+                        (!branch.is_empty()).then_some(branch),
+                        agent_command,
+                        Default::default(),
+                        cx,
+                    ),
+                    StartStrategy::PerSubtask => {
+                        self.fan_out(&task, project_ids, agent_command, cx)
+                    }
+                    StartStrategy::Coordinated => {
+                        self.start_coordinator(&task, project_ids, agent_command, cx)
+                    }
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// Create `task`'s worktrees in `project_ids` and start `agent_command` on
@@ -607,9 +911,20 @@ impl HarnessPane {
         project_ids: Vec<String>,
         branch: Option<String>,
         agent_command: String,
+        extras: super::StartExtras,
         cx: &mut Context<Self>,
     ) {
         if self.tasks.starting.is_some() {
+            // Queued rather than dropped: a fan-out asks for several at once,
+            // and git's index lock is the reason they go one at a time — not a
+            // reason for the rest to vanish.
+            self.tasks.queued_starts.push(super::QueuedStart {
+                task: task.clone(),
+                project_ids,
+                agent_command,
+                extras,
+            });
+            cx.notify();
             return;
         }
         self.tasks.last_projects = project_ids.clone();
@@ -621,8 +936,9 @@ impl HarnessPane {
         let display_key = task.display_key.clone();
 
         self.tasks.starting = Some(external_id.clone());
-        self.tasks.error = None;
-        self.tasks.status = Some(format!("Creating worktrees for {display_key}…"));
+        // Deliberately no "starting…" toast: the button already says
+        // "Starting…" while this runs, and a notification that something has
+        // begun is noise when the outcome is seconds away.
         self.tasks.start_form = None;
         cx.notify();
 
@@ -642,6 +958,10 @@ impl HarnessPane {
                         // explicitly, which is not the same as `None` (fall
                         // back to the configured default).
                         agent_command: Some(agent_command),
+                        note: None,
+                        coordinate: extras.coordinate,
+                        also: Vec::new(),
+                        siblings: extras.siblings,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing start-work result".to_string()))
             })
@@ -650,6 +970,10 @@ impl HarnessPane {
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     this.tasks.starting = None;
+                    // Whatever this one did, the next in the queue is now
+                    // free to run: a failed start must not strand the rest of
+                    // a fan-out behind it.
+                    this.drain_starts(cx);
                     match result {
                         Ok(value) => {
                             let branch = value
@@ -667,9 +991,10 @@ impl HarnessPane {
                                 .and_then(|v| v.as_str())
                                 .map(|root| format!(", agent session in {root}"))
                                 .unwrap_or_default();
-                            this.tasks.status = Some(format!(
-                                "{display_key} → {branch} · {made} worktree(s){session}"
-                            ));
+                            this.report(
+                                format!("{display_key} → {branch} · {made} worktree(s){session}"),
+                                cx,
+                            );
                             // Partial success is still a failure worth showing:
                             // dropping it silently would leave the user thinking
                             // every repo got a checkout.
@@ -686,12 +1011,11 @@ impl HarnessPane {
                                         .collect()
                                 })
                                 .unwrap_or_default();
-                            this.tasks.error = (!failures.is_empty()).then(|| failures.join(" · "));
+                            if !failures.is_empty() {
+                                this.report_error(failures.join(" · "), cx);
+                            }
                         }
-                        Err(e) => {
-                            this.tasks.status = None;
-                            this.tasks.error = Some(e);
-                        }
+                        Err(e) => this.report_error(e, cx),
                     }
                     cx.notify();
                 });
@@ -819,7 +1143,70 @@ impl HarnessPane {
             .cloned()
     }
 
-    /// Read a task's sub-tasks, once.
+    /// The split choice, as modes on the work launcher.
+    ///
+    /// Inside the launcher rather than above it: these change what its buttons
+    /// do, and a control that changes a button's meaning while sitting outside
+    /// it is one people press by accident.
+    ///
+    /// Empty unless the task has enough sub-tasks for the question to mean
+    /// anything, which is also how the launcher knows to draw no row.
+    fn strategy_modes(
+        &self,
+        task: &Task,
+        children: usize,
+    ) -> Vec<okena_ui::agent_launcher::LaunchMode> {
+        let current = self.strategy_for(&task.id.external_id);
+        StartStrategy::offered(children)
+            .iter()
+            .map(|strategy| okena_ui::agent_launcher::LaunchMode {
+                id: strategy.label().into(),
+                label: strategy.label().into(),
+                selected: *strategy == current,
+            })
+            .collect()
+    }
+
+    /// The chosen strategy for a task, or the default.
+    fn strategy_for(&self, external_id: &str) -> StartStrategy {
+        self.tasks
+            .strategy
+            .get(external_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// A task's children: the ones fetched from the provider, plus any already    /// A task's children: the ones fetched from the provider, plus any already
+    /// in your own queue.
+    ///
+    /// Both halves are needed and neither is enough. The fetch sees children
+    /// assigned to other people, which your queue never will; your queue sees
+    /// children the moment they load, which the fetch only does when it is
+    /// asked again — and it is cached, so a breakdown filed after the fetch
+    /// left the detail pane insisting the task had none while the list beside
+    /// it showed three.
+    ///
+    /// Fetched order first, because that is the provider's own; anything only
+    /// the queue knows about follows.
+    fn children_of(&self, external_id: &str, cx: &Context<Self>) -> Vec<Task> {
+        let _ = cx;
+        let mut out: Vec<Task> = self
+            .tasks
+            .children
+            .get(external_id)
+            .cloned()
+            .unwrap_or_default();
+        for task in &self.tasks.tasks {
+            if task.parent_id.as_deref() == Some(external_id)
+                && !out.iter().any(|c| c.id == task.id)
+            {
+                out.push(task.clone());
+            }
+        }
+        out
+    }
+
+    /// Read a task's sub-tasks, once.    /// Read a task's sub-tasks, once.
     fn fetch_children(&mut self, external_id: String, cx: &mut Context<Self>) {
         if self.tasks.children.contains_key(&external_id)
             || self.tasks.children_loading.as_deref() == Some(external_id.as_str())
@@ -1270,6 +1657,12 @@ impl HarnessPane {
             .min_h_0()
             .overflow_y_scroll();
 
+        // Above both sections: a draft is not a task yet, so it belongs in
+        // neither, and it is the thing you most recently asked for.
+        for id in self.task_draft_ids(cx) {
+            body = body.child(self.render_draft_row(&id, cx));
+        }
+
         body = body.child(self.render_section_header(
             "active",
             "Active tasks",
@@ -1328,6 +1721,168 @@ impl HarnessPane {
             .children(self.render_filter_bar(cx))
             .child(body)
             .into_any_element()
+    }
+
+    /// Sessions drafting a task that does not exist yet.
+    fn task_draft_ids(&self, cx: &App) -> Vec<String> {
+        self.workspace
+            .read(cx)
+            .projects()
+            .iter()
+            .filter(|p| p.is_task_draft_session())
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    /// A task that is being written, shown where it will land.
+    ///
+    /// Shaped like a task row rather than listed apart, because that is what
+    /// it is about to be — but dashed and muted, because there is nothing to
+    /// open in the provider yet and a solid row would invite a click that
+    /// cannot go anywhere. Clicking opens the agent instead.
+    fn render_draft_row(&self, project_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let Some(info) = crate::views::agent_session::AgentSessionInfo::collect(
+            self.workspace.read(cx),
+            &self.terminals,
+            project_id,
+        ) else {
+            return div().into_any_element();
+        };
+        let title = self
+            .workspace
+            .read(cx)
+            .project(project_id)
+            .and_then(|p| p.task_draft.clone())
+            .unwrap_or_else(|| info.name.clone());
+        let activity = info.activity();
+        let id = project_id.to_string();
+
+        v_flex()
+            .id(SharedString::from(format!("task-draft-{project_id}")))
+            .cursor_pointer()
+            .gap(px(3.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .border_b_1()
+            .border_color(rgb(t.border))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .child(
+                h_flex()
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(6.0))
+                            .py(px(1.0))
+                            .rounded(px(3.0))
+                            .border_1()
+                            .border_color(with_alpha(t.border_active, 0.6))
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("Drafting"),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(rgb(activity.color(&t))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(activity.label()),
+                    )
+                    .child({
+                        let discard = project_id.to_string();
+                        div()
+                            .id(SharedString::from(format!("task-draft-close-{project_id}")))
+                            .cursor_pointer()
+                            .flex_shrink_0()
+                            .px(px(4.0))
+                            .rounded(px(3.0))
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
+                            .child("✕")
+                            .tooltip(|window, cx| {
+                                gpui_component::tooltip::Tooltip::new("Discard this draft")
+                                    .build(window, cx)
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    // Discarding is not opening it.
+                                    cx.stop_propagation();
+                                    this.discard_draft(discard.clone(), cx);
+                                }),
+                            )
+                    }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_size(ui_text(13.0, cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(title),
+            )
+            .children(info.status.clone().map(|status| {
+                div()
+                    .w_full()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(status)
+                    .into_any_element()
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.open_session(id.clone(), cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// Close a drafting session and remove it.
+    ///
+    /// A draft has no worktrees — it runs in its own directory — so there is
+    /// nothing to lose but the conversation, and the alternative was a row
+    /// that could not be got rid of at all: the placeholder had no control on
+    /// it, and the session panel's own "Delete workspace…" is behind opening
+    /// the very session you are trying to be done with.
+    fn discard_draft(&mut self, project_id: String, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let daemon_id = okena_transport::client::strip_prefix(&project_id, client.connection_id());
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client
+                    .post_action(ActionRequest::TaskDeleteWorkspace {
+                        project_id: daemon_id,
+                        // Nothing to refuse: no checkout to be dirty.
+                        force: true,
+                    })
+                    .and_then(|v| v.ok_or_else(|| "Missing delete result".to_string()))
+            })
+            .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if let Err(e) = result {
+                        this.report_error(e, cx);
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
     }
 
     fn list_note(&self, text: &'static str, cx: &Context<Self>) -> AnyElement {
@@ -1455,41 +2010,46 @@ impl HarnessPane {
             }
         }
 
-        let children = self.tasks.children.get(&task.id.external_id);
+        let fetched = self.tasks.children.get(&task.id.external_id);
         let loading_children =
             self.tasks.children_loading.as_deref() == Some(task.id.external_id.as_str());
-        body = body.child(self.detail_label_with_count("SUB-TASKS", children.map(|c| c.len()), cx));
-        match children {
-            Some(list) if !list.is_empty() => {
-                for child in list {
-                    body = body.child(self.render_related_task(child, cx));
-                }
-            }
-            Some(_) => {
-                body = body.child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_muted))
-                        .child("None yet — break it down, or add one."),
-                );
-            }
-            None => {
-                body = body.child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_muted))
-                        .child(if loading_children {
-                            "Loading…"
-                        } else {
-                            "Not loaded."
-                        }),
-                );
+        let children = self.children_of(&task.id.external_id, cx);
+        // Only "not loaded" when okena knows of none by either route: a fetch
+        // that has not landed is no reason to say there are none when three of
+        // them are on screen in the list beside this.
+        let unknown = fetched.is_none() && children.is_empty();
+        body = body.child(self.detail_label_with_count(
+            "SUB-TASKS",
+            (!unknown).then_some(children.len()),
+            cx,
+        ));
+        if unknown {
+            body = body.child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(if loading_children {
+                        "Loading…"
+                    } else {
+                        "Not loaded."
+                    }),
+            );
+        } else if children.is_empty() {
+            body = body.child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("None yet — break it down, or add one."),
+            );
+        } else {
+            for child in &children {
+                body = body.child(self.render_related_task(child, cx));
             }
         }
 
         // The breakdown control belongs to the list it acts on, so it sits at
         // the foot of it.
-        let has_children = children.is_some_and(|c| !c.is_empty());
+        let has_children = !children.is_empty();
         body = body.child(self.render_breakdown_launcher(&task, &links, has_children, cx));
 
         body = body.child(self.detail_label("BRANCH", cx)).child(
@@ -1604,8 +2164,8 @@ impl HarnessPane {
         let t = theme(cx);
         let external_id = task.id.external_id.clone();
         let starting = self.tasks.starting.as_deref() == Some(external_id.as_str());
-        // The agent session spans every repo, so it is the one to show; a
-        // single-repo start runs its agent in the worktree itself.
+        // The agent session is where the agent runs, for one repo or several,
+        // so it is the one to show.
         let sessions = self.launcher_sessions(links.open_target.clone(), cx);
 
         let (title, subtitle) = if sessions.is_empty() {
@@ -1637,14 +2197,39 @@ impl HarnessPane {
 
         let for_launch = task.clone();
         let for_configure = task.clone();
+        let children = self.children_of(&task.id.external_id, cx).len();
+        let modes = self.strategy_modes(task, children);
+        let mode_hint =
+            (!modes.is_empty()).then(|| self.strategy_for(&task.id.external_id).hint(children));
+        let for_mode = task.id.external_id.clone();
+        // A session already listed here may be stopped, or be somebody else's
+        // run of the same task. Either way it must not be a dead end: without
+        // this the card showed a finished agent and offered no way to start
+        // another.
+        let has_work = !sessions.is_empty();
         okena_ui::agent_launcher::AgentLauncher::new(format!("task-work-{external_id}"), title)
             .subtitle(subtitle)
             .options(options)
             .preferred(self.tasks.default_agent.clone())
             .sessions(sessions)
+            .launch_alongside_sessions()
+            .modes(modes)
+            .when_some(mode_hint, |l, hint| l.mode_hint(hint))
+            .on_mode(cx.listener(move |this, id: &SharedString, _window, cx| {
+                if let Some(choice) = StartStrategy::from_label(id) {
+                    this.tasks.strategy.insert(for_mode.clone(), choice);
+                    cx.notify();
+                }
+            }))
             .busy(starting.then_some("Creating worktrees…"))
             .on_launch(
                 cx.listener(move |this, command: &SharedString, _window, cx| {
+                    if has_work {
+                        // The branch is taken, so this one needs a name — and
+                        // quick-starting onto it would only fail in git.
+                        this.open_start_form(&for_launch, cx);
+                        return;
+                    }
                     this.quick_start_work(&for_launch, command.to_string(), cx);
                 }),
             )
@@ -1694,16 +2279,19 @@ impl HarnessPane {
             ))
             .preferred(self.tasks.default_agent.clone())
             .sessions(sessions)
+            // No worktrees and no branch, so a second one costs nothing — and
+            // a finished breakdown must not hide the way to run another.
+            .launch_alongside_sessions()
             .busy(starting.then_some("Starting…"))
             .on_launch(
                 cx.listener(move |this, command: &SharedString, _window, cx| {
-                    this.break_down_with_agent(&for_launch, command.to_string(), cx);
+                    this.break_down_with_agent(&for_launch, command.to_string(), Vec::new(), cx);
                 }),
             )
             .on_configure(
-                "Edit the brief first…",
+                "Choose projects first…",
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    this.configure_breakdown(&for_configure, cx);
+                    this.open_launch_form(&for_configure, super::LaunchFlow::BreakDown, cx);
                 }),
             )
             .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
@@ -1988,9 +2576,13 @@ impl HarnessPane {
         let collapsed = self.tasks.collapsed.contains(&task.id.external_id);
         let state_label = status_name(task).to_string();
 
-        // Indent per level, with a rail on nested rows so containment is
-        // visible rather than implied by a few pixels of whitespace.
+        // Indent per level. The family colour runs down the left edge of a
+        // task and all of its sub-tasks, so where one subtree ends and the next
+        // begins is visible rather than implied by a few pixels of whitespace.
         let indent = 16.0 * depth as f32;
+        let tint = okena_ui::identity_color::identity_color(&row.family, 0.06);
+        let tint_hover = okena_ui::identity_color::identity_color(&row.family, 0.12);
+        let accent = okena_ui::identity_color::identity_color(&row.family, 0.75);
         let selected = self.tasks.selected.as_deref() == Some(task.id.external_id.as_str());
         let select_id = task.id.external_id.clone();
         h_flex()
@@ -1999,6 +2591,7 @@ impl HarnessPane {
                 task.id.external_id
             )))
             .cursor_pointer()
+            .relative()
             .justify_between()
             .items_start()
             .gap(px(12.0))
@@ -2008,17 +2601,22 @@ impl HarnessPane {
             .border_b_1()
             .border_color(rgb(t.border))
             .when(selected, |d| d.bg(with_alpha(t.button_primary_bg, 0.14)))
-            .when(!selected, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+            .when(!selected, |d| d.bg(tint).hover(move |s| s.bg(tint_hover)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _window, cx| {
                     this.select_task(select_id.clone(), cx);
                 }),
             )
-            .when(depth > 0, |d| {
-                d.border_l_2()
-                    .border_color(with_alpha(t.border_active, 0.5))
-            })
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(px(3.0))
+                    .bg(accent),
+            )
             .child(
                 // `min_w_0` is load-bearing: a flex child defaults to a minimum
                 // width of its content, so a long title would widen this column
@@ -2168,7 +2766,10 @@ impl HarnessPane {
     fn render_start_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let form = self.tasks.start_form.as_ref()?;
         let t = theme(cx);
+        let flow = form.flow;
+        let work = flow == super::LaunchFlow::Work;
         let selected = form.project_ids.clone();
+        let external_id = form.task.id.external_id.clone();
 
         // Worktree children can't parent another worktree, and an agent
         // session is not a repo, so only repos are offered.
@@ -2227,33 +2828,149 @@ impl HarnessPane {
             .collect();
 
         let count = selected.len();
-        let summary = match count {
-            0 => "No projects selected".to_string(),
-            1 => "1 worktree".to_string(),
-            n => format!("{n} worktrees · agent session rooted above them"),
+        let project_hint = match (flow, count) {
+            (super::LaunchFlow::Work, 0) => "No projects selected".to_string(),
+            (super::LaunchFlow::Work, 1) => "1 worktree".to_string(),
+            (super::LaunchFlow::Work, n) => {
+                format!("{n} worktrees · agent session rooted above them")
+            }
+            (super::LaunchFlow::BreakDown, 0) => {
+                "Optional. Pick the repos the agent should read to break it down well.".to_string()
+            }
+            (super::LaunchFlow::BreakDown, n) => {
+                format!("{n} named in the brief as context — no worktrees are created")
+            }
+        };
+
+        let (heading, launch_title) = match flow {
+            super::LaunchFlow::Work => (
+                format!("Start work on {}", form.task.display_key),
+                match count {
+                    0 => "Pick a project to start".to_string(),
+                    1 => "Start in 1 worktree".to_string(),
+                    n => format!("Start across {n} worktrees"),
+                },
+            ),
+            super::LaunchFlow::BreakDown => (
+                format!("Break down {}", form.task.display_key),
+                "Start the breakdown".to_string(),
+            ),
         };
 
         let mut options =
             crate::views::agent_session::launch_options(self.tasks.default_agent.as_deref(), &t);
-        options.push(crate::views::agent_session::no_agent_option(
-            "Worktrees only",
-            &t,
-        ));
-        let start_launcher = okena_ui::agent_launcher::AgentLauncher::new(
-            "sw-launcher",
-            match count {
-                0 => "Pick a project to start".to_string(),
-                1 => "Start in 1 worktree".to_string(),
-                n => format!("Start across {n} worktrees"),
-            },
-        )
-        .style(okena_ui::agent_launcher::LauncherStyle::Inline)
-        // Nothing to start until there is somewhere to start it.
-        .options(if count == 0 { Vec::new() } else { options })
-        .preferred(self.tasks.default_agent.clone())
-        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
-            this.confirm_start(command.to_string(), cx);
-        }));
+        if work {
+            options.push(crate::views::agent_session::no_agent_option(
+                "Worktrees only",
+                &t,
+            ));
+        }
+        // Work has nothing to start until there is somewhere to start it; a
+        // breakdown can run with no repos at all.
+        let ready = !work || count > 0;
+
+        // The split, inside the launcher exactly as on the task's own card.
+        let children = self.children_of(&external_id, cx).len();
+        let modes = if work {
+            self.strategy_modes(&form.task, children)
+        } else {
+            Vec::new()
+        };
+        let mode_hint = (!modes.is_empty()).then(|| self.strategy_for(&external_id).hint(children));
+        let for_mode = external_id.clone();
+        let task_for_mode = form.task.clone();
+
+        let start_launcher =
+            okena_ui::agent_launcher::AgentLauncher::new("sw-launcher", launch_title)
+                .style(okena_ui::agent_launcher::LauncherStyle::Inline)
+                .options(if ready { options } else { Vec::new() })
+                .preferred(self.tasks.default_agent.clone())
+                .modes(modes)
+                .when_some(mode_hint, |l, hint| l.mode_hint(hint))
+                .on_mode(cx.listener(move |this, id: &SharedString, _window, cx| {
+                    if let Some(choice) = StartStrategy::from_label(id) {
+                        this.tasks.strategy.insert(for_mode.clone(), choice);
+                        // A different split is briefed by a different template.
+                        this.load_brief_source(&task_for_mode, cx);
+                        cx.notify();
+                    }
+                }))
+                .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
+                    this.confirm_start(command.to_string(), cx);
+                }));
+
+        let brief_line = form
+            .brief_source
+            .clone()
+            .unwrap_or_else(|| "Finding the template…".to_string());
+
+        let mut body = v_flex()
+            .id("start-form-body")
+            .flex_1()
+            .overflow_y_scroll()
+            .p(px(16.0))
+            .gap(px(14.0))
+            .child(
+                v_flex()
+                    .gap(px(5.0))
+                    .child(self.form_label("Brief", cx))
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_secondary))
+                            .child(format!("Briefed by {brief_line}.")),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(
+                                "The instructions live in knowledge. Override the \
+                                 template in your own store to change them for \
+                                 everyone.",
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap(px(5.0))
+                    .child(self.form_label("Projects", cx))
+                    .child(h_flex().gap(px(6.0)).flex_wrap().children(project_chips))
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(project_hint),
+                    ),
+            );
+        if work {
+            body = body.child(
+                v_flex()
+                    .gap(px(5.0))
+                    .child(self.form_label("Branch / worktree name", cx))
+                    // Wrapped in `input_container` so it reads as an editable
+                    // field; a bare SimpleInput draws no border or background
+                    // and looks like static text.
+                    .child(
+                        okena_ui::input::input_container(&t, None)
+                            .w_full()
+                            .px(px(8.0))
+                            .py(px(5.0))
+                            .child(
+                                SimpleInput::new(&form.branch_input).text_size(ui_text(13.0, cx)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(
+                                "Used for every selected project. The provider's own \
+                                 name keeps its branch-to-issue link working.",
+                            ),
+                    ),
+            );
+        }
 
         Some(
             div()
@@ -2268,104 +2985,59 @@ impl HarnessPane {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
                     v_flex()
-                        .w(px(520.0))
-                        .max_h(px(560.0))
+                        .w(px(560.0))
+                        .max_h(px(620.0))
                         .rounded(px(8.0))
                         .border_1()
                         .border_color(rgb(t.border))
                         .bg(rgb(t.bg_primary))
                         .child(
-                            v_flex()
+                            h_flex()
+                                .items_start()
+                                .gap(px(8.0))
                                 .px(px(16.0))
                                 .py(px(12.0))
-                                .gap(px(2.0))
                                 .border_b_1()
                                 .border_color(rgb(t.border))
                                 .child(
-                                    div()
-                                        .text_size(ui_text(14.0, cx))
-                                        .text_color(rgb(t.text_primary))
-                                        .child(format!("Start work on {}", form.task.display_key)),
-                                )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(form.task.title.clone()),
-                                ),
-                        )
-                        .child(
-                            v_flex()
-                                .id("start-form-body")
-                                .flex_1()
-                                .overflow_y_scroll()
-                                .p(px(16.0))
-                                .gap(px(14.0))
-                                .child(
                                     v_flex()
-                                        .gap(px(5.0))
-                                        .child(self.form_label("Projects", cx))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap(px(2.0))
                                         .child(
-                                            h_flex()
-                                                .gap(px(6.0))
-                                                .flex_wrap()
-                                                .children(project_chips),
+                                            div()
+                                                .text_size(ui_text(14.0, cx))
+                                                .text_color(rgb(t.text_primary))
+                                                .child(heading),
                                         )
                                         .child(
                                             div()
-                                                .text_size(ui_text_ms(cx))
-                                                .text_color(rgb(t.text_muted))
-                                                .child(summary),
-                                        ),
-                                )
-                                .child(
-                                    v_flex()
-                                        .gap(px(5.0))
-                                        .child(self.form_label("Branch / worktree name", cx))
-                                        // Wrapped in `input_container` so it
-                                        // reads as an editable field; a bare
-                                        // SimpleInput draws no border or
-                                        // background and looks like static text.
-                                        .child(
-                                            okena_ui::input::input_container(&t, None)
                                                 .w_full()
-                                                .px(px(8.0))
-                                                .py(px(5.0))
-                                                .child(
-                                                    SimpleInput::new(&form.branch_input)
-                                                        .text_size(ui_text(13.0, cx)),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
+                                                .overflow_hidden()
+                                                .text_ellipsis()
                                                 .text_size(ui_text_ms(cx))
                                                 .text_color(rgb(t.text_muted))
-                                                .child(
-                                                    "Used for every selected project. \
-                                                     The provider's own name keeps its \
-                                                     branch-to-issue link working.",
-                                                ),
+                                                .child(form.task.title.clone()),
                                         ),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap(px(12.0))
-                                .px(px(16.0))
-                                .py(px(12.0))
-                                .border_t_1()
-                                .border_color(rgb(t.border))
+                                )
+                                // With the heading, matching the harness forms:
+                                // leaving and starting are opposite intents and
+                                // do not belong side by side.
                                 .child(self.small_button(
                                     "sw-cancel",
                                     "Cancel",
                                     cx.listener(|this, _, _window, cx| this.close_start_form(cx)),
                                     cx,
-                                ))
-                                .child(div().flex_1().min_w_0().child(start_launcher)),
+                                )),
+                        )
+                        .child(body)
+                        .child(
+                            div()
+                                .px(px(16.0))
+                                .py(px(12.0))
+                                .border_t_1()
+                                .border_color(rgb(t.border))
+                                .child(start_launcher),
                         ),
                 )
                 .into_any_element(),
@@ -2388,7 +3060,6 @@ impl HarnessPane {
         if !connected {
             return v_flex()
                 .size_full()
-                .children(self.tasks.error.clone().map(|e| self.error_banner(e, cx)))
                 .child(self.render_connect(cx))
                 .into_any_element();
         }
@@ -2404,13 +3075,15 @@ impl HarnessPane {
         // The form stands where a task's detail stands, so the two columns
         // have to exist for it — including on a first run with no tasks yet,
         // which is exactly when someone reaches for "New task".
-        let show_board = has_rows || composing;
+        let show_board = has_rows || composing || !self.task_draft_ids(cx).is_empty();
         let loading = self.tasks.loading;
 
         let account_label = match &account {
             Some(name) => format!("{} · {name}", self.tasks.provider_display_name),
             None => self.tasks.provider_display_name.clone(),
         };
+        // Same order as Specs and Knowledge: what the view is connected to,
+        // then settings, then refresh, then the one primary action.
         let actions: Vec<AnyElement> = vec![
             div()
                 .flex_shrink_0()
@@ -2418,18 +3091,6 @@ impl HarnessPane {
                 .text_color(rgb(t.text_muted))
                 .child(account_label)
                 .into_any_element(),
-            self.small_button(
-                "tasks-new",
-                "New task",
-                cx.listener(|this, _, _window, cx| this.open_new_task(cx)),
-                cx,
-            ),
-            self.small_button(
-                "tasks-refresh",
-                if loading { "Refreshing…" } else { "Refresh" },
-                cx.listener(|this, _, _window, cx| this.refresh_tasks(cx)),
-                cx,
-            ),
             // Connecting and disconnecting live in Settings now: they are
             // configuration, and having them here as well meant two
             // implementations of the same thing.
@@ -2440,13 +3101,23 @@ impl HarnessPane {
                 cx.listener(|this, _, _window, cx| this.open_settings("tasks", cx)),
                 cx,
             ),
+            self.small_button(
+                "tasks-refresh",
+                if loading { "Refreshing…" } else { "Refresh" },
+                cx.listener(|this, _, _window, cx| this.refresh_tasks(cx)),
+                cx,
+            ),
+            self.primary_button(
+                "tasks-new",
+                "New",
+                cx.listener(|this, _, _window, cx| this.open_new_task(cx)),
+                cx,
+            ),
         ];
 
         v_flex()
             .size_full()
             .child(self.render_toolbar(actions, cx))
-            .children(self.tasks.status.clone().map(|m| self.info_banner(m, cx)))
-            .children(self.tasks.error.clone().map(|e| self.error_banner(e, cx)))
             .child(if show_board {
                 let (active, rest) = self.board(cx);
                 let fraction = self.tasks.lane_fraction;
@@ -2508,7 +3179,10 @@ impl HarnessPane {
 mod section_tests {
     // Explicit imports: `use super::*` would pull in the `gpui::*` glob, whose
     // `test` macro shadows the built-in one and recurses forever.
-    use super::{TaskSort, is_active, pick_start_projects, sort_tasks};
+    use super::{
+        StartStrategy, TaskSort, describe_brief_source, is_active, next_branch,
+        pick_start_projects, sort_tasks,
+    };
     use okena_core::tasks::{Task, TaskId, TaskKind, TaskState};
 
     fn ids(ids: &[&str]) -> Vec<String> {
@@ -2632,6 +3306,74 @@ mod section_tests {
         ];
         sort_tasks(&mut tasks, TaskSort::Status);
         assert_eq!(keys(&tasks), ["B", "A", "C"]);
+    }
+
+    #[test]
+    fn a_second_start_does_not_reuse_the_first_branch() {
+        // git refuses two worktrees on one branch, so quick-starting onto the
+        // provider's name a second time could only fail.
+        assert_eq!(next_branch("qbl-1-thing", false), "qbl-1-thing");
+        assert_eq!(next_branch("qbl-1-thing", true), "qbl-1-thing-2");
+    }
+
+    #[test]
+    fn a_task_with_no_branch_name_stays_without_one() {
+        // The daemon derives one; inventing "-2" here would hand it a name it
+        // never chose.
+        assert_eq!(next_branch("", true), "");
+    }
+
+    #[test]
+    fn a_task_with_nothing_to_split_is_offered_no_choice() {
+        // Two options that do the same thing is worse than no options: with
+        // one child, fanning out and asking an agent to divide one thing are
+        // both "one agent" with extra steps.
+        assert!(StartStrategy::offered(0).is_empty());
+        assert!(StartStrategy::offered(1).is_empty());
+    }
+
+    #[test]
+    fn a_task_with_several_children_is_offered_all_three() {
+        assert_eq!(StartStrategy::offered(2).len(), 3);
+        assert_eq!(StartStrategy::offered(9)[0], StartStrategy::Single);
+    }
+
+    #[test]
+    fn a_brief_source_names_what_to_edit() {
+        assert_eq!(
+            describe_brief_source(
+                "break-down",
+                &serde_json::json!({ "root": "store:acme", "path": "templates/break-down.md" })
+            ),
+            "`templates/break-down.md` in store:acme"
+        );
+        assert_eq!(
+            describe_brief_source("task-start", &serde_json::json!({ "builtin": true })),
+            "okena's built-in `task-start` template"
+        );
+    }
+
+    #[test]
+    fn a_mode_label_reads_back_as_the_strategy_it_names() {
+        // The launcher hands back the label it was given, so a rename that
+        // broke the round trip would silently stop the chips working.
+        for strategy in StartStrategy::offered(3) {
+            assert_eq!(StartStrategy::from_label(strategy.label()), Some(*strategy));
+        }
+        assert_eq!(StartStrategy::from_label("Nonsense"), None);
+    }
+
+    #[test]
+    fn one_agent_is_what_happens_when_nobody_chooses() {
+        // The strategy that has always been okena's behaviour, so a task
+        // gaining children never changes what a plain click does.
+        assert_eq!(StartStrategy::default(), StartStrategy::Single);
+    }
+
+    #[test]
+    fn the_fan_out_hint_says_how_many_sessions_it_will_make() {
+        let hint = StartStrategy::PerSubtask.hint(3);
+        assert!(hint.starts_with("3 sessions"), "{hint}");
     }
 
     #[test]
@@ -2772,6 +3514,18 @@ mod hierarchy_tests {
         ]);
         assert_eq!(ids(&ordered), ["epic", "feat", "story", "other"]);
         assert_eq!(depths(&ordered), [0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn a_subtree_shares_its_roots_colour_family() {
+        let ordered = ordered(vec![
+            task("epic", None),
+            task("feat", Some("epic")),
+            task("story", Some("feat")),
+            task("other", None),
+        ]);
+        let families: Vec<&str> = ordered.iter().map(|r| r.family.as_str()).collect();
+        assert_eq!(families, ["epic", "epic", "epic", "other"]);
     }
 
     #[test]

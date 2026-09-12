@@ -12,9 +12,11 @@
 //! server, so they must not become a way to read arbitrary files.
 
 use super::ActionResult;
+use super::briefs::{self, PromptRoot};
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{ProjectData, WindowId, Workspace};
 use okena_core::specs::{SpecRoot, SpecRootKind, SpecStores, change_slug};
+use okena_knowledge::prompts::{Flow, Vars};
 use okena_openspec::discover::{self, ProjectSource, Sources};
 use okena_openspec::files::{self, DEFAULT_SCHEMA};
 use okena_openspec::{OpenSpecDirs, registry, setup, tree};
@@ -454,54 +456,65 @@ fn date_string(date: time::Date) -> String {
 
 /// Brief an agent to fill in a scaffolded change.
 ///
-/// States the conventions inline rather than assuming the agent knows
-/// OpenSpec: most models have not read it, and a wrong guess produces a
-/// plausible-looking tree in the wrong shape.
-fn brief(idea: &str, change: &str, change_dir: &str, root: &SpecRoot) -> String {
-    let mut out = format!(
-        "Draft an OpenSpec change for this idea: {idea}\n\n\
-         The change directory already exists at `{change_dir}` with its \
-         `.openspec.yaml` and a stub `proposal.md` holding the idea. Work only \
-         inside that directory.\n\n\
-         Follow OpenSpec conventions (https://github.com/Fission-AI/OpenSpec):\n\
-         - `proposal.md` — why this change, and what changes.\n\
-         - `design.md` — the technical approach, when the change needs one.\n\
-         - `tasks.md` — an implementation checklist.\n\
-         - `specs/<capability>/spec.md` — delta specs for the requirements this \
-         change adds, modifies or removes.\n\n\
-         Read the existing `openspec/specs/` before proposing. Prefer plain \
-         Markdown and keep it short. Ask me about anything ambiguous rather \
-         than inventing requirements."
-    );
-    match (root.kind, root.store_id.as_deref()) {
-        (SpecRootKind::Store, Some(id)) => out.push_str(&format!(
-            "\n\nThis is the OpenSpec store `{id}`. If the `openspec` CLI is \
-             installed you may use it; pass `--store {id}` so every command \
-             targets this store, e.g. `openspec status --change {change} --store {id}`. \
-             Do not install the CLI if it is not."
-        )),
-        _ => out.push_str(
-            "\n\nIf the `openspec` CLI is installed you may use it; do not install \
-             it if it is not.",
+/// The prose is a template now (`spec-draft`), so an organisation can change
+/// how its agents are briefed without a release. What stays here is the part a
+/// template cannot decide: whether this root is a store worth naming, and
+/// which referenced stores exist to cite.
+fn brief(
+    idea: &str,
+    change: &str,
+    change_dir: &str,
+    root: &SpecRoot,
+    prompts: PromptRoot,
+) -> String {
+    let mut vars = Vars::new();
+    vars.insert("idea", idea.to_string());
+    vars.insert("change", change.to_string());
+    vars.insert("change_dir", change_dir.to_string());
+    vars.insert("root_path", root.path.clone());
+    vars.insert("store_note", store_note(change, root, &prompts));
+    vars.insert("references", reference_note(root, &prompts));
+    briefs::build(Flow::SpecDraft, prompts.as_ref(), &vars)
+        .rendered
+        .text
+}
+
+/// What to say about the `openspec` CLI, which depends on whether this root is
+/// a store the CLI can be pointed at by id. The decision is here; the words
+/// are the `spec-store-note` and `spec-folder-note` partials.
+fn store_note(change: &str, root: &SpecRoot, prompts: &PromptRoot) -> String {
+    let (name, vars) = match (root.kind, root.store_id.as_deref()) {
+        (SpecRootKind::Store, Some(id)) => (
+            "spec-store-note",
+            Vars::from([("store_id", id.to_string()), ("change", change.to_string())]),
         ),
-    }
-    let references: Vec<_> = root
+        _ => ("spec-folder-note", Vars::new()),
+    };
+    briefs::block(&briefs::fragment(name, prompts.as_ref(), &vars))
+}
+
+/// The referenced stores, as read-only upstream context — or nothing.
+fn reference_note(root: &SpecRoot, prompts: &PromptRoot) -> String {
+    let lines: Vec<String> = root
         .references
         .iter()
         .filter_map(|r| r.root.as_ref().map(|path| (r.id.as_str(), path.as_str())))
+        .map(|(id, path)| {
+            briefs::fragment(
+                "spec-reference",
+                prompts.as_ref(),
+                &Vars::from([("store_id", id.to_string()), ("path", path.to_string())]),
+            )
+        })
         .collect();
-    if !references.is_empty() {
-        out.push_str(
-            "\n\nReferenced stores — read-only upstream context. Fetch what you \
-             need and cite what you use:",
-        );
-        for (id, path) in references {
-            out.push_str(&format!(
-                "\n- `{id}` at `{path}` (e.g. `openspec show <spec-id> --type spec --store {id}`)"
-            ));
-        }
+    if lines.is_empty() {
+        return String::new();
     }
-    out
+    briefs::block(&briefs::fragment(
+        "spec-references",
+        prompts.as_ref(),
+        &Vars::from([("list", lines.join("\n"))]),
+    ))
 }
 
 /// How to hand `command` an opening prompt.
@@ -541,7 +554,9 @@ pub(super) fn spec_agent_shell(
     if command.is_empty() {
         return None;
     }
-    let mut args = prompt_args(&command, prompt);
+    // Named first, so a restart can resume this exact conversation.
+    let mut args = super::agent_resume::session_args(&command);
+    args.extend(prompt_args(&command, prompt));
     args.extend(super::agent_mcp::injection_args(&command, settings));
     Some(okena_terminal::shell_config::ShellType::Custom {
         path: command,
@@ -632,7 +647,8 @@ pub(super) fn draft_change(
     // author to read the existing `openspec/specs/` before proposing, and an
     // agent confined to the new directory cannot.
     let mut session: Option<serde_json::Value> = None;
-    let name = format!("{slug} (spec)");
+    // No "(spec)" suffix: the sidebar badges the row with what it is.
+    let name = slug.clone();
     match ws.add_project(
         name.clone(),
         root.path.clone(),
@@ -652,7 +668,13 @@ pub(super) fn draft_change(
             if let Some(shell) = spec_agent_shell(
                 settings,
                 agent_command.as_deref(),
-                &brief(&idea, &slug, &change_rel, &root),
+                &brief(
+                    &idea,
+                    &slug,
+                    &change_rel,
+                    &root,
+                    briefs::prompt_root(&ws.data.projects, settings),
+                ),
             ) && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id)
             {
                 p.default_shell = Some(shell);
@@ -1148,6 +1170,7 @@ mod tests {
             "add-login",
             "openspec/changes/add-login",
             &root_of(SpecRootKind::Folder, None),
+            None,
         );
         assert!(b.contains("openspec/changes/add-login"));
         for f in okena_core::specs::CHANGE_ARTIFACTS {
@@ -1166,8 +1189,48 @@ mod tests {
             "add-login",
             "openspec/changes/add-login",
             &root_of(SpecRootKind::Store, Some("team-plans")),
+            None,
         );
         assert!(b.contains("--change add-login --store team-plans"));
         assert!(b.contains("`design-system` at `/stores/design-system`"));
+    }
+
+    #[test]
+    fn the_builtin_template_says_exactly_what_the_hardcoded_brief_said() {
+        // The point of the switch is that it changes nothing for somebody with
+        // no templates of their own. This is the whole text, so a reworded
+        // default is a deliberate edit rather than a silent drift.
+        let b = brief(
+            "Add login",
+            "add-login",
+            "openspec/changes/add-login",
+            &root_of(SpecRootKind::Folder, None),
+            None,
+        );
+        assert_eq!(
+            b,
+            "Draft an OpenSpec change for this idea: Add login\n\n\
+             The change directory already exists at `openspec/changes/add-login` with its \
+             `.openspec.yaml` and a stub `proposal.md` holding the idea. Work only \
+             inside that directory.\n\n\
+             Follow OpenSpec conventions (https://github.com/Fission-AI/OpenSpec):\n\
+             - `proposal.md` — why this change, and what changes.\n\
+             - `design.md` — the technical approach, when the change needs one.\n\
+             - `tasks.md` — an implementation checklist.\n\
+             - `specs/<capability>/spec.md` — delta specs for the requirements this \
+             change adds, modifies or removes.\n\n\
+             Read the existing `openspec/specs/` before proposing. Prefer plain \
+             Markdown and keep it short. Ask me about anything ambiguous rather \
+             than inventing requirements.\n\n\
+             If the `openspec` CLI is installed you may use it; do not install \
+             it if it is not.\n\n\
+             Referenced stores — read-only upstream context. Fetch what you \
+             need and cite what you use:\n\
+             - `design-system` at `/stores/design-system` \
+             (e.g. `openspec show <spec-id> --type spec --store design-system`)\n\n"
+                .to_string()
+                + &okena_knowledge::prompts::defaults::partial_body("reporting")
+                    .expect("reporting")
+        );
     }
 }

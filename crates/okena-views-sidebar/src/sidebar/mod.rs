@@ -134,12 +134,13 @@ pub enum SidebarCursorItem {
 
 /// Which list the sidebar body is showing.
 ///
-/// Per-sidebar and not persisted: it is a view toggle, and a window reopening
-/// on the agents list when the user last glanced at it would be surprising.
+/// Per-sidebar and not persisted: it is a view toggle, so every window opens
+/// on the same list. That list is Agents: the running work is what you come
+/// back to okena to check on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SidebarList {
-    #[default]
     Projects,
+    #[default]
     Agents,
 }
 

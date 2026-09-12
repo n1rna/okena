@@ -348,6 +348,15 @@ pub struct ApiProject {
     /// means the same thing on either side, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_change: Option<String>,
+    /// The knowledge root a knowledge session is writing into, by key. Like
+    /// `spec_change`, it names a thing both sides discover for themselves, so
+    /// it crosses unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_root: Option<String>,
+    /// The title a task-drafting session is working towards — the user's own
+    /// words, so it crosses unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_draft: Option<String>,
     /// What a free-form agent session was started to do — the user's own words,
     /// so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1198,6 +1207,26 @@ pub enum ActionRequest {
         /// agent is configured.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Extra context for the agent's opening brief.
+        ///
+        /// How a coordinating agent tells one of its sub-agents what its share
+        /// of the work is and what the others are handling — the task alone
+        /// cannot say that, because the division is a decision somebody made
+        /// about a set of tasks rather than a property of any one of them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        /// Brief the agent to split the task among sub-agents instead of
+        /// doing it. The daemon fetches the sub-tasks itself.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        coordinate: bool,
+        /// Other sub-tasks this agent's group covers, when a coordinator gave
+        /// it several. okena words that in the `group-note` partial.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        also: Vec<String>,
+        /// Sub-tasks being worked in parallel by other agents, when a task
+        /// was fanned out. okena words that in the `fan-out-note` partial.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        siblings: Vec<String>,
     },
     /// Tear down everything created for a task: the agent session, every
     /// worktree created for it, their terminals and the agent processes inside
@@ -1241,6 +1270,13 @@ pub enum ActionRequest {
         /// empty string opens the session on a plain shell.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Marks the session as drafting a task that does not exist yet,
+        /// carrying the title the user typed.
+        ///
+        /// Distinct from `task`, which points at a task that already exists:
+        /// this one is what the agent is going to produce.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_draft: Option<String>,
         /// Task this session is about, when it was started from one.
         ///
         /// Links the session to the task without making it a *work* session:
@@ -1248,6 +1284,22 @@ pub enum ActionRequest {
         /// worktrees and must not move the task into "in progress".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task: Option<crate::tasks::TaskRef>,
+    },
+    /// Render one launch brief, so a client can show or send it.
+    ///
+    /// The resolution — which knowledge store's `templates/` folder overrides
+    /// okena's built-in for this flow — needs the store registry and lives in
+    /// the daemon. A client that built its own prose would silently ignore an
+    /// organisation's templates, so clients send the facts and get the text.
+    PromptRender {
+        /// Flow id, e.g. `break-down`. Unknown ids are refused rather than
+        /// guessed at: a typo should be audible.
+        flow: String,
+        /// The flow's variables. Anything the flow does not declare is
+        /// ignored; anything it declares and this omits renders verbatim and
+        /// comes back in `unknown`.
+        #[serde(default)]
+        vars: std::collections::BTreeMap<String, String>,
     },
     // ─── Engineering harness: OpenSpec ────────────────────────────────────
     //
@@ -1588,6 +1640,32 @@ pub enum ActionRequest {
     AgentReportStatus {
         project_id: String,
         status: String,
+        /// Why the agent stopped, if it has. Absent from older agents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<crate::harness::AgentState>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        question: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        suggestions: Vec<crate::harness::AgentSuggestion>,
+    },
+    /// Type an instruction into a session's agent and submit it.
+    ///
+    /// A dedicated action rather than `SendText`: the daemon knows which of a
+    /// session's terminals runs the agent, submits the text the way an agent's
+    /// prompt needs, and clears the agent's "waiting on you" state in the same
+    /// step — otherwise the attention flag would linger until the agent next
+    /// reported, looking as though your answer had not arrived.
+    AgentSendInstruction {
+        project_id: String,
+        text: String,
+    },
+    /// Restart a session's agent and resume its conversation.
+    ///
+    /// Distinct from closing the terminal and creating a new one, which starts
+    /// a fresh conversation from the original brief: this brings back the same
+    /// one, with everything the agent had read and been told.
+    AgentRestart {
+        project_id: String,
     },
     RenameProjectDirectory {
         project_id: String,
@@ -1907,6 +1985,8 @@ mod tests {
                 task_ref: None,
                 agent: None,
                 spec_change: None,
+                knowledge_root: None,
+                task_draft: None,
                 custom_session: None,
                 pinned: true,
                 last_activity_at: Some(1_700_000_000_000),
