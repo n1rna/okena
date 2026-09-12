@@ -7,6 +7,7 @@
 //! metadata, hook terminals, and lifecycle hooks configuration. No GPUI,
 //! no behavior beyond a few pure helpers.
 
+pub mod agent_tree;
 mod hooks_config;
 mod toast;
 mod transient;
@@ -24,6 +25,6 @@ pub use window_state::{
     AgentSortMode, ProjectLayoutMode, ProjectSortMode, WindowBounds, WindowState,
 };
 pub use workspace_data::{
-    FolderData, HookTerminalEntry, HookTerminalStatus, ProjectData, WorkspaceData,
+    AgentRole, FolderData, HookTerminalEntry, HookTerminalStatus, ProjectData, WorkspaceData,
     WorktreeMetadata, is_bash_prompt_title, now_unix_seconds,
 };

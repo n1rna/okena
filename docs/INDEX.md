@@ -34,6 +34,7 @@ Architecture and build rules live next to the code, not here:
      If everything is "hot", nothing is. -->
 - **Knowledge stores** — the harness Knowledge view over git-backed org knowledge
   repos ([sprint](sprints/sprint-2026-09-10-knowledge-stores.md),
-  [ADR-0003](decisions/0003-knowledge-stores.md)). Next: knowledge at agent launch
-  ([backlog 04](backlog/04-knowledge-context-at-launch.md)) and template-driven
-  prompts ([backlog 05](backlog/05-prompt-templates-from-knowledge.md)).
+  [ADR-0003](decisions/0003-knowledge-stores.md)). Launch briefs come from a
+  store's templates ([reference](reference/knowledge.md#launch-prompts)). Next:
+  knowledge at agent launch
+  ([backlog 04](backlog/04-knowledge-context-at-launch.md)).

@@ -5,7 +5,7 @@
 //! so a session reads identically whether you meet it in the sidebar or in the
 //! overview.
 
-use super::{AgentSessionInfo, AgentSessionKind, AgentSessionPanel, PanelTab};
+use super::{AgentSessionInfo, AgentSessionKind, AgentSessionPanel, PanelTab, SessionActivity};
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_ms};
 use gpui::prelude::*;
@@ -149,6 +149,37 @@ impl AgentSessionPanel {
                     .child(info.root.clone()),
             );
 
+        // What it needs from you, first: an agent waiting on a decision is
+        // the one thing on this panel that is blocking work.
+        let activity = info.activity();
+        if let SessionActivity::NeedsAttention { reason } = activity {
+            let accent = activity.color(&t);
+            let mut attention = v_flex()
+                .mt(px(4.0))
+                .gap(px(4.0))
+                .px(px(8.0))
+                .py(px(6.0))
+                .rounded(px(4.0))
+                .border_l_2()
+                .border_color(rgb(accent))
+                .bg(with_alpha(accent, 0.1))
+                .child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(accent))
+                        .child(reason.label().to_uppercase()),
+                );
+            if let Some(question) = &info.question {
+                attention = attention.child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_primary))
+                        .child(question.clone()),
+                );
+            }
+            body = body.child(attention);
+        }
+
         // What the agent says it is doing, as opposed to what the terminal
         // state implies — the two disagree often enough to show both.
         if let Some(status) = &info.status {
@@ -164,10 +195,51 @@ impl AgentSessionPanel {
             );
         }
 
-        // Stop while it runs, start when it does not — the same slot, since
-        // only one of them ever applies.
+        // The agent's own suggested next steps, as one-click instructions.
+        // Only these: anything else you want to say, you say in its terminal,
+        // where the conversation is — a second text box here was a worse copy
+        // of that prompt.
+        if info.running && !info.suggestions.is_empty() {
+            body = body.child(self.render_suggestions(info, cx));
+        }
+
+        // Restart beside Stop while it runs, beside Start when it does not.
+        // Restart resumes the conversation; Start begins again from the brief.
+        // Both are offered when stopped because they mean different things.
+        let mut controls = h_flex().mt(px(4.0)).gap(px(4.0)).flex_wrap();
+        if info.resumable {
+            controls = controls.child(
+                div()
+                    .id("agent-panel-resume")
+                    .cursor_pointer()
+                    .px(px(10.0))
+                    .py(px(5.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(t.bg_secondary))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_primary))
+                    .child(if info.running {
+                        "Restart agent"
+                    } else {
+                        "Resume session"
+                    })
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new(
+                            "Restart and resume the same conversation",
+                        )
+                        .build(window, cx)
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.resume_agent(cx);
+                        }),
+                    ),
+            );
+        }
         if info.running {
-            body = body.child(
+            controls = controls.child(
                 div()
                     .id("agent-panel-stop")
                     .cursor_pointer()
@@ -188,7 +260,7 @@ impl AgentSessionPanel {
                     ),
             );
         } else {
-            body = body.child(
+            controls = controls.child(
                 div()
                     .id("agent-panel-restart")
                     .cursor_pointer()
@@ -209,6 +281,7 @@ impl AgentSessionPanel {
                     ),
             );
         }
+        body = body.child(controls);
 
         // ── What it is working on ────────────────────────────────────────────
         if let Some(subject) = info.kind.subject() {
@@ -233,6 +306,32 @@ impl AgentSessionPanel {
                         .text_color(rgb(t.text_muted))
                         .child(task.url.clone()),
                 );
+            }
+        }
+
+        // ── The breakdown around it ──────────────────────────────────────────
+        if info.parent.is_some() || !info.children.is_empty() {
+            if let Some(parent) = &info.parent {
+                body = body
+                    .child(self.section_heading("PARENT AGENT", None, cx))
+                    .child(self.related_agent_row(parent, cx));
+            }
+            if !info.children.is_empty() {
+                let waiting = info
+                    .children
+                    .iter()
+                    .filter(|c| c.activity.wants_attention())
+                    .count();
+                body =
+                    body.child(self.section_heading("SUB-AGENTS", Some(info.children.len()), cx));
+                // Said once above the list: which of several sub-agents is
+                // waiting is the question you open a parent's panel to answer.
+                if waiting > 0 {
+                    body = body.child(self.note(format!("{waiting} waiting on you",), cx));
+                }
+                for child in &info.children {
+                    body = body.child(self.related_agent_row(child, cx));
+                }
             }
         }
 
@@ -310,6 +409,109 @@ impl AgentSessionPanel {
         }
 
         body.into_any_element()
+    }
+
+    /// The agent's suggested next steps, each a button that sends it.
+    fn render_suggestions(&self, info: &AgentSessionInfo, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let mut row = h_flex().mt(px(4.0)).gap(px(4.0)).flex_wrap();
+        for (i, suggestion) in info.suggestions.iter().enumerate() {
+            let instruction = suggestion.instruction.clone();
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "agent-suggest-{}-{i}",
+                        info.project_id
+                    )))
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(t.button_primary_bg))
+                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.button_primary_fg))
+                    .child(suggestion.label.clone())
+                    .tooltip({
+                        let text: SharedString = suggestion.instruction.clone().into();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(text.clone()).build(window, cx)
+                        }
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.send_instruction(instruction.clone(), cx);
+                        }),
+                    ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    /// One neighbouring agent: which ticket, how it is doing, and a way in.
+    fn related_agent_row(&self, agent: &super::RelatedAgent, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let id = agent.project_id.clone();
+        let color = agent.activity.color(&t);
+        h_flex()
+            .id(SharedString::from(format!(
+                "related-agent-{}",
+                agent.project_id
+            )))
+            .cursor_pointer()
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .gap(px(6.0))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(4.0))
+            .bg(rgb(t.bg_secondary))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            // The rows that need you stand out without reading every label.
+            .when(agent.activity.wants_attention(), |d| {
+                d.border_l_2().border_color(rgb(color))
+            })
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(rgb(color)),
+            )
+            .children(agent.key.clone().map(|key| {
+                div()
+                    .flex_shrink_0()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(key)
+                    .into_any_element()
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_primary))
+                    .child(agent.name.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(color))
+                    .child(agent.activity.label()),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.open_project(id.clone(), cx);
+                }),
+            )
+            .into_any_element()
     }
 
     /// The armed delete, shown in place of the button.
