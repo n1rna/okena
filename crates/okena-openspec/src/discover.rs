@@ -208,6 +208,7 @@ fn store_root(store: &RegisteredStore, default_store: Option<&str>) -> SpecRoot 
         schema: schema_of(&path),
         healthy: inspection.is_ok(),
         is_default: default_store == Some(store.id.as_str()),
+        git: None,
         references: Vec::new(),
         used_by: Vec::new(),
         status: Vec::new(),
@@ -293,6 +294,7 @@ fn local_root(
         schema: schema_of(path),
         healthy,
         is_default: false,
+        git: None,
         references: Vec::new(),
         used_by: Vec::new(),
         status,
@@ -310,6 +312,7 @@ fn missing_folder(name: String, path: &Path) -> SpecRoot {
         schema: None,
         healthy: false,
         is_default: false,
+        git: None,
         references: Vec::new(),
         used_by: Vec::new(),
         status: vec![

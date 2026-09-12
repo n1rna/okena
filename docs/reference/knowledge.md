@@ -165,25 +165,37 @@ therefore as fresh as the last fetch:
 
 - the checked-out branch and its upstream
 - commits ahead and behind
-- whether there are uncommitted changes
+- the files with uncommitted changes — staged, unstaged and untracked, listed
+  file by file, up to 1 000
 - when the checkout last fetched (the time of `FETCH_HEAD`)
 
 Only a folder with its own `.git` is treated as a checkout. A store folder
 nested inside another repository has no sync state.
 
 - **Fetch** runs `git fetch --all`.
-- **Pull** fetches, then runs `git merge --ff-only @{upstream}`. It refuses a
-  detached HEAD (`detached_head`), a branch without an upstream (`no_upstream`),
-  and a branch that is both ahead and behind (`diverged`). The error names the
-  checkout to fix it in.
+- **Pull** fetches, then runs `git merge --ff-only @{upstream}`. It refuses:
+  - a detached HEAD (`detached_head`)
+  - a branch without an upstream (`no_upstream`)
+  - a branch that is both ahead and behind (`diverged`)
+  - a checkout with uncommitted changes (`uncommitted_changes`)
+
+  The error names the checkout to fix it in.
+- **Commit** takes the listed files and a message. Every path must be one the
+  sync state lists as changed; anything else is refused (`not_a_changed_file`),
+  and so is a file with conflicts (`conflicted_file`). Other staged changes stay
+  out of the commit and stay staged. Nothing is pushed.
+- **Push** sends the branch to its upstream's remote and branch. It refuses a
+  branch the upstream is ahead of (`behind_upstream`). A rejected push
+  (`push_failed`) keeps the commit.
 
 Git runs non-interactively. Credentials must come from an SSH agent or a
 credential helper, and a prompt fails instead of hanging. Only stores sync. A
 project root is synced with its project's own git.
 
-okena commits nothing to a store except the initial commit when creating one,
-and never pushes. Changes are made in a terminal, or by an agent working in the
-checkout.
+okena never commits on its own. The only commit it makes unasked is the initial
+one when creating a store. The shared store git behind all of this, also used
+by OpenSpec stores, is described in
+[ADR-0004](../decisions/0004-store-commit-and-push.md).
 
 ## In okena
 
@@ -193,8 +205,12 @@ checkout.
   - **Entry list:** the open root's entries grouped by kind, with docs nested
     by folder, and a filter over titles, names, paths, descriptions and tags.
     Markdown entries render formatted, and a skill lists its supporting files.
-  - **Store overview:** the branch, the last fetch, and **Fetch** and **Pull**
-    buttons. Pull is offered only when a fast-forward is possible.
+  - **Store overview:** the branch, the last fetch, and **Fetch**, **Pull** and
+    **Push** buttons. Pull and Push are offered only when they can succeed, and
+    a line says why not while there is something to pull or push. Below them
+    are the uncommitted files and a commit box. Leaving the message blank
+    commits with a default that names the file, or the number of files. The
+    Specs view shows the same panel for store and folder roots.
   - **Unresolved stores:** projects that follow a store not on this machine are
     listed under "Followed, not here".
 - **New with agent** opens an agent session in a root, briefed on this layout

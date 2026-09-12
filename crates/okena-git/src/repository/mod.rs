@@ -32,7 +32,7 @@ pub mod upstream;
 pub mod worktree;
 
 pub use init::{commit_paths, has_commit_identity, init_repository, is_repository_at_root};
-pub use upstream::{current_upstream, fast_forward_to_upstream, origin_url};
+pub use upstream::{current_upstream, fast_forward_to_upstream, origin_url, push_to_upstream};
 
 pub use branch::{
     BranchDetail, BranchList, UpstreamState, checkout_local_branch, checkout_remote_branch,

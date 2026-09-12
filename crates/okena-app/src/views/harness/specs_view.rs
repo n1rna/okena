@@ -22,6 +22,7 @@ use okena_core::specs::{
 
 use super::HarnessPane;
 use super::markdown::OpenDocument;
+use super::store_git::{StoreSection, sync_badge};
 
 /// Width of the root and document list. Fixed rather than draggable: the list
 /// holds short names, and a second resizable divider in the harness would be
@@ -335,6 +336,15 @@ impl HarnessPane {
                     }))
                     .child(root.name.clone()),
             )
+            .when_some(root.git.as_ref().and_then(sync_badge), |d, badge| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.warning))
+                        .child(badge),
+                )
+            })
             .when(root.is_default, |d| {
                 d.child(
                     div()
@@ -564,7 +574,7 @@ impl HarnessPane {
         col.into_any_element()
     }
 
-    fn fact_row(&self, label: &str, value: String, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn fact_row(&self, label: &str, value: String, cx: &Context<Self>) -> AnyElement {
         let t = theme(cx);
         h_flex()
             .gap(px(10.0))
@@ -659,6 +669,11 @@ impl HarnessPane {
             col = col.child(self.fact_row("Used by", root.used_by.join(", "), cx));
         }
         col = col.child(self.fact_row("CLI", cli_hint(root), cx));
+        // A store or folder at the top of a checkout; a project root, or a
+        // root without git, has no sync state and shows none.
+        if let Some(git) = root.git.clone() {
+            col = col.child(self.render_store_git(StoreSection::Specs, &git, cx));
+        }
 
         if !root.references.is_empty() {
             col = col.child(
@@ -1197,6 +1212,7 @@ mod tests {
             schema: None,
             healthy: true,
             is_default: false,
+            git: None,
             references: Vec::new(),
             used_by: Vec::new(),
             status: Vec::new(),

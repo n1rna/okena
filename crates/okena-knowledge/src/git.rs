@@ -1,6 +1,7 @@
-//! The git a knowledge checkout needs, over `okena-git`: sync state, clone,
-//! fetch and fast-forward pull. Nothing here commits or pushes; that stays with
-//! the person or the agent working in the checkout.
+//! The git a knowledge checkout needs: clone, plus the store git every store
+//! shares (`okena_git::store`, ADR-0004) — sync state with the changed files,
+//! fetch, fast-forward pull, and a commit of picked files with a separate push
+//! — its errors carried over as [`KnowledgeError`]s with their codes.
 //!
 //! Every probe first checks that the root is itself the top of a checkout. Git
 //! discovers repositories by walking up, so a store folder nested inside
@@ -10,47 +11,14 @@ use crate::registry::{self, RegisterOutcome};
 use crate::{KnowledgeError, display};
 use okena_core::knowledge::{KnowledgeGitStatus, KnowledgeRootKind, KnowledgeStores};
 use okena_git::GitError;
-use okena_git::repository::{self as git, UpstreamState};
+use okena_git::repository as git;
+use okena_git::store;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
 
 /// Local sync state of the checkout at `root`; `None` when `root` is not the
 /// top of one. Reads no network, so it is as fresh as the last fetch.
 pub fn status(root: &Path) -> Option<KnowledgeGitStatus> {
-    if !git::is_repository_at_root(root) {
-        return None;
-    }
-    let (branch, upstream) = match git::current_upstream(root) {
-        Some((branch, upstream)) => (Some(branch), upstream),
-        None => (None, UpstreamState::Untracked),
-    };
-    let (upstream, ahead, behind) = match upstream {
-        UpstreamState::Tracked {
-            name,
-            ahead,
-            behind,
-        } => (Some(name), ahead, behind),
-        UpstreamState::Gone | UpstreamState::Untracked => (None, 0, 0),
-    };
-    Some(KnowledgeGitStatus {
-        branch,
-        upstream,
-        ahead: u32::try_from(ahead).unwrap_or(u32::MAX),
-        behind: u32::try_from(behind).unwrap_or(u32::MAX),
-        // "Could not tell" reads as dirty: the badge only prompts a look.
-        dirty: git::has_uncommitted_changes(root),
-        fetched_at: fetched_at(root),
-    })
-}
-
-/// When the checkout last fetched: `FETCH_HEAD` is rewritten by every fetch.
-fn fetched_at(root: &Path) -> Option<u64> {
-    let fetch_head = git::get_repo_common_dir(root)?.join("FETCH_HEAD");
-    let modified = std::fs::metadata(fetch_head).ok()?.modified().ok()?;
-    modified
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs())
+    store::status(root)
 }
 
 /// Fill in sync state on every healthy store.
@@ -121,81 +89,30 @@ pub fn clone_store(
 
 /// `git fetch --all` in the checkout at `root`.
 pub fn fetch(root: &Path) -> Result<(), KnowledgeError> {
-    require_checkout(root)?;
-    git::fetch_all(root).map_err(|e| {
-        KnowledgeError::new(
-            "fetch_failed",
-            format!("Could not fetch {}: {}", display(root), e.user_detail()),
-        )
-        .with_fix("Check that git can reach the remote from a terminal.")
-    })
+    Ok(store::fetch(root)?)
 }
 
-/// Fetch, then fast-forward the checked-out branch to its upstream.
-///
-/// Anything but a fast-forward is refused with the reason and where to resolve
-/// it: rebasing or merging someone's shared knowledge is a decision, not a
-/// button. Returns the sync state after.
+/// Fetch, then fast-forward a clean checkout's branch to its upstream.
+/// Anything else is refused with the reason and where to resolve it. Returns
+/// the sync state after.
 pub fn pull(root: &Path) -> Result<KnowledgeGitStatus, KnowledgeError> {
-    fetch(root)?;
-    let before = status(root).ok_or_else(|| not_a_checkout(root))?;
-    let at = display(root);
-    let Some(branch) = before.branch.clone() else {
-        return Err(
-            KnowledgeError::new("detached_head", format!("{at} is not on a branch."))
-                .with_fix(format!("Check out a branch in a terminal at {at}.")),
-        );
-    };
-    let Some(upstream) = before.upstream.clone() else {
-        return Err(KnowledgeError::new(
-            "no_upstream",
-            format!("`{branch}` in {at} has no upstream to pull from."),
-        )
-        .with_fix(format!(
-            "Run `git branch --set-upstream-to origin/{branch}` in {at}."
-        )));
-    };
-    if before.ahead > 0 && before.behind > 0 {
-        return Err(KnowledgeError::new(
-            "diverged",
-            format!(
-                "`{branch}` is {} commit(s) ahead of {upstream} and {} behind; okena only fast-forwards.",
-                before.ahead, before.behind
-            ),
-        )
-        .with_fix(format!("Rebase or merge in a terminal at {at}.")));
-    }
-    if before.behind == 0 {
-        return Ok(before);
-    }
-    git::fast_forward_to_upstream(root).map_err(|e| {
-        KnowledgeError::new(
-            "pull_failed",
-            format!(
-                "Could not fast-forward `{branch}` to {upstream}: {}",
-                e.user_detail()
-            ),
-        )
-        .with_fix(format!(
-            "Uncommitted changes to the same files block it; commit or stash them in {at}."
-        ))
-    })?;
-    status(root).ok_or_else(|| not_a_checkout(root))
+    Ok(store::pull(root)?)
 }
 
-fn require_checkout(root: &Path) -> Result<(), KnowledgeError> {
-    if git::is_repository_at_root(root) {
-        Ok(())
-    } else {
-        Err(not_a_checkout(root))
-    }
+/// Commit exactly `paths`, each one the sync state lists as changed, with
+/// `message`. Nothing is pushed. Returns the sync state after.
+pub fn commit(
+    root: &Path,
+    paths: &[String],
+    message: &str,
+) -> Result<KnowledgeGitStatus, KnowledgeError> {
+    Ok(store::commit(root, paths, message)?)
 }
 
-fn not_a_checkout(root: &Path) -> KnowledgeError {
-    KnowledgeError::new(
-        "not_a_git_checkout",
-        format!("{} is not the top of a git checkout.", display(root)),
-    )
+/// Push the checked-out branch to its upstream. A failed push keeps every
+/// local commit. Returns the sync state after.
+pub fn push(root: &Path) -> Result<KnowledgeGitStatus, KnowledgeError> {
+    Ok(store::push(root)?)
 }
 
 #[cfg(test)]
@@ -291,7 +208,9 @@ mod tests {
         assert!(root.join("docs/new.md").is_file());
 
         write(&root.join("docs/local.md"), "x");
-        assert!(status(&root).expect("status").dirty);
+        let dirty = status(&root).expect("status");
+        assert!(dirty.dirty);
+        assert_eq!(dirty.changes[0].path, "docs/local.md");
     }
 
     #[test]
@@ -311,6 +230,12 @@ mod tests {
         std::fs::create_dir_all(&plain).expect("mkdir");
         assert_eq!(
             pull(&plain).expect_err("no repo").code,
+            "not_a_git_checkout"
+        );
+        assert_eq!(
+            commit(&plain, &["docs/a.md".to_string()], "m")
+                .expect_err("no repo")
+                .code,
             "not_a_git_checkout"
         );
     }

@@ -119,8 +119,18 @@ fn execute_at(
                 Err(e) => failed(e),
             }
         }
-        ActionRequest::KnowledgeStoreFetch { root } => sync(registry, projects, root, false),
-        ActionRequest::KnowledgeStorePull { root } => sync(registry, projects, root, true),
+        ActionRequest::KnowledgeStoreFetch { root } => sync(registry, projects, root, |path| {
+            git::fetch(path).map(|()| git::status(path).unwrap_or_default())
+        }),
+        ActionRequest::KnowledgeStorePull { root } => sync(registry, projects, root, git::pull),
+        ActionRequest::KnowledgeStoreCommit {
+            root,
+            paths,
+            message,
+        } => sync(registry, projects, root, |path| {
+            git::commit(path, paths, message)
+        }),
+        ActionRequest::KnowledgeStorePush { root } => sync(registry, projects, root, git::push),
         _ => return None,
     })
 }
@@ -249,9 +259,14 @@ fn register(registry: &Path, path: &str) -> ActionResult {
     }
 }
 
-/// Fetch, or fetch and fast-forward, a store's checkout. Replies with its sync
-/// state after.
-fn sync(registry: &Path, projects: &[ProjectSource], key: &str, pull: bool) -> ActionResult {
+/// Run `op` — fetch, pull, commit or push — in a store's checkout. Replies
+/// with its sync state after.
+fn sync(
+    registry: &Path,
+    projects: &[ProjectSource],
+    key: &str,
+    op: impl FnOnce(&Path) -> Result<okena_core::knowledge::KnowledgeGitStatus, KnowledgeError>,
+) -> ActionResult {
     let root = match resolve_root(registry, projects, Some(key)) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
@@ -262,13 +277,7 @@ fn sync(registry: &Path, projects: &[ProjectSource], key: &str, pull: bool) -> A
             root.name
         ));
     }
-    let path = Path::new(&root.path);
-    let synced = if pull {
-        git::pull(path)
-    } else {
-        git::fetch(path).map(|()| git::status(path).unwrap_or_default())
-    };
-    match synced {
+    match op(Path::new(&root.path)) {
         Ok(status) => to_result(serde_json::to_value(status), "sync state"),
         Err(e) => failed(e),
     }

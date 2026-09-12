@@ -41,6 +41,7 @@ pub use knowledge::{execute_knowledge_action, knowledge_project_sources};
 pub use project::{
     MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
 };
+pub use specs::{execute_spec_git_action, spec_sources};
 
 pub use files::{
     PreparedContentSearch, execute_prepared_content_search,
@@ -700,7 +701,19 @@ pub fn execute_action(
             cx,
         ),
         // ── Engineering harness: OpenSpec ──────────────────────────────────
+        // The daemon runs the listing and the store git off the workspace lock
+        // before they reach this match; these arms keep any other caller of
+        // `execute_action` correct.
         ActionRequest::SpecStores => specs::stores(ws, settings),
+        action @ (ActionRequest::SpecStoreFetch { .. }
+        | ActionRequest::SpecStorePull { .. }
+        | ActionRequest::SpecStoreCommit { .. }
+        | ActionRequest::SpecStorePush { .. }) => specs::execute_spec_git_action(
+            &action,
+            &specs::spec_sources(&ws.data.projects, settings),
+            settings,
+        )
+        .unwrap_or_else(|| ActionResult::Err("not an OpenSpec git action".into())),
         ActionRequest::SpecsTree { root } => specs::tree(ws, settings, root),
         ActionRequest::SpecRead { root, path } => specs::read(ws, settings, root, path),
         ActionRequest::SpecStoreRegister { path, id } => specs::register_store(settings, path, id),
@@ -740,7 +753,9 @@ pub fn execute_action(
         | ActionRequest::KnowledgeStoreUnregister { .. }
         | ActionRequest::KnowledgeStoreSetup { .. }
         | ActionRequest::KnowledgeStoreFetch { .. }
-        | ActionRequest::KnowledgeStorePull { .. }) => knowledge::execute_knowledge_action(
+        | ActionRequest::KnowledgeStorePull { .. }
+        | ActionRequest::KnowledgeStoreCommit { .. }
+        | ActionRequest::KnowledgeStorePush { .. }) => knowledge::execute_knowledge_action(
             &action,
             &knowledge::knowledge_project_sources(&ws.data.projects, settings),
             settings,

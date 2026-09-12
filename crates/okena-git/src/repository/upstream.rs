@@ -53,6 +53,49 @@ pub fn fast_forward_to_upstream(path: &Path) -> GitResult<()> {
     ]))?)
 }
 
+/// Push the checked-out branch to the branch its upstream names, on the
+/// upstream's remote.
+///
+/// Explicit rather than a bare `git push`, whose target depends on
+/// `push.default` and which refuses an upstream named differently from the
+/// branch. A rejection — the remote moved on — is the error, and leaves local
+/// commits as they were.
+pub fn push_to_upstream(path: &Path) -> GitResult<()> {
+    let p = path_str(path)?;
+    let branch = crate::gix_helpers::open(path)
+        .and_then(|repo| head_branch_short(&repo))
+        .ok_or_else(|| crate::error::GitError::InvalidRef("HEAD is not on a branch".into()))?;
+    let output = safe_output(command("git").args([
+        "-C",
+        p,
+        "for-each-ref",
+        "--format",
+        "%(upstream:remotename)\t%(upstream:remoteref)",
+        &format!("refs/heads/{branch}"),
+    ]))?;
+    if !output.status.success() {
+        return require_success(output);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next().unwrap_or("");
+    let Some((remote, remote_ref)) = line
+        .split_once('\t')
+        .filter(|(remote, remote_ref)| !remote.is_empty() && !remote_ref.is_empty())
+    else {
+        return Err(crate::error::GitError::ParseError(format!(
+            "`{branch}` has no upstream to push to"
+        )));
+    };
+    crate::validate_git_ref(remote)?;
+    require_success(safe_output(super::network_command().args([
+        "-C",
+        p,
+        "push",
+        remote,
+        &format!("HEAD:{remote_ref}"),
+    ]))?)
+}
+
 /// Where `origin` fetches from, when there is an `origin`.
 pub fn origin_url(path: &Path) -> Option<String> {
     let p = path_str(path).ok()?;
