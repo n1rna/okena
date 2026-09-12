@@ -74,6 +74,34 @@ fn execute_at(
         ActionRequest::KnowledgeRead { root, path } => {
             read(registry, projects, root.as_deref(), path)
         }
+        ActionRequest::KnowledgeWrite {
+            root,
+            path,
+            content,
+            revision,
+        } => write(registry, projects, root.as_deref(), path, content, revision),
+        ActionRequest::KnowledgeFileCreate {
+            root,
+            path,
+            content,
+        } => in_root(registry, projects, root.as_deref(), |key, dir| {
+            super::document_files::create_file(key, dir, path, content, MAX_DOC_BYTES)
+        }),
+        ActionRequest::KnowledgeFolderCreate { root, path } => {
+            in_root(registry, projects, root.as_deref(), |key, dir| {
+                super::document_files::create_folder(key, dir, path)
+            })
+        }
+        ActionRequest::KnowledgeFileRename { root, from, to } => {
+            in_root(registry, projects, root.as_deref(), |key, dir| {
+                super::document_files::rename(key, dir, tree::resolve_document, from, to)
+            })
+        }
+        ActionRequest::KnowledgeFileDelete { root, path } => {
+            in_root(registry, projects, root.as_deref(), |key, dir| {
+                super::document_files::delete(key, dir, tree::resolve_document, path)
+            })
+        }
         ActionRequest::KnowledgeStoreClone { url, path } => match git::clone_store(
             registry,
             url,
@@ -119,8 +147,18 @@ fn execute_at(
                 Err(e) => failed(e),
             }
         }
-        ActionRequest::KnowledgeStoreFetch { root } => sync(registry, projects, root, false),
-        ActionRequest::KnowledgeStorePull { root } => sync(registry, projects, root, true),
+        ActionRequest::KnowledgeStoreFetch { root } => sync(registry, projects, root, |path| {
+            git::fetch(path).map(|()| git::status(path).unwrap_or_default())
+        }),
+        ActionRequest::KnowledgeStorePull { root } => sync(registry, projects, root, git::pull),
+        ActionRequest::KnowledgeStoreCommit {
+            root,
+            paths,
+            message,
+        } => sync(registry, projects, root, |path| {
+            git::commit(path, paths, message)
+        }),
+        ActionRequest::KnowledgeStorePush { root } => sync(registry, projects, root, git::push),
         _ => return None,
     })
 }
@@ -226,6 +264,7 @@ fn read(
             serde_json::to_value(KnowledgeDocument {
                 root_key: root.key,
                 path: path.to_string(),
+                revision: okena_core::fs::content_revision(&content),
                 content,
             }),
             "knowledge document",
@@ -234,6 +273,59 @@ fn read(
             ActionResult::Err(format!("{path} is not a text file"))
         }
         Err(e) => ActionResult::Err(format!("could not read {path}: {e}")),
+    }
+}
+
+/// Replace an existing file, through the same root and path checks as
+/// [`read`]: a write must not be a way out of a root that a read is not.
+fn write(
+    registry: &Path,
+    projects: &[ProjectSource],
+    key: Option<&str>,
+    path: &str,
+    content: &str,
+    revision: &str,
+) -> ActionResult {
+    let root = match resolve_root(registry, projects, key) {
+        Ok(r) => r,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let real = match tree::resolve_document(Path::new(&root.path), path) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    // What could not be opened must not be written either.
+    if content.len() as u64 > MAX_DOC_BYTES {
+        return ActionResult::Err(format!(
+            "{path} is too large to save ({} KB)",
+            content.len() / 1024
+        ));
+    }
+    match okena_core::fs::replace_if_unchanged(&real, content, revision) {
+        Ok(revision) => ActionResult::Ok(Some(serde_json::json!({
+            "root": root.key,
+            "path": path,
+            "revision": revision,
+        }))),
+        Err(e) => ActionResult::Err(e.describe(path)),
+    }
+}
+
+/// Run `op` with the key and path of the usable root the client named, found
+/// exactly as a read finds it. Creating, renaming and deleting files all go
+/// through here, and through the path checks in `document_files`.
+///
+/// The tree lists entries, not folders, so a folder emptied by a delete or a
+/// rename simply stops showing.
+fn in_root(
+    registry: &Path,
+    projects: &[ProjectSource],
+    key: Option<&str>,
+    op: impl FnOnce(&str, &Path) -> ActionResult,
+) -> ActionResult {
+    match resolve_root(registry, projects, key) {
+        Ok(root) => op(&root.key, Path::new(&root.path)),
+        Err(e) => ActionResult::Err(e),
     }
 }
 
@@ -249,9 +341,14 @@ fn register(registry: &Path, path: &str) -> ActionResult {
     }
 }
 
-/// Fetch, or fetch and fast-forward, a store's checkout. Replies with its sync
-/// state after.
-fn sync(registry: &Path, projects: &[ProjectSource], key: &str, pull: bool) -> ActionResult {
+/// Run `op` — fetch, pull, commit or push — in a store's checkout. Replies
+/// with its sync state after.
+fn sync(
+    registry: &Path,
+    projects: &[ProjectSource],
+    key: &str,
+    op: impl FnOnce(&Path) -> Result<okena_core::knowledge::KnowledgeGitStatus, KnowledgeError>,
+) -> ActionResult {
     let root = match resolve_root(registry, projects, Some(key)) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
@@ -262,13 +359,7 @@ fn sync(registry: &Path, projects: &[ProjectSource], key: &str, pull: bool) -> A
             root.name
         ));
     }
-    let path = Path::new(&root.path);
-    let synced = if pull {
-        git::pull(path)
-    } else {
-        git::fetch(path).map(|()| git::status(path).unwrap_or_default())
-    };
-    match synced {
+    match op(Path::new(&root.path)) {
         Ok(status) => to_result(serde_json::to_value(status), "sync state"),
         Err(e) => failed(e),
     }
@@ -672,6 +763,164 @@ mod tests {
                 },
             ))
             .contains("too large")
+        );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn a_write_replaces_what_was_read_and_refuses_stale_revisions_and_escapes() {
+        let sandbox = tmpdir("write");
+        let checkout = sandbox.join("eng");
+        store(&checkout, "acme-eng");
+        write(&sandbox.join("outside.md"), "SECRET");
+        okena_knowledge::registry::register(&registry(&sandbox), &checkout.to_string_lossy(), None)
+            .unwrap();
+        let save = |path: &str, content: &str, revision: &str| {
+            run(
+                &sandbox,
+                &[],
+                ActionRequest::KnowledgeWrite {
+                    root: None,
+                    path: path.into(),
+                    content: content.into(),
+                    revision: revision.into(),
+                },
+            )
+        };
+
+        let doc: KnowledgeDocument = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeRead {
+                root: None,
+                path: "docs/readme.md".into(),
+            },
+        ));
+        let saved: serde_json::Value = ok!(save("docs/readme.md", "# Edited\n", &doc.revision));
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("docs/readme.md")).unwrap(),
+            "# Edited\n"
+        );
+        let reopened: KnowledgeDocument = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeRead {
+                root: None,
+                path: "docs/readme.md".into(),
+            },
+        ));
+        assert_eq!(reopened.content, "# Edited\n");
+        assert_eq!(saved["revision"], reopened.revision);
+
+        // The revision from before the first save is stale now.
+        assert!(
+            err(save("docs/readme.md", "# Clobber\n", &doc.revision)).contains("changed on disk")
+        );
+        assert_eq!(reopened.content, "# Edited\n");
+
+        let outside = okena_core::fs::content_revision("SECRET");
+        assert!(!err(save("docs/../../outside.md", "pwned", &outside)).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
+            "SECRET"
+        );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn entries_are_created_renamed_and_deleted_through_the_actions_and_never_outside() {
+        let sandbox = tmpdir("files");
+        let checkout = sandbox.join("eng");
+        store(&checkout, "acme-eng");
+        write(&sandbox.join("outside.md"), "SECRET");
+        okena_knowledge::registry::register(&registry(&sandbox), &checkout.to_string_lossy(), None)
+            .unwrap();
+        let create = |path: &str, content: &str| {
+            run(
+                &sandbox,
+                &[],
+                ActionRequest::KnowledgeFileCreate {
+                    root: None,
+                    path: path.into(),
+                    content: content.into(),
+                },
+            )
+        };
+        let rename = |from: &str, to: &str| {
+            run(
+                &sandbox,
+                &[],
+                ActionRequest::KnowledgeFileRename {
+                    root: None,
+                    from: from.into(),
+                    to: to.into(),
+                },
+            )
+        };
+        let delete = |path: &str| {
+            run(
+                &sandbox,
+                &[],
+                ActionRequest::KnowledgeFileDelete {
+                    root: None,
+                    path: path.into(),
+                },
+            )
+        };
+
+        // A new skill is on disk where the tree says, and listed.
+        let created: serde_json::Value = ok!(create(
+            "skills/release/SKILL.md",
+            "---\nname: release\n---\n"
+        ));
+        assert_eq!(created["path"], "skills/release/SKILL.md");
+        let tree: KnowledgeTree = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeTree { root: None },
+        ));
+        assert!(tree.entry("skills/release/SKILL.md").is_some());
+
+        // Collisions, hidden names and escapes are refused with a reason.
+        assert!(err(create("docs/readme.md", "clobber")).contains("already exists"));
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("docs/readme.md")).unwrap(),
+            "# Readme\n"
+        );
+        for bad in [
+            "docs/../../outside-new.md",
+            ".okena-knowledge/store.yaml",
+            "  ",
+        ] {
+            assert!(!err(create(bad, "x")).is_empty(), "accepted {bad:?}");
+        }
+        assert!(!sandbox.join("outside-new.md").exists());
+
+        let renamed: serde_json::Value = ok!(rename("docs/readme.md", "docs/guides/readme.md"));
+        assert_eq!(renamed["path"], "docs/guides/readme.md");
+        assert!(checkout.join("docs/guides/readme.md").is_file());
+        assert!(!checkout.join("docs/readme.md").exists());
+        assert!(!err(rename("docs/../../outside.md", "docs/x.md")).is_empty());
+        assert!(!err(rename("docs/guides/readme.md", "../escaped.md")).is_empty());
+        assert!(!sandbox.join("escaped.md").exists());
+
+        let _: serde_json::Value = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeFolderCreate {
+                root: None,
+                path: "templates/flows".into(),
+            },
+        ));
+        assert!(checkout.join("templates/flows").is_dir());
+
+        assert!(!err(delete("docs/guides")).is_empty(), "a folder");
+        assert!(!err(delete("docs/../../outside.md")).is_empty());
+        let _: serde_json::Value = ok!(delete("docs/guides/readme.md"));
+        assert!(!checkout.join("docs/guides/readme.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
+            "SECRET"
         );
         std::fs::remove_dir_all(&sandbox).ok();
     }

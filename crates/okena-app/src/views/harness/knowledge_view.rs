@@ -2,9 +2,10 @@
 //! one you pick.
 //!
 //! Roots are whatever the daemon discovered (ADR-0003): stores in okena's
-//! registry and the kind folders projects carry. Reading, fetching and pulling
-//! all go through the daemon, which refuses roots it did not discover and paths
-//! outside a root; the client never touches the filesystem.
+//! registry and the kind folders projects carry. Reading, saving, fetching and
+//! pulling all go through the daemon, which refuses roots it did not discover
+//! and paths outside a root; the client never touches the filesystem. Files
+//! edit through the editor the Specs view shares (`editor.rs`).
 
 use crate::theme::{ThemeColors, theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
@@ -14,14 +15,15 @@ use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
 use okena_core::knowledge::{
-    Diagnostic, KnowledgeDocument, KnowledgeEntry, KnowledgeGitStatus, KnowledgeKind,
-    KnowledgeRoot, KnowledgeRootKind, KnowledgeStores, KnowledgeTree, Severity,
+    Diagnostic, KnowledgeDocument, KnowledgeEntry, KnowledgeKind, KnowledgeRoot, KnowledgeRootKind,
+    KnowledgeStores, KnowledgeTree, Severity,
 };
 use okena_ui::simple_input::InputChangedEvent;
 use std::collections::HashSet;
 
-use super::HarnessPane;
-use super::markdown::OpenDocument;
+use super::editor::{DocumentBuffer, Documents};
+use super::store_git::{StoreGitPanel, StoreSection, sync_badge};
+use super::{HarnessPane, HarnessSection};
 
 /// Width of the root and entry list, matching the Specs view.
 const TREE_WIDTH: f32 = 280.0;
@@ -38,14 +40,13 @@ pub(crate) struct KnowledgeState {
     /// left is dropped instead of replacing the newer one.
     pub(crate) load_generation: u64,
     pub(crate) error: Option<String>,
-    /// A fetch or pull is running.
-    pub(crate) syncing: bool,
-    /// What the last fetch or pull found, e.g. "3 new commits pulled".
-    pub(crate) sync_message: Option<String>,
+    /// The open store's fetch, pull, commit and push.
+    pub(crate) git: StoreGitPanel,
     /// Path of the file being read, relative to the root: an entry, or one of
     /// a skill's supporting files.
     pub(crate) selected: Option<String>,
-    pub(crate) document: Option<OpenDocument>,
+    /// The open file's buffer, and any other with unsaved edits.
+    pub(crate) documents: Documents,
     pub(crate) content_error: Option<String>,
     pub(crate) filter: Entity<SimpleInputState>,
     /// Groups (`docs`) and doc folders (`docs/ci`) folded shut. Collapsed
@@ -69,19 +70,22 @@ impl KnowledgeState {
             loading: false,
             load_generation: 0,
             error: None,
-            syncing: false,
-            sync_message: None,
+            git: StoreGitPanel::new(cx),
             selected: None,
-            document: None,
+            documents: Documents::default(),
             content_error: None,
             filter,
             collapsed: HashSet::new(),
         }
     }
 
+    /// Stop showing the open file. Its buffer stays only if it holds unsaved
+    /// edits. Call before `root_key` changes: buffers are keyed by it.
     fn clear_selection(&mut self) {
-        self.selected = None;
-        self.document = None;
+        if let Some(path) = self.selected.take() {
+            self.documents
+                .leave(self.root_key.as_deref().unwrap_or_default(), &path);
+        }
         self.content_error = None;
     }
 
@@ -214,43 +218,6 @@ fn nest_docs<'a>(
     }
 }
 
-/// `↑2 ↓3 •` — commits to push, commits to pull, uncommitted changes. `None`
-/// when there is nothing to say.
-pub(crate) fn sync_badge(git: &KnowledgeGitStatus) -> Option<String> {
-    let mut parts = Vec::new();
-    if git.ahead > 0 {
-        parts.push(format!("↑{}", git.ahead));
-    }
-    if git.behind > 0 {
-        parts.push(format!("↓{}", git.behind));
-    }
-    if git.dirty {
-        parts.push("•".to_string());
-    }
-    (!parts.is_empty()).then(|| parts.join(" "))
-}
-
-/// "fetched 2h ago", from Unix seconds.
-pub(crate) fn fetched_ago(now: u64, fetched_at: Option<u64>) -> String {
-    let Some(at) = fetched_at else {
-        return "never fetched".to_string();
-    };
-    let secs = now.saturating_sub(at);
-    match secs {
-        0..60 => "fetched just now".to_string(),
-        60..3_600 => format!("fetched {}m ago", secs / 60),
-        3_600..86_400 => format!("fetched {}h ago", secs / 3_600),
-        _ => format!("fetched {}d ago", secs / 86_400),
-    }
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 fn kind_label(kind: KnowledgeRootKind) -> &'static str {
     match kind {
         KnowledgeRootKind::Store => "store",
@@ -359,9 +326,12 @@ impl HarnessPane {
                                     this.knowledge.tree = Some(tree);
                                     // A file deleted or renamed since it was
                                     // opened must not stay on screen looking
-                                    // current.
+                                    // current — unless it holds edits, which
+                                    // would go with it.
+                                    let root = this.knowledge.root_key.clone().unwrap_or_default();
                                     if let Some(path) = this.knowledge.selected.clone()
                                         && !this.knowledge.tree_contains(&path)
+                                        && !this.knowledge.documents.is_dirty(&root, &path)
                                     {
                                         this.knowledge.clear_selection();
                                     }
@@ -386,20 +356,27 @@ impl HarnessPane {
         if self.knowledge.root_key.as_deref() == Some(key.as_str()) {
             return;
         }
+        self.knowledge.clear_selection();
         self.knowledge.root_key = Some(key);
         self.knowledge.tree = None;
-        self.knowledge.sync_message = None;
-        self.knowledge.clear_selection();
         self.knowledge.collapsed.clear();
         self.refresh_knowledge(cx);
     }
 
-    /// Open one file of the current root.
-    fn open_knowledge_file(&mut self, path: String, cx: &mut Context<Self>) {
+    /// Open one file of the current root: its held buffer when it has unsaved
+    /// edits, else a fresh read.
+    pub(super) fn open_knowledge_file(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.knowledge.selected.as_deref() != Some(path.as_str()) {
+            self.knowledge.clear_selection();
+        }
         self.knowledge.selected = Some(path.clone());
-        self.knowledge.document = None;
         self.knowledge.content_error = None;
         cx.notify();
+
+        let root_key = self.knowledge.root_key.clone().unwrap_or_default();
+        if self.knowledge.documents.get(&root_key, &path).is_some() {
+            return;
+        }
 
         let client = self.client.clone();
         let root = self.knowledge.root_key.clone();
@@ -419,86 +396,17 @@ impl HarnessPane {
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     // A slow read must not replace a file opened after it.
-                    if this.knowledge.selected.as_deref() != Some(wanted.as_str()) {
+                    if this.knowledge.selected.as_deref() != Some(wanted.as_str())
+                        || this.knowledge.root_key.clone().unwrap_or_default() != root_key
+                    {
                         return;
                     }
                     match result {
-                        Ok(doc) => {
-                            this.knowledge.document = Some(OpenDocument::from_file(
-                                &doc.path,
-                                doc.content,
-                                theme(cx).is_dark(),
-                            ));
-                        }
+                        Ok(doc) => this.knowledge.documents.insert(
+                            &root_key,
+                            DocumentBuffer::new(doc.path, doc.content, doc.revision),
+                        ),
                         Err(e) => this.knowledge.content_error = Some(e),
-                    }
-                    cx.notify();
-                });
-            });
-        })
-        .detach();
-    }
-
-    /// Fetch, or fetch and fast-forward, the open store; then re-list so the
-    /// sync badge and the entries catch up.
-    fn sync_knowledge_root(&mut self, pull: bool, cx: &mut Context<Self>) {
-        let Some(root) = self.knowledge.root_key.clone() else {
-            return;
-        };
-        if self.knowledge.syncing {
-            return;
-        }
-        let behind_before = self
-            .knowledge
-            .stores
-            .as_ref()
-            .and_then(|s| s.root(&root))
-            .and_then(|r| r.git.as_ref())
-            .map_or(0, |g| g.behind);
-        self.knowledge.syncing = true;
-        self.knowledge.sync_message = None;
-        self.knowledge.error = None;
-        cx.notify();
-
-        let client = self.client.clone();
-        cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
-                let action = if pull {
-                    ActionRequest::KnowledgeStorePull { root }
-                } else {
-                    ActionRequest::KnowledgeStoreFetch { root }
-                };
-                client
-                    .post_action(action)
-                    .and_then(|v| v.ok_or_else(|| "Missing sync state".to_string()))
-                    .and_then(|v| {
-                        serde_json::from_value::<KnowledgeGitStatus>(v)
-                            .map_err(|e| format!("Unexpected sync state: {e}"))
-                    })
-            })
-            .await;
-
-            cx.update(|cx| {
-                let _ = this.update(cx, |this, cx| {
-                    this.knowledge.syncing = false;
-                    match result {
-                        Ok(git) => {
-                            this.knowledge.sync_message = Some(if pull {
-                                match behind_before.max(git.behind) {
-                                    _ if git.behind > 0 => {
-                                        format!("{} commit(s) still to pull", git.behind)
-                                    }
-                                    0 => "Already up to date".to_string(),
-                                    n => format!("Pulled {n} commit(s)"),
-                                }
-                            } else if git.behind > 0 {
-                                format!("{} new commit(s) to pull", git.behind)
-                            } else {
-                                "Up to date".to_string()
-                            });
-                            this.refresh_knowledge(cx);
-                        }
-                        Err(e) => this.knowledge.error = Some(e),
                     }
                     cx.notify();
                 });
@@ -752,7 +660,12 @@ impl HarnessPane {
                     } else {
                         t.text_secondary
                     }))
-                    .child(entry.title.clone()),
+                    .child(format!(
+                        "{}{}",
+                        self.unsaved_marker(HarnessSection::Knowledge, &entry.path)
+                            .unwrap_or_default(),
+                        entry.title
+                    )),
             )
             .when(warned, |d| {
                 d.child(
@@ -814,14 +727,33 @@ impl HarnessPane {
         };
 
         col = col.child(
-            div().pt(px(10.0)).child(
-                okena_ui::input::input_container(&t, None)
-                    .w_full()
-                    .px(px(6.0))
-                    .py(px(4.0))
-                    .child(SimpleInput::new(&self.knowledge.filter).text_size(ui_text_md(cx))),
-            ),
+            h_flex()
+                .pt(px(10.0))
+                .gap(px(4.0))
+                .items_center()
+                .child(
+                    okena_ui::input::input_container(&t, None)
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(6.0))
+                        .py(px(4.0))
+                        .child(SimpleInput::new(&self.knowledge.filter).text_size(ui_text_md(cx))),
+                )
+                .child(self.add_button(
+                    "knowledge-new-entry",
+                    "New entry",
+                    |this, window, cx| {
+                        this.open_new_form(
+                            HarnessSection::Knowledge,
+                            super::file_ops::NewItem::Knowledge(KnowledgeKind::Doc),
+                            window,
+                            cx,
+                        )
+                    },
+                    cx,
+                )),
         );
+        col = col.children(self.render_new_form(HarnessSection::Knowledge, cx));
         for d in &tree.status {
             col = col.child(
                 div()
@@ -863,38 +795,8 @@ impl HarnessPane {
         col.into_any_element()
     }
 
-    fn sync_button(
-        &self,
-        id: &'static str,
-        label: &str,
-        enabled: bool,
-        pull: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if enabled && !self.knowledge.syncing {
-            return self.small_button(
-                id,
-                label,
-                cx.listener(move |this, _, _window, cx| this.sync_knowledge_root(pull, cx)),
-                cx,
-            );
-        }
-        let t = theme(cx);
-        div()
-            .id(id)
-            .flex_shrink_0()
-            .px(px(10.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
-            .bg(rgb(t.bg_secondary))
-            .text_size(ui_text_md(cx))
-            .text_color(rgb(t.text_muted))
-            .child(label.to_string())
-            .into_any_element()
-    }
-
-    /// Right column with nothing open: what this root is, its sync state and
-    /// its problems.
+    /// Right column with nothing open: what this root is, its sync state, its
+    /// uncommitted changes and its problems.
     fn render_knowledge_overview(
         &self,
         root: &KnowledgeRoot,
@@ -948,54 +850,7 @@ impl HarnessPane {
         }
 
         if let Some(git) = root.git.clone() {
-            let branch = match (&git.branch, &git.upstream) {
-                (Some(b), Some(u)) => format!("{b} → {u}"),
-                (Some(b), None) => format!("{b} (no upstream)"),
-                (None, _) => "detached HEAD".to_string(),
-            };
-            col = col.child(self.kn_fact("Branch", branch, cx));
-            let state = match sync_badge(&git) {
-                Some(badge) => badge,
-                None if git.upstream.is_some() => "in sync".to_string(),
-                None => "clean".to_string(),
-            };
-            col = col.child(self.kn_fact(
-                "Sync",
-                format!("{state} · {}", fetched_ago(now_secs(), git.fetched_at)),
-                cx,
-            ));
-            let fetch_label = if self.knowledge.syncing {
-                "Syncing…"
-            } else {
-                "Fetch"
-            };
-            col = col.child(
-                h_flex()
-                    .gap(px(6.0))
-                    .pt(px(4.0))
-                    .child(self.sync_button(
-                        "knowledge-fetch",
-                        fetch_label,
-                        git.upstream.is_some(),
-                        false,
-                        cx,
-                    ))
-                    .child(self.sync_button(
-                        "knowledge-pull",
-                        "Pull",
-                        git.can_fast_forward(),
-                        true,
-                        cx,
-                    )),
-            );
-            if let Some(message) = self.knowledge.sync_message.clone() {
-                col = col.child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_muted))
-                        .child(message),
-                );
-            }
+            col = col.child(self.render_store_git(StoreSection::Knowledge, &git, cx));
         }
 
         if !root.status.is_empty() {
@@ -1072,10 +927,13 @@ impl HarnessPane {
             let mut files = v_flex().gap(px(1.0));
             for file in &entry.files {
                 let path = file.clone();
-                let label = file
-                    .strip_prefix(entry.path.trim_end_matches("SKILL.md"))
-                    .unwrap_or(file)
-                    .to_string();
+                let label = format!(
+                    "{}{}",
+                    self.unsaved_marker(HarnessSection::Knowledge, file)
+                        .unwrap_or_default(),
+                    file.strip_prefix(entry.path.trim_end_matches("SKILL.md"))
+                        .unwrap_or(file)
+                );
                 files = files.child(
                     div()
                         .id(SharedString::from(format!("knowledge-file-{file}")))
@@ -1138,29 +996,50 @@ impl HarnessPane {
             };
         };
 
-        let entry = self
-            .knowledge
-            .tree
-            .as_ref()
-            .and_then(|tree| tree.entry(&path))
-            .cloned();
-        let mut page = v_flex()
-            .w_full()
-            .max_w(okena_markdown::DOC_MAX_WIDTH)
-            .min_w_0();
-        if let Some(entry) = &entry {
-            page = page.child(self.render_entry_meta(entry, cx));
-        }
-        page = if let Some(err) = &self.knowledge.content_error {
-            page.child(self.error_banner(err.clone(), cx))
-        } else {
-            match &self.knowledge.document {
-                Some(document) => {
-                    page.children(self.render_open_document(document, "knowledge", cx))
+        let section = HarnessSection::Knowledge;
+        let buffer = self.open_buffer(section);
+        let body: AnyElement = match buffer {
+            // The source carries the frontmatter the meta block is drawn from,
+            // so editing shows the editor alone.
+            Some(buffer) if buffer.editing() => self
+                .render_document_editor(section, buffer, cx)
+                .unwrap_or_else(|| self.info_banner("Loading…".into(), cx)),
+            _ => {
+                let entry = self
+                    .knowledge
+                    .tree
+                    .as_ref()
+                    .and_then(|tree| tree.entry(&path))
+                    .cloned();
+                let mut page = v_flex()
+                    .w_full()
+                    .max_w(okena_markdown::DOC_MAX_WIDTH)
+                    .min_w_0();
+                if let Some(entry) = &entry {
+                    page = page.child(self.render_entry_meta(entry, cx));
                 }
-                None => page.child(self.info_banner("Loading…".into(), cx)),
+                page = if let Some(err) = &self.knowledge.content_error {
+                    page.child(self.error_banner(err.clone(), cx))
+                } else {
+                    match buffer {
+                        Some(buffer) => page.children(self.render_document_preview(buffer, cx)),
+                        None => page.child(self.info_banner("Loading…".into(), cx)),
+                    }
+                };
+                v_flex()
+                    .id("knowledge-document-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(20.0))
+                    .py(px(14.0))
+                    .child(page)
+                    .into_any_element()
             }
         };
+        let save_error = buffer
+            .and_then(|b| b.save_error.clone())
+            .map(|e| self.error_banner(e, cx));
 
         let header = match root {
             Some(root) => format!("{} · {path}", root.name),
@@ -1173,6 +1052,8 @@ impl HarnessPane {
             .child(
                 h_flex()
                     .w_full()
+                    .flex_shrink_0()
+                    .items_center()
                     .px(px(16.0))
                     .py(px(6.0))
                     .gap(px(8.0))
@@ -1187,6 +1068,8 @@ impl HarnessPane {
                             .text_color(rgb(t.text_muted))
                             .child(header),
                     )
+                    .children(self.render_document_controls(section, cx))
+                    .children(self.render_file_controls(section, cx))
                     .child(self.small_button(
                         "knowledge-close-entry",
                         "Overview",
@@ -1197,16 +1080,9 @@ impl HarnessPane {
                         cx,
                     )),
             )
-            .child(
-                v_flex()
-                    .id("knowledge-document-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(20.0))
-                    .py(px(14.0))
-                    .child(page),
-            )
+            .children(self.render_file_op_bar(section, cx))
+            .children(save_error)
+            .child(body)
             .into_any_element()
     }
 
@@ -1258,7 +1134,12 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    pub(super) fn render_knowledge_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_knowledge_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.ensure_document_input(HarnessSection::Knowledge, window, cx);
         let t = theme(cx);
         let view = v_flex().size_full();
 
@@ -1364,8 +1245,8 @@ impl HarnessPane {
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{Group, Row, entry_matches, fetched_ago, group_entries, sync_badge};
-    use okena_core::knowledge::{KnowledgeEntry, KnowledgeGitStatus, KnowledgeKind};
+    use super::{Group, Row, entry_matches, group_entries};
+    use okena_core::knowledge::{KnowledgeEntry, KnowledgeKind};
     use std::collections::HashSet;
 
     fn entry(kind: KnowledgeKind, name: &str) -> KnowledgeEntry {
@@ -1479,31 +1360,5 @@ mod tests {
         );
         assert!(group_entries(&entries, "nothing-like-this", &collapsed).is_empty());
         assert!(entry_matches(&entries[0], "   "));
-    }
-
-    #[test]
-    fn the_sync_badge_says_only_what_needs_attention() {
-        let git = |ahead, behind, dirty| KnowledgeGitStatus {
-            ahead,
-            behind,
-            dirty,
-            ..Default::default()
-        };
-        assert_eq!(sync_badge(&git(0, 0, false)), None);
-        assert_eq!(sync_badge(&git(0, 3, false)).as_deref(), Some("↓3"));
-        assert_eq!(sync_badge(&git(2, 3, true)).as_deref(), Some("↑2 ↓3 •"));
-        assert_eq!(sync_badge(&git(0, 0, true)).as_deref(), Some("•"));
-    }
-
-    #[test]
-    fn fetch_age_reads_in_the_largest_whole_unit() {
-        let now = 1_000_000;
-        assert_eq!(fetched_ago(now, None), "never fetched");
-        assert_eq!(fetched_ago(now, Some(now - 5)), "fetched just now");
-        assert_eq!(fetched_ago(now, Some(now - 150)), "fetched 2m ago");
-        assert_eq!(fetched_ago(now, Some(now - 7_300)), "fetched 2h ago");
-        assert_eq!(fetched_ago(now, Some(now - 3 * 86_400)), "fetched 3d ago");
-        // A clock that moved backwards is not "in the future".
-        assert_eq!(fetched_ago(now, Some(now + 60)), "fetched just now");
     }
 }

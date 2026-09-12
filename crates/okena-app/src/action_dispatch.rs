@@ -981,6 +981,17 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::SpecStores => ActionRequest::SpecStores,
         ActionRequest::SpecsTree { root } => ActionRequest::SpecsTree { root },
         ActionRequest::SpecRead { root, path } => ActionRequest::SpecRead { root, path },
+        ActionRequest::SpecWrite {
+            root,
+            path,
+            content,
+            revision,
+        } => ActionRequest::SpecWrite {
+            root,
+            path,
+            content,
+            revision,
+        },
         ActionRequest::SpecStoreRegister { path, id } => {
             ActionRequest::SpecStoreRegister { path, id }
         }
@@ -1008,17 +1019,32 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             name,
             agent_command,
         },
+        passthrough @ (ActionRequest::SpecStoreFetch { .. }
+        | ActionRequest::SpecStorePull { .. }
+        | ActionRequest::SpecStoreCommit { .. }
+        | ActionRequest::SpecStorePush { .. }
+        | ActionRequest::SpecFileCreate { .. }
+        | ActionRequest::SpecFolderCreate { .. }
+        | ActionRequest::SpecFileRename { .. }
+        | ActionRequest::SpecFileDelete { .. }) => passthrough,
         // Knowledge actions likewise carry only root keys the daemon
         // discovered, paths and URLs.
         passthrough @ (ActionRequest::KnowledgeStores
         | ActionRequest::KnowledgeTree { .. }
         | ActionRequest::KnowledgeRead { .. }
+        | ActionRequest::KnowledgeWrite { .. }
+        | ActionRequest::KnowledgeFileCreate { .. }
+        | ActionRequest::KnowledgeFolderCreate { .. }
+        | ActionRequest::KnowledgeFileRename { .. }
+        | ActionRequest::KnowledgeFileDelete { .. }
         | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreRegister { .. }
         | ActionRequest::KnowledgeStoreUnregister { .. }
         | ActionRequest::KnowledgeStoreSetup { .. }
         | ActionRequest::KnowledgeStoreFetch { .. }
         | ActionRequest::KnowledgeStorePull { .. }
+        | ActionRequest::KnowledgeStoreCommit { .. }
+        | ActionRequest::KnowledgeStorePush { .. }
         | ActionRequest::KnowledgeDraft { .. }) => passthrough,
         // Task actions carry provider ids, not okena ids, so they cross
         // unchanged.

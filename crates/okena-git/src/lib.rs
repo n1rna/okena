@@ -8,6 +8,7 @@ pub mod error;
 pub mod file_history;
 pub(crate) mod gix_helpers;
 pub mod repository;
+pub mod store;
 
 pub use blame::{BlameCommit, BlameError, BlameKind, BlameLine, get_blame};
 pub use commit_graph::fetch_commit_log;

@@ -29,7 +29,11 @@ fn dirs(settings: &AppSettings) -> OpenSpecDirs {
     OpenSpecDirs::detect(specs.data_dir.as_deref(), specs.config_dir.as_deref())
 }
 
-fn sources(projects: &[ProjectData], settings: &AppSettings) -> Sources {
+/// What discovery looks at: the registry, the projects and the folders.
+///
+/// Copied out of the workspace, so the daemon can run discovery — and the git
+/// a listing runs in every store — without holding the workspace lock.
+pub fn spec_sources(projects: &[ProjectData], settings: &AppSettings) -> Sources {
     let specs = &settings.harness.specs;
     let projects = if specs.projects {
         projects
@@ -53,10 +57,6 @@ fn sources(projects: &[ProjectData], settings: &AppSettings) -> Sources {
     }
 }
 
-fn snapshot(projects: &[ProjectData], settings: &AppSettings) -> SpecStores {
-    discover::discover(&dirs(settings), &sources(projects, settings))
-}
-
 fn to_result(value: serde_json::Result<serde_json::Value>, what: &str) -> ActionResult {
     match value {
         Ok(v) => ActionResult::Ok(Some(v)),
@@ -66,10 +66,86 @@ fn to_result(value: serde_json::Result<serde_json::Value>, what: &str) -> Action
 
 /// Every root okena can see.
 pub(super) fn stores(ws: &Workspace, settings: &AppSettings) -> ActionResult {
+    listing_result(&spec_sources(&ws.data.projects, settings), settings)
+}
+
+fn listing_result(sources: &Sources, settings: &AppSettings) -> ActionResult {
     to_result(
-        serde_json::to_value(snapshot(&ws.data.projects, settings)),
+        serde_json::to_value(listing(sources, settings)),
         "spec stores",
     )
+}
+
+/// Every root, with sync state on each store and folder at the top of a git
+/// checkout. A project root carries none: its project's own git owns it.
+fn listing(sources: &Sources, settings: &AppSettings) -> SpecStores {
+    let mut stores = discover::discover(&dirs(settings), sources);
+    for root in stores
+        .roots
+        .iter_mut()
+        .filter(|r| r.kind != SpecRootKind::Project && r.healthy)
+    {
+        root.git = okena_git::store::status(Path::new(&root.path));
+    }
+    stores
+}
+
+/// Run an OpenSpec action that runs git in store checkouts — the listing
+/// (`git status` in every store), fetch, pull, commit and push — against
+/// discovery sources copied out of the workspace. `None` for any other action.
+///
+/// None of them touches the workspace, so the daemon runs them on its blocking
+/// pool rather than under the workspace lock.
+pub fn execute_spec_git_action(
+    action: &okena_core::api::ActionRequest,
+    sources: &Sources,
+    settings: &AppSettings,
+) -> Option<ActionResult> {
+    use okena_core::api::ActionRequest;
+    use okena_git::store;
+    Some(match action {
+        ActionRequest::SpecStores => listing_result(sources, settings),
+        ActionRequest::SpecStoreFetch { root } => sync(sources, settings, root, |path| {
+            store::fetch(path).map(|()| store::status(path).unwrap_or_default())
+        }),
+        ActionRequest::SpecStorePull { root } => sync(sources, settings, root, store::pull),
+        ActionRequest::SpecStoreCommit {
+            root,
+            paths,
+            message,
+        } => sync(sources, settings, root, |path| {
+            store::commit(path, paths, message)
+        }),
+        ActionRequest::SpecStorePush { root } => sync(sources, settings, root, store::push),
+        _ => return None,
+    })
+}
+
+/// Run `op` in the checkout of the store or folder root `key` names. Replies
+/// with its sync state after.
+fn sync(
+    sources: &Sources,
+    settings: &AppSettings,
+    key: &str,
+    op: impl FnOnce(
+        &Path,
+    )
+        -> Result<okena_core::store_git::StoreGitStatus, okena_git::store::StoreGitError>,
+) -> ActionResult {
+    let root = match resolve_root_in(sources, settings, Some(key)) {
+        Ok(r) => r,
+        Err(e) => return ActionResult::Err(e),
+    };
+    if root.kind == SpecRootKind::Project {
+        return ActionResult::Err(format!(
+            "`{}` is part of a project, not a store; commit and sync it with the project's own git",
+            root.name
+        ));
+    }
+    match op(Path::new(&root.path)) {
+        Ok(status) => to_result(serde_json::to_value(status), "sync state"),
+        Err(e) => ActionResult::Err(e.to_string()),
+    }
 }
 
 /// A root the client named, checked against what discovery found — never a
@@ -79,7 +155,15 @@ fn resolve_root(
     settings: &AppSettings,
     key: Option<&str>,
 ) -> Result<SpecRoot, String> {
-    let stores = snapshot(projects, settings);
+    resolve_root_in(&spec_sources(projects, settings), settings, key)
+}
+
+fn resolve_root_in(
+    sources: &Sources,
+    settings: &AppSettings,
+    key: Option<&str>,
+) -> Result<SpecRoot, String> {
+    let stores = discover::discover(&dirs(settings), sources);
     match key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(key) => stores.root(key).cloned().ok_or_else(|| {
             format!(
@@ -157,9 +241,123 @@ fn read_for(
         Ok(content) => ActionResult::Ok(Some(serde_json::json!({
             "root": root.key,
             "path": path,
+            "revision": okena_core::fs::content_revision(&content),
             "content": content,
         }))),
         Err(e) => ActionResult::Err(format!("could not read {path}: {e}")),
+    }
+}
+
+pub(super) fn write(
+    ws: &Workspace,
+    settings: &AppSettings,
+    root: Option<String>,
+    path: String,
+    content: String,
+    revision: String,
+) -> ActionResult {
+    write_for(&ws.data.projects, settings, root, path, content, revision)
+}
+
+/// Replace an existing document, through the same root and path checks as
+/// [`read_for`]: a write must not be a way out of a root that a read is not.
+fn write_for(
+    projects: &[ProjectData],
+    settings: &AppSettings,
+    root: Option<String>,
+    path: String,
+    content: String,
+    revision: String,
+) -> ActionResult {
+    let root = match resolve_root(projects, settings, root.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let real = match tree::resolve_document(Path::new(&root.path), &path) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    // What could not be opened must not be written either.
+    if content.len() as u64 > MAX_DOC_BYTES {
+        return ActionResult::Err(format!(
+            "document is too large to save ({} KB)",
+            content.len() / 1024
+        ));
+    }
+    match okena_core::fs::replace_if_unchanged(&real, &content, &revision) {
+        Ok(revision) => ActionResult::Ok(Some(serde_json::json!({
+            "root": root.key,
+            "path": path,
+            "revision": revision,
+        }))),
+        Err(e) => ActionResult::Err(e.describe(&path)),
+    }
+}
+
+// ─── Files and folders in a root ─────────────────────────────────────────────
+//
+// Deleting a change's last document leaves its folder, and the tree still
+// lists that change ("no artifacts yet"): an empty change directory is what
+// `openspec new change` makes too. A capability folder emptied of its `spec.md`
+// is simply no longer listed.
+
+pub(super) fn create_file(
+    ws: &Workspace,
+    settings: &AppSettings,
+    root: Option<String>,
+    path: String,
+    content: String,
+) -> ActionResult {
+    in_root(&ws.data.projects, settings, root, |key, dir| {
+        super::document_files::create_file(key, dir, &path, &content, MAX_DOC_BYTES)
+    })
+}
+
+pub(super) fn create_folder(
+    ws: &Workspace,
+    settings: &AppSettings,
+    root: Option<String>,
+    path: String,
+) -> ActionResult {
+    in_root(&ws.data.projects, settings, root, |key, dir| {
+        super::document_files::create_folder(key, dir, &path)
+    })
+}
+
+pub(super) fn rename_file(
+    ws: &Workspace,
+    settings: &AppSettings,
+    root: Option<String>,
+    from: String,
+    to: String,
+) -> ActionResult {
+    in_root(&ws.data.projects, settings, root, |key, dir| {
+        super::document_files::rename(key, dir, tree::resolve_document, &from, &to)
+    })
+}
+
+pub(super) fn delete_file(
+    ws: &Workspace,
+    settings: &AppSettings,
+    root: Option<String>,
+    path: String,
+) -> ActionResult {
+    in_root(&ws.data.projects, settings, root, |key, dir| {
+        super::document_files::delete(key, dir, tree::resolve_document, &path)
+    })
+}
+
+/// Run `op` with the key and path of the root the client named, found exactly
+/// as a read finds it.
+fn in_root(
+    projects: &[ProjectData],
+    settings: &AppSettings,
+    root: Option<String>,
+    op: impl FnOnce(&str, &Path) -> ActionResult,
+) -> ActionResult {
+    match resolve_root(projects, settings, root.as_deref()) {
+        Ok(root) => op(&root.key, Path::new(&root.path)),
+        Err(e) => ActionResult::Err(e),
     }
 }
 
@@ -494,7 +692,7 @@ pub(super) fn draft_change(
 mod tests {
     use super::{
         ActionResult, brief, date_string, prompt_args, proposal_stub, read_for, resolve_root,
-        scaffold_change, tree_for,
+        scaffold_change, tree_for, write_for,
     };
     use crate::workspace::persistence::AppSettings;
     use okena_core::specs::{SpecRootKind, SpecTree};
@@ -634,6 +832,233 @@ mod tests {
     }
 
     #[test]
+    fn a_write_lands_in_the_root_and_nowhere_else() {
+        let sandbox = tmpdir("write");
+        let repo = sandbox.join("specs");
+        populated_root(&repo);
+        write(&sandbox.join("outside.md"), "SECRET");
+        let mut settings = sandboxed(&sandbox);
+        settings.harness.specs.folders = vec![repo.to_string_lossy().into_owned()];
+        let path = "openspec/changes/add-login/proposal.md";
+
+        let ActionResult::Ok(Some(read)) = read_for(&[], &settings, None, path.into()) else {
+            panic!("expected content");
+        };
+        let revision = read["revision"].as_str().unwrap().to_string();
+        let ActionResult::Ok(Some(saved)) = write_for(
+            &[],
+            &settings,
+            None,
+            path.into(),
+            "# Why not\n".into(),
+            revision.clone(),
+        ) else {
+            panic!("expected the write to land");
+        };
+        let ActionResult::Ok(Some(reopened)) = read_for(&[], &settings, None, path.into()) else {
+            panic!("expected content");
+        };
+        assert_eq!(reopened["content"], "# Why not\n");
+        assert_eq!(saved["revision"], reopened["revision"]);
+
+        // Saving again from the pre-save revision is a stale buffer.
+        let ActionResult::Err(e) = write_for(
+            &[],
+            &settings,
+            None,
+            path.into(),
+            "# Clobber".into(),
+            revision,
+        ) else {
+            panic!("a stale revision must be refused");
+        };
+        assert!(e.contains("changed on disk"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join(path)).unwrap(),
+            "# Why not\n"
+        );
+
+        // Containment, the way reads are checked: through `..`, and through a
+        // root key discovery never found.
+        let outside = okena_core::fs::content_revision("SECRET");
+        assert!(matches!(
+            write_for(
+                &[],
+                &settings,
+                None,
+                "openspec/../../outside.md".into(),
+                "pwned".into(),
+                outside.clone(),
+            ),
+            ActionResult::Err(_)
+        ));
+        let key = format!("path:{}", sandbox.to_string_lossy());
+        assert!(matches!(
+            write_for(
+                &[],
+                &settings,
+                Some(key),
+                "outside.md".into(),
+                "pwned".into(),
+                outside
+            ),
+            ActionResult::Err(_)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
+            "SECRET"
+        );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn files_are_created_renamed_and_deleted_inside_the_root_and_nowhere_else() {
+        use super::super::document_files as files;
+        use okena_openspec::tree::resolve_document;
+
+        let sandbox = tmpdir("files");
+        let repo = sandbox.join("specs");
+        populated_root(&repo);
+        write(&sandbox.join("outside.md"), "SECRET");
+        let mut settings = sandboxed(&sandbox);
+        settings.harness.specs.folders = vec![repo.to_string_lossy().into_owned()];
+        let run =
+            |op: &dyn Fn(&str, &Path) -> ActionResult| super::in_root(&[], &settings, None, op);
+        let refused = |result: ActionResult| match result {
+            ActionResult::Err(e) => e,
+            ActionResult::Ok(_) => panic!("expected a refusal"),
+        };
+
+        // A new change directory, then a document in it: both show in the tree.
+        assert!(matches!(
+            run(&|k, d| files::create_folder(k, d, "openspec/changes/add-sso")),
+            ActionResult::Ok(_)
+        ));
+        let ActionResult::Ok(Some(created)) = run(&|k, d| {
+            files::create_file(
+                k,
+                d,
+                "openspec/changes/add-sso/proposal.md",
+                "# SSO\n",
+                1024,
+            )
+        }) else {
+            panic!("expected the file to be created");
+        };
+        assert_eq!(created["path"], "openspec/changes/add-sso/proposal.md");
+        let t = tree_of(&settings, None);
+        let change = t
+            .changes
+            .iter()
+            .find(|c| c.name == "add-sso")
+            .expect("listed");
+        assert_eq!(change.artifacts[0].name, "proposal.md");
+
+        // Collisions and names the tree could never list.
+        assert!(
+            refused(run(&|k, d| files::create_folder(
+                k,
+                d,
+                "openspec/changes/add-sso"
+            )))
+            .contains("already exists")
+        );
+        assert!(
+            refused(run(&|k, d| {
+                files::create_file(k, d, "openspec/specs/auth/spec.md", "clobber", 1024)
+            }))
+            .contains("already exists")
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("openspec/specs/auth/spec.md")).unwrap(),
+            "# Auth"
+        );
+        for bad in ["", "openspec/.draft.md", "openspec/../../outside-new.md"] {
+            refused(run(&|k, d| files::create_file(k, d, bad, "x", 1024)));
+        }
+        assert!(!sandbox.join("outside-new.md").exists());
+
+        // Rename follows the file, refuses an occupied or escaping target, and
+        // refuses a source outside the root.
+        let ActionResult::Ok(Some(renamed)) = run(&|k, d| {
+            files::rename(
+                k,
+                d,
+                resolve_document,
+                "openspec/changes/add-sso/proposal.md",
+                "openspec/changes/add-sso/design.md",
+            )
+        }) else {
+            panic!("expected the rename to land");
+        };
+        assert_eq!(renamed["path"], "openspec/changes/add-sso/design.md");
+        assert!(!repo.join("openspec/changes/add-sso/proposal.md").exists());
+        assert!(
+            refused(run(&|k, d| {
+                files::rename(
+                    k,
+                    d,
+                    resolve_document,
+                    "openspec/changes/add-sso/design.md",
+                    "openspec/specs/auth/spec.md",
+                )
+            }))
+            .contains("already exists")
+        );
+        refused(run(&|k, d| {
+            files::rename(
+                k,
+                d,
+                resolve_document,
+                "openspec/../../outside.md",
+                "openspec/x.md",
+            )
+        }));
+        refused(run(&|k, d| {
+            files::rename(
+                k,
+                d,
+                resolve_document,
+                "openspec/changes/add-sso/design.md",
+                "../../moved.md",
+            )
+        }));
+
+        // Delete removes one file; folders and escapes are refused.
+        refused(run(&|k, d| {
+            files::delete(k, d, resolve_document, "openspec/changes/add-sso")
+        }));
+        refused(run(&|k, d| {
+            files::delete(k, d, resolve_document, "openspec/../../outside.md")
+        }));
+        assert!(matches!(
+            run(&|k, d| files::delete(
+                k,
+                d,
+                resolve_document,
+                "openspec/changes/add-sso/design.md"
+            )),
+            ActionResult::Ok(_)
+        ));
+        assert!(!repo.join("openspec/changes/add-sso/design.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
+            "SECRET"
+        );
+
+        // A root key discovery never found is no way in either.
+        let key = format!("path:{}", sandbox.to_string_lossy());
+        assert!(matches!(
+            super::in_root(&[], &settings, Some(key), |k, d| {
+                files::create_file(k, d, "pwned.md", "x", 1024)
+            }),
+            ActionResult::Err(_)
+        ));
+        assert!(!sandbox.join("pwned.md").exists());
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
     fn project_discovery_can_be_turned_off() {
         let sandbox = tmpdir("projects");
         let repo = sandbox.join("app");
@@ -704,6 +1129,7 @@ mod tests {
             schema: None,
             healthy: true,
             is_default: false,
+            git: None,
             references: vec![okena_core::specs::SpecReference {
                 id: "design-system".into(),
                 remote: None,

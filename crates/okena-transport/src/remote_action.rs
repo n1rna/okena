@@ -72,20 +72,28 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // Same shape as drafting a change: creates a project, runs its hooks,
         // and launches an agent. Hooks are arbitrary shell with no bound.
         ActionRequest::AgentStartSession { .. } => ActionClientKind::LongMutation,
-        // A clone is network-bound and unbounded, a pull fetches first, and
-        // setup commits with git, running the user's commit hooks.
+        // A clone and a push are network-bound and unbounded, a pull fetches
+        // first, and setup and commit run the user's commit hooks. The same
+        // holds for the store git of both sections.
         ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreFetch { .. }
         | ActionRequest::KnowledgeStorePull { .. }
-        | ActionRequest::KnowledgeStoreSetup { .. } => ActionClientKind::LongMutation,
+        | ActionRequest::KnowledgeStoreCommit { .. }
+        | ActionRequest::KnowledgeStorePush { .. }
+        | ActionRequest::KnowledgeStoreSetup { .. }
+        | ActionRequest::SpecStoreFetch { .. }
+        | ActionRequest::SpecStorePull { .. }
+        | ActionRequest::SpecStoreCommit { .. }
+        | ActionRequest::SpecStorePush { .. } => ActionClientKind::LongMutation,
         // Same shape as drafting a spec change: creates a project, runs its
         // hooks, and launches an agent.
         ActionRequest::KnowledgeDraft { .. } => ActionClientKind::LongMutation,
-        // Listing runs `git status` in every store, and a tree reads the head
-        // of every entry: more than the fast bucket allows on a large store.
-        ActionRequest::KnowledgeStores | ActionRequest::KnowledgeTree { .. } => {
-            ActionClientKind::Search
-        }
+        // A listing runs `git status` in every store, and a tree reads the
+        // head of every entry: more than the fast bucket allows on a large
+        // store.
+        ActionRequest::KnowledgeStores
+        | ActionRequest::KnowledgeTree { .. }
+        | ActionRequest::SpecStores => ActionClientKind::Search,
         // Task-provider calls cross the internet. The provider's own HTTP
         // timeout is 20 s, so the fast bucket would abandon the request before
         // the provider had given up — reporting a transport failure for what is
@@ -814,11 +822,41 @@ mod action_timeout_tests {
     }
 
     #[test]
+    fn store_git_outlasts_the_network_and_commit_hooks() {
+        // Fetch, pull and push reach a remote; commit runs the user's hooks;
+        // a listing runs `git status` in every store checkout.
+        for action in [
+            ActionRequest::SpecStoreFetch { root: "k".into() },
+            ActionRequest::SpecStorePull { root: "k".into() },
+            ActionRequest::SpecStorePush { root: "k".into() },
+            ActionRequest::KnowledgeStorePush { root: "k".into() },
+            ActionRequest::SpecStoreCommit {
+                root: "k".into(),
+                paths: vec!["a".into()],
+                message: "m".into(),
+            },
+            ActionRequest::KnowledgeStoreCommit {
+                root: "k".into(),
+                paths: vec!["a".into()],
+                message: "m".into(),
+            },
+        ] {
+            assert!(matches!(
+                client_kind_for(&action),
+                ActionClientKind::LongMutation
+            ));
+        }
+        assert!(matches!(
+            client_kind_for(&ActionRequest::SpecStores),
+            ActionClientKind::Search
+        ));
+    }
+
+    #[test]
     fn reading_specs_stays_in_the_fast_bucket() {
         // All local filesystem reads; borrowing a longer budget would only
         // delay how fast a broken connection is reported.
         for action in [
-            ActionRequest::SpecStores,
             ActionRequest::SpecsTree { root: None },
             ActionRequest::SpecRead {
                 root: Some("store:team-plans".into()),

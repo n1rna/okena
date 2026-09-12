@@ -1257,8 +1257,9 @@ pub enum ActionRequest {
     // settings. The daemon reads and writes those files itself
     // (`okena-openspec`), so nothing here needs the `openspec` CLI installed,
     // and whatever okena writes the CLI reads back.
-    /// Every OpenSpec root okena can see, with health, references, pointers
-    /// and the machine `defaultStore` — an `okena_core::specs::SpecStores`.
+    /// Every OpenSpec root okena can see, with health, references, pointers,
+    /// sync state on each store and folder checkout, and the machine
+    /// `defaultStore` — an `okena_core::specs::SpecStores`.
     SpecStores,
     /// One root's planning tree: capabilities, active changes and the archive.
     ///
@@ -1275,6 +1276,59 @@ pub enum ActionRequest {
     /// refuses any path that resolves outside the root, so a compromised or
     /// buggy client cannot use this to read arbitrary files.
     SpecRead {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+    },
+    /// Replace one existing document in a root. Replies with the new
+    /// `revision`.
+    ///
+    /// `path` is checked exactly as `SpecRead` checks it, so a write can no
+    /// more land outside a root than a read can leave one. `revision` is the
+    /// one `SpecRead` returned: when the file has changed since, the write is
+    /// refused and nothing is written, so an agent editing the same file is
+    /// never clobbered by a stale buffer.
+    SpecWrite {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+        content: String,
+        revision: String,
+    },
+    /// Create a new file in a root holding `content`. Replies with its
+    /// normalized `path` and its `revision`.
+    ///
+    /// `path` must be a plain relative path — no `..`, no absolute path, no
+    /// hidden names — whose existing folders resolve inside the root, the way
+    /// `SpecRead` resolves a document. A file already there is refused, never
+    /// replaced; the folders it needs are created.
+    SpecFileCreate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+        #[serde(default)]
+        content: String,
+    },
+    /// Create a folder in a root — a change directory under
+    /// `openspec/changes/`, mostly. Checked like `SpecFileCreate`; anything
+    /// already at `path` is refused. Replies with the normalized `path`.
+    SpecFolderCreate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+    },
+    /// Move one file within a root. `from` is checked as `SpecRead` checks a
+    /// path and `to` as `SpecFileCreate` does, so anything at `to` is refused.
+    /// Replies with the normalized `path` it now has.
+    SpecFileRename {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        from: String,
+        to: String,
+    },
+    /// Delete one file in a root, checked as `SpecRead` checks a path. Folders
+    /// are refused, so this never removes more than the file named.
+    SpecFileDelete {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         path: String,
@@ -1310,6 +1364,35 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
+    /// `git fetch` in a store or folder root's checkout. Replies with its sync
+    /// state — an `okena_core::store_git::StoreGitStatus`. A project root is
+    /// refused: its project's own git owns it.
+    SpecStoreFetch {
+        root: String,
+    },
+    /// Fetch, then fast-forward a store or folder checkout. Anything but a
+    /// fast-forward of a clean checkout is refused with the reason. Replies
+    /// with the sync state.
+    SpecStorePull {
+        root: String,
+    },
+    /// Commit exactly `paths` in a store or folder checkout with `message`.
+    ///
+    /// Every path must be one the sync state lists as changed — relative to
+    /// the checkout, as listed — so a client cannot commit anything it was not
+    /// shown. Anything else, staged or not, stays out of the commit. Nothing is
+    /// pushed. Replies with the sync state after.
+    SpecStoreCommit {
+        root: String,
+        paths: Vec<String>,
+        message: String,
+    },
+    /// Push a store or folder checkout's branch to its upstream: a step of its
+    /// own, so a failed push keeps the commit. Replies with the sync state
+    /// after.
+    SpecStorePush {
+        root: String,
+    },
     /// Draft a new OpenSpec change from a free-text idea, with an agent.
     ///
     /// Scaffolds `openspec/changes/<slug>/` in the chosen root — the
@@ -1341,9 +1424,10 @@ pub enum ActionRequest {
     //
     // Knowledge stores (ADR-0003) are git repositories of engineering docs,
     // skills, agents and prompt templates, registered in okena's per-profile
-    // registry, plus the kind folders projects carry. The daemon reads, clones
-    // and fast-forwards them through `okena-knowledge`; none of these touch the
-    // workspace, so the daemon runs them off its lock.
+    // registry, plus the kind folders projects carry. The daemon reads and
+    // clones them through `okena-knowledge`, and fast-forwards, commits and
+    // pushes them with the store git OpenSpec stores share (ADR-0004); none of
+    // these touch the workspace, so the daemon runs them off its lock.
     /// Every knowledge root okena can see, with health, sync state and project
     /// pointers — an `okena_core::knowledge::KnowledgeStores`.
     KnowledgeStores,
@@ -1360,6 +1444,50 @@ pub enum ActionRequest {
     /// `path` is relative to the root, as `KnowledgeTree` returns it. Anything
     /// resolving outside the root is refused.
     KnowledgeRead {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+    },
+    /// Replace one existing file in a root. Replies with the new `revision`.
+    ///
+    /// `path` is checked exactly as `KnowledgeRead` checks it. `revision` is
+    /// the one the read returned; a file changed since is refused and left
+    /// untouched.
+    KnowledgeWrite {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+        content: String,
+        revision: String,
+    },
+    /// Create a new file in a root holding `content`. Replies with its
+    /// normalized `path` and its `revision`. Checked exactly as
+    /// `SpecFileCreate` checks a path: nothing outside the root, no hidden
+    /// names, and never over an existing file.
+    KnowledgeFileCreate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+        #[serde(default)]
+        content: String,
+    },
+    /// Create a folder in a root. Checked like `KnowledgeFileCreate`.
+    KnowledgeFolderCreate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+    },
+    /// Move one file within a root: `from` checked as `KnowledgeRead` checks a
+    /// path, `to` as `KnowledgeFileCreate` does. Replies with the new `path`.
+    KnowledgeFileRename {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        from: String,
+        to: String,
+    },
+    /// Delete one file in a root, checked as `KnowledgeRead` checks a path.
+    /// Folders are refused.
+    KnowledgeFileDelete {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         path: String,
@@ -1402,8 +1530,25 @@ pub enum ActionRequest {
         root: String,
     },
     /// Fetch, then fast-forward a store's checkout. Anything but a
-    /// fast-forward is refused with the reason. Replies with the sync state.
+    /// fast-forward of a clean checkout is refused with the reason. Replies
+    /// with the sync state.
     KnowledgeStorePull {
+        root: String,
+    },
+    /// Commit exactly `paths` in a store's checkout with `message`.
+    ///
+    /// Every path must be one the sync state lists as changed — relative to
+    /// the checkout, as listed — so a client cannot commit anything it was not
+    /// shown. Anything else, staged or not, stays out of the commit. Nothing is
+    /// pushed. Replies with the sync state after.
+    KnowledgeStoreCommit {
+        root: String,
+        paths: Vec<String>,
+        message: String,
+    },
+    /// Push a store's checked-out branch to its upstream: a step of its own,
+    /// so a failed push keeps the commit. Replies with the sync state after.
+    KnowledgeStorePush {
         root: String,
     },
     /// Open an agent session in a knowledge root, briefed to add to or update

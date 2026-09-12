@@ -12,7 +12,8 @@
 //! - [`registry`]: okena's per-profile list of store checkouts;
 //! - [`tree`]: the entries inside one root;
 //! - [`discover`]: every root on this machine, with health;
-//! - [`git`]: sync state, clone, fetch and fast-forward pull;
+//! - [`git`]: clone, plus the store git shared with OpenSpec stores — sync
+//!   state with changed files, fetch, fast-forward pull, commit and push;
 //! - [`setup`]: creating a new store.
 //!
 //! Every problem that doesn't stop a listing becomes a diagnostic on the thing
@@ -71,6 +72,18 @@ impl std::fmt::Display for KnowledgeError {
 }
 
 impl std::error::Error for KnowledgeError {}
+
+/// Store git errors carry the same code, message and fix a knowledge error
+/// does, so they cross unchanged.
+impl From<okena_git::store::StoreGitError> for KnowledgeError {
+    fn from(e: okena_git::store::StoreGitError) -> Self {
+        Self {
+            code: e.code,
+            message: e.message,
+            fix: e.fix,
+        }
+    }
+}
 
 /// A path for messages and the wire.
 pub(crate) fn display(path: &std::path::Path) -> String {

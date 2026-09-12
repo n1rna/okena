@@ -5,12 +5,15 @@
 //! workspace uses, so a view can act on projects (focus one, start a worktree)
 //! rather than only display them.
 
+mod editor;
+mod file_ops;
 mod knowledge_draft;
 mod knowledge_view;
 mod markdown;
 mod new_task_form;
 mod sections;
 mod specs_view;
+mod store_git;
 mod task_filter;
 mod tasks_view;
 
@@ -23,6 +26,7 @@ use okena_terminal::TerminalsRegistry;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+pub use editor::EDITOR_CONTEXT;
 pub use okena_core::harness::HarnessSection;
 
 /// Tasks-view state. Grouped so the pane struct stays readable as more views
@@ -103,7 +107,8 @@ pub(crate) struct SpecsState {
     pub(crate) error: Option<String>,
     /// Path of the document being read, relative to the root.
     pub(crate) selected: Option<String>,
-    pub(crate) content: Option<markdown::OpenDocument>,
+    /// The open document's buffer, and any other with unsaved edits.
+    pub(crate) documents: editor::Documents,
     pub(crate) content_error: Option<String>,
     /// The idea a new change is drafted from.
     pub(crate) idea_input: Entity<SimpleInputState>,
@@ -123,6 +128,8 @@ pub(crate) struct SpecsState {
     /// Change names whose documents are hidden. Collapsed rather than expanded
     /// state, so a fresh view shows everything.
     pub(crate) collapsed: std::collections::HashSet<String>,
+    /// The open store's fetch, pull, commit and push.
+    pub(crate) git: store_git::StoreGitPanel,
 }
 
 impl SpecsState {
@@ -140,6 +147,16 @@ impl SpecsState {
         tree.specs.iter().any(|d| d.path == path)
             || tree.changes.iter().any(in_change)
             || tree.archived.iter().any(in_change)
+    }
+
+    /// Stop showing the selected document. Its buffer stays only if it holds
+    /// unsaved edits. Call before `root_key` changes: buffers are keyed by it.
+    pub(crate) fn leave_selection(&mut self) {
+        if let Some(path) = self.selected.take() {
+            self.documents
+                .leave(self.root_key.as_deref().unwrap_or_default(), &path);
+        }
+        self.content_error = None;
     }
 
     /// Whether the currently-loaded tree still lists `path`.
@@ -184,6 +201,10 @@ pub struct HarnessPane {
     pub(crate) knowledge: knowledge_view::KnowledgeState,
     /// The Knowledge view's "New with agent" form.
     pub(crate) knowledge_draft: knowledge_draft::DraftForm,
+    /// Creating, renaming and deleting files in the Specs tree.
+    pub(crate) spec_files: file_ops::FileOps,
+    /// Creating, renaming and deleting files in the Knowledge tree.
+    pub(crate) knowledge_files: file_ops::FileOps,
 }
 
 /// Everything a harness pane needs from its window.
@@ -217,8 +238,11 @@ impl HarnessPane {
                      email flow",
             )
         });
+        let specs_git = store_git::StoreGitPanel::new(cx);
         let knowledge = knowledge_view::KnowledgeState::new(cx);
         let knowledge_draft = knowledge_draft::DraftForm::new(cx);
+        let spec_files = file_ops::FileOps::new(cx);
+        let knowledge_files = file_ops::FileOps::new(cx);
         let mut pane = Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -265,7 +289,7 @@ impl HarnessPane {
                 load_generation: 0,
                 error: None,
                 selected: None,
-                content: None,
+                documents: editor::Documents::default(),
                 content_error: None,
                 idea_input,
                 composing: false,
@@ -273,9 +297,12 @@ impl HarnessPane {
                 draft_root: None,
                 drafting: false,
                 collapsed: std::collections::HashSet::new(),
+                git: specs_git,
             },
             knowledge,
             knowledge_draft,
+            spec_files,
+            knowledge_files,
         };
         match section {
             HarnessSection::Tasks => {

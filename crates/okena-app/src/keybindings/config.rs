@@ -89,6 +89,15 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            "SaveDocument".to_string(),
+            vec![
+                // Scoped to the editor, so the key means nothing anywhere a
+                // document is not being edited.
+                KeybindingEntry::new("cmd-s", Some(crate::views::harness::EDITOR_CONTEXT)),
+                KeybindingEntry::new("ctrl-s", Some(crate::views::harness::EDITOR_CONTEXT)),
+            ],
+        );
+        bindings.insert(
             "ShowSessionManager".to_string(),
             vec![
                 KeybindingEntry::new("cmd-k cmd-w", None),

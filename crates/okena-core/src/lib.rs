@@ -17,6 +17,7 @@ pub mod send_payload;
 pub mod shell;
 pub mod soft_close;
 pub mod specs;
+pub mod store_git;
 pub mod tasks;
 pub mod theme;
 pub mod timing;
