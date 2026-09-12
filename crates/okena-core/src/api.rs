@@ -1295,6 +1295,44 @@ pub enum ActionRequest {
         content: String,
         revision: String,
     },
+    /// Create a new file in a root holding `content`. Replies with its
+    /// normalized `path` and its `revision`.
+    ///
+    /// `path` must be a plain relative path — no `..`, no absolute path, no
+    /// hidden names — whose existing folders resolve inside the root, the way
+    /// `SpecRead` resolves a document. A file already there is refused, never
+    /// replaced; the folders it needs are created.
+    SpecFileCreate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+        #[serde(default)]
+        content: String,
+    },
+    /// Create a folder in a root — a change directory under
+    /// `openspec/changes/`, mostly. Checked like `SpecFileCreate`; anything
+    /// already at `path` is refused. Replies with the normalized `path`.
+    SpecFolderCreate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+    },
+    /// Move one file within a root. `from` is checked as `SpecRead` checks a
+    /// path and `to` as `SpecFileCreate` does, so anything at `to` is refused.
+    /// Replies with the normalized `path` it now has.
+    SpecFileRename {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        from: String,
+        to: String,
+    },
+    /// Delete one file in a root, checked as `SpecRead` checks a path. Folders
+    /// are refused, so this never removes more than the file named.
+    SpecFileDelete {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+    },
     /// Register an existing store checkout in OpenSpec's machine registry —
     /// `openspec store register <path> [--id <id>] --yes`. A root without
     /// `.openspec-store/store.yaml` becomes a store named `id`, else its
@@ -1421,6 +1459,38 @@ pub enum ActionRequest {
         path: String,
         content: String,
         revision: String,
+    },
+    /// Create a new file in a root holding `content`. Replies with its
+    /// normalized `path` and its `revision`. Checked exactly as
+    /// `SpecFileCreate` checks a path: nothing outside the root, no hidden
+    /// names, and never over an existing file.
+    KnowledgeFileCreate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+        #[serde(default)]
+        content: String,
+    },
+    /// Create a folder in a root. Checked like `KnowledgeFileCreate`.
+    KnowledgeFolderCreate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+    },
+    /// Move one file within a root: `from` checked as `KnowledgeRead` checks a
+    /// path, `to` as `KnowledgeFileCreate` does. Replies with the new `path`.
+    KnowledgeFileRename {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        from: String,
+        to: String,
+    },
+    /// Delete one file in a root, checked as `KnowledgeRead` checks a path.
+    /// Folders are refused.
+    KnowledgeFileDelete {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
     },
     /// Clone a store and register the checkout.
     KnowledgeStoreClone {

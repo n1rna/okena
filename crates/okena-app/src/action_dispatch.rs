@@ -1022,13 +1022,21 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         passthrough @ (ActionRequest::SpecStoreFetch { .. }
         | ActionRequest::SpecStorePull { .. }
         | ActionRequest::SpecStoreCommit { .. }
-        | ActionRequest::SpecStorePush { .. }) => passthrough,
+        | ActionRequest::SpecStorePush { .. }
+        | ActionRequest::SpecFileCreate { .. }
+        | ActionRequest::SpecFolderCreate { .. }
+        | ActionRequest::SpecFileRename { .. }
+        | ActionRequest::SpecFileDelete { .. }) => passthrough,
         // Knowledge actions likewise carry only root keys the daemon
         // discovered, paths and URLs.
         passthrough @ (ActionRequest::KnowledgeStores
         | ActionRequest::KnowledgeTree { .. }
         | ActionRequest::KnowledgeRead { .. }
         | ActionRequest::KnowledgeWrite { .. }
+        | ActionRequest::KnowledgeFileCreate { .. }
+        | ActionRequest::KnowledgeFolderCreate { .. }
+        | ActionRequest::KnowledgeFileRename { .. }
+        | ActionRequest::KnowledgeFileDelete { .. }
         | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreRegister { .. }
         | ActionRequest::KnowledgeStoreUnregister { .. }

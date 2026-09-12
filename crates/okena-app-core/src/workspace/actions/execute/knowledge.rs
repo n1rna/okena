@@ -80,6 +80,28 @@ fn execute_at(
             content,
             revision,
         } => write(registry, projects, root.as_deref(), path, content, revision),
+        ActionRequest::KnowledgeFileCreate {
+            root,
+            path,
+            content,
+        } => in_root(registry, projects, root.as_deref(), |key, dir| {
+            super::document_files::create_file(key, dir, path, content, MAX_DOC_BYTES)
+        }),
+        ActionRequest::KnowledgeFolderCreate { root, path } => {
+            in_root(registry, projects, root.as_deref(), |key, dir| {
+                super::document_files::create_folder(key, dir, path)
+            })
+        }
+        ActionRequest::KnowledgeFileRename { root, from, to } => {
+            in_root(registry, projects, root.as_deref(), |key, dir| {
+                super::document_files::rename(key, dir, tree::resolve_document, from, to)
+            })
+        }
+        ActionRequest::KnowledgeFileDelete { root, path } => {
+            in_root(registry, projects, root.as_deref(), |key, dir| {
+                super::document_files::delete(key, dir, tree::resolve_document, path)
+            })
+        }
         ActionRequest::KnowledgeStoreClone { url, path } => match git::clone_store(
             registry,
             url,
@@ -286,6 +308,24 @@ fn write(
             "revision": revision,
         }))),
         Err(e) => ActionResult::Err(e.describe(path)),
+    }
+}
+
+/// Run `op` with the key and path of the usable root the client named, found
+/// exactly as a read finds it. Creating, renaming and deleting files all go
+/// through here, and through the path checks in `document_files`.
+///
+/// The tree lists entries, not folders, so a folder emptied by a delete or a
+/// rename simply stops showing.
+fn in_root(
+    registry: &Path,
+    projects: &[ProjectSource],
+    key: Option<&str>,
+    op: impl FnOnce(&str, &Path) -> ActionResult,
+) -> ActionResult {
+    match resolve_root(registry, projects, key) {
+        Ok(root) => op(&root.key, Path::new(&root.path)),
+        Err(e) => ActionResult::Err(e),
     }
 }
 
@@ -780,6 +820,104 @@ mod tests {
 
         let outside = okena_core::fs::content_revision("SECRET");
         assert!(!err(save("docs/../../outside.md", "pwned", &outside)).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
+            "SECRET"
+        );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn entries_are_created_renamed_and_deleted_through_the_actions_and_never_outside() {
+        let sandbox = tmpdir("files");
+        let checkout = sandbox.join("eng");
+        store(&checkout, "acme-eng");
+        write(&sandbox.join("outside.md"), "SECRET");
+        okena_knowledge::registry::register(&registry(&sandbox), &checkout.to_string_lossy(), None)
+            .unwrap();
+        let create = |path: &str, content: &str| {
+            run(
+                &sandbox,
+                &[],
+                ActionRequest::KnowledgeFileCreate {
+                    root: None,
+                    path: path.into(),
+                    content: content.into(),
+                },
+            )
+        };
+        let rename = |from: &str, to: &str| {
+            run(
+                &sandbox,
+                &[],
+                ActionRequest::KnowledgeFileRename {
+                    root: None,
+                    from: from.into(),
+                    to: to.into(),
+                },
+            )
+        };
+        let delete = |path: &str| {
+            run(
+                &sandbox,
+                &[],
+                ActionRequest::KnowledgeFileDelete {
+                    root: None,
+                    path: path.into(),
+                },
+            )
+        };
+
+        // A new skill is on disk where the tree says, and listed.
+        let created: serde_json::Value = ok!(create(
+            "skills/release/SKILL.md",
+            "---\nname: release\n---\n"
+        ));
+        assert_eq!(created["path"], "skills/release/SKILL.md");
+        let tree: KnowledgeTree = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeTree { root: None },
+        ));
+        assert!(tree.entry("skills/release/SKILL.md").is_some());
+
+        // Collisions, hidden names and escapes are refused with a reason.
+        assert!(err(create("docs/readme.md", "clobber")).contains("already exists"));
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("docs/readme.md")).unwrap(),
+            "# Readme\n"
+        );
+        for bad in [
+            "docs/../../outside-new.md",
+            ".okena-knowledge/store.yaml",
+            "  ",
+        ] {
+            assert!(!err(create(bad, "x")).is_empty(), "accepted {bad:?}");
+        }
+        assert!(!sandbox.join("outside-new.md").exists());
+
+        let renamed: serde_json::Value = ok!(rename("docs/readme.md", "docs/guides/readme.md"));
+        assert_eq!(renamed["path"], "docs/guides/readme.md");
+        assert!(checkout.join("docs/guides/readme.md").is_file());
+        assert!(!checkout.join("docs/readme.md").exists());
+        assert!(!err(rename("docs/../../outside.md", "docs/x.md")).is_empty());
+        assert!(!err(rename("docs/guides/readme.md", "../escaped.md")).is_empty());
+        assert!(!sandbox.join("escaped.md").exists());
+
+        let _: serde_json::Value = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeFolderCreate {
+                root: None,
+                path: "templates/flows".into(),
+            },
+        ));
+        assert!(checkout.join("templates/flows").is_dir());
+
+        assert!(!err(delete("docs/guides")).is_empty(), "a folder");
+        assert!(!err(delete("docs/../../outside.md")).is_empty());
+        let _: serde_json::Value = ok!(delete("docs/guides/readme.md"));
+        assert!(!checkout.join("docs/guides/readme.md").exists());
         assert_eq!(
             std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
             "SECRET"

@@ -213,6 +213,13 @@ used by OpenSpec stores, is described in
     unsaved edits is marked `●` in the list and keeps its edits while another
     file is open. **Revert** drops them and reloads the file. The Specs view
     edits spec documents the same way.
+  - **Files:** `+` beside the filter creates an entry. Pick the kind and a
+    name (`ci/pipeline` makes folders), and it opens in the editor, starting
+    from the kind's frontmatter. The open file's **Rename** moves it, and the
+    open document follows with any unsaved edits. **Delete…** asks first, then
+    removes the file and closes it. Paths are checked the way reads are:
+    nothing outside the root, no hidden names, and never over an existing
+    file. A folder emptied this way stops being listed.
   - **Store overview:** the branch, the last fetch, and **Fetch**, **Pull** and
     **Push** buttons. Pull and Push are offered only when they can succeed, and
     a line says why not while there is something to pull or push. Below them

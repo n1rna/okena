@@ -110,6 +110,124 @@ pub fn replace_if_unchanged(
     Ok(content_revision(content))
 }
 
+/// A client-supplied path inside a root, as plain names joined with `/`.
+///
+/// Refuses what could not be a file a harness tree lists: an empty path, an
+/// absolute one, `..` or `.`, a name starting with `.` (the trees skip hidden
+/// names, and `.git` is not for editing), and names holding a backslash or a
+/// control character.
+pub fn normalize_relative(path: &str) -> Result<String, String> {
+    let trimmed = path.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("give it a name first".into());
+    }
+    let mut names = Vec::new();
+    for component in Path::new(trimmed).components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(format!(
+                "`{trimmed}` must be a path inside the root, without `..`"
+            ));
+        };
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            return Err(format!(
+                "`{name}` starts with a dot; hidden names are never listed"
+            ));
+        }
+        if name.chars().any(|c| c == '\\' || c.is_control()) {
+            return Err(format!("`{name}` holds a character a file name cannot"));
+        }
+        names.push(name.into_owned());
+    }
+    Ok(names.join("/"))
+}
+
+/// Where something new — a file or folder that does not exist yet — would go
+/// inside `root`.
+///
+/// A canonical check needs the path to exist, so the path is checked as written
+/// ([`normalize_relative`]) and then its deepest existing ancestor is checked
+/// canonically: a symlinked folder on the way must not lead out of the root.
+/// Something already at the path is refused.
+pub fn resolve_new_path(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let rel = normalize_relative(path)?;
+    let real_root = root
+        .canonicalize()
+        .map_err(|e| format!("the root is unreadable: {e}"))?;
+    let target = root.join(&rel);
+    if std::fs::symlink_metadata(&target).is_ok() {
+        return Err(format!("`{rel}` already exists"));
+    }
+    let Some(existing) = target
+        .ancestors()
+        .skip(1)
+        .find(|a| std::fs::symlink_metadata(a).is_ok())
+    else {
+        return Err("the root is unreadable".into());
+    };
+    let real = existing
+        .canonicalize()
+        .map_err(|e| format!("could not resolve `{rel}`: {e}"))?;
+    if !real.starts_with(&real_root) {
+        return Err("path is outside the root".into());
+    }
+    if !real.is_dir() {
+        return Err(format!(
+            "`{}` is a file, not a folder",
+            existing
+                .strip_prefix(root)
+                .unwrap_or(existing)
+                .to_string_lossy()
+        ));
+    }
+    Ok(target)
+}
+
+/// Create a file holding `content`, with the folders it needs. Refuses to
+/// replace a file, including one created since its path was checked. Returns
+/// the new file's revision.
+pub fn create_new_file(path: &Path, content: &str) -> std::io::Result<String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    let written = file
+        .write_all(content.as_bytes())
+        .and_then(|()| match file.sync_all() {
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => Ok(()),
+            other => other,
+        });
+    if let Err(e) = written {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(content_revision(content))
+}
+
+/// Move a file to `to`, with the folders `to` needs, refusing to replace
+/// anything already there.
+///
+/// The check and the rename are two steps, so a file created at `to` in the
+/// instant between them would be replaced; a link-then-unlink would close that
+/// gap but behaves differently for symlinks per platform, and a store is a git
+/// checkout where that file is recoverable anyway.
+pub fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "the destination already exists",
+        ));
+    }
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::rename(from, to)
+}
+
 fn write_via_temp(
     path: &Path,
     content: &str,
@@ -250,6 +368,88 @@ mod tests {
         replace_if_unchanged(&path, "echo b", &content_revision("echo a")).expect("replace");
         let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
         assert_eq!(mode & 0o777, 0o755);
+    }
+
+    #[test]
+    fn relative_paths_are_plain_names_or_refused() {
+        assert_eq!(
+            normalize_relative(" docs/ci/pipeline.md/ ").as_deref(),
+            Ok("docs/ci/pipeline.md")
+        );
+        assert_eq!(normalize_relative("docs//a.md").as_deref(), Ok("docs/a.md"));
+        for bad in [
+            "",
+            "  ",
+            "/etc/passwd",
+            "../outside.md",
+            "docs/../../x",
+            "./docs/a.md",
+            ".git/config",
+            "docs/.hidden.md",
+            "docs/a\u{7}.md",
+        ] {
+            assert!(normalize_relative(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_path_lands_inside_the_root_and_never_over_something() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("docs")).expect("mkdir");
+        std::fs::write(root.join("docs/a.md"), "a").expect("seed");
+
+        let new = resolve_new_path(&root, "docs/ci/new.md").expect("nested new file");
+        assert_eq!(new, root.join("docs/ci/new.md"));
+        assert!(resolve_new_path(&root, "docs/a.md").is_err_and(|e| e.contains("already exists")));
+        assert!(
+            resolve_new_path(&root, "docs/a.md/under-a-file.md")
+                .is_err_and(|e| e.contains("not a folder"))
+        );
+        assert!(resolve_new_path(&root, "../escape.md").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_folder_cannot_lead_a_new_path_out_of_the_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        std::os::unix::fs::symlink(&outside, root.join("docs")).expect("symlink");
+        assert!(
+            resolve_new_path(&root, "docs/pwned.md").is_err_and(|e| e.contains("outside the root"))
+        );
+    }
+
+    #[test]
+    fn creating_and_renaming_never_replace_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("docs/new.md");
+        assert_eq!(
+            create_new_file(&path, "# New").expect("create"),
+            content_revision("# New")
+        );
+        assert_eq!(
+            create_new_file(&path, "again").expect_err("exists").kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "# New");
+
+        let other = dir.path().join("docs/other.md");
+        std::fs::write(&other, "other").expect("seed");
+        assert_eq!(
+            rename_without_replacing(&path, &other)
+                .expect_err("occupied")
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        let moved = dir.path().join("docs/archive/new.md");
+        rename_without_replacing(&path, &moved).expect("rename");
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_to_string(&moved).expect("read"), "# New");
+        assert_eq!(std::fs::read_to_string(&other).expect("read"), "other");
     }
 
     #[test]

@@ -9,6 +9,7 @@
 // unreachable for well-formed types, and callers cannot recover anyway.
 #![allow(clippy::expect_used)]
 
+mod document_files;
 mod files;
 mod git;
 mod knowledge;
@@ -722,6 +723,20 @@ pub fn execute_action(
             content,
             revision,
         } => specs::write(ws, settings, root, path, content, revision),
+        ActionRequest::SpecFileCreate {
+            root,
+            path,
+            content,
+        } => specs::create_file(ws, settings, root, path, content),
+        ActionRequest::SpecFolderCreate { root, path } => {
+            specs::create_folder(ws, settings, root, path)
+        }
+        ActionRequest::SpecFileRename { root, from, to } => {
+            specs::rename_file(ws, settings, root, from, to)
+        }
+        ActionRequest::SpecFileDelete { root, path } => {
+            specs::delete_file(ws, settings, root, path)
+        }
         ActionRequest::SpecStoreRegister { path, id } => specs::register_store(settings, path, id),
         ActionRequest::SpecStoreUnregister { id } => specs::unregister_store(settings, id),
         ActionRequest::SpecStoreSetup {
@@ -755,6 +770,10 @@ pub fn execute_action(
         | ActionRequest::KnowledgeTree { .. }
         | ActionRequest::KnowledgeRead { .. }
         | ActionRequest::KnowledgeWrite { .. }
+        | ActionRequest::KnowledgeFileCreate { .. }
+        | ActionRequest::KnowledgeFolderCreate { .. }
+        | ActionRequest::KnowledgeFileRename { .. }
+        | ActionRequest::KnowledgeFileDelete { .. }
         | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreRegister { .. }
         | ActionRequest::KnowledgeStoreUnregister { .. }

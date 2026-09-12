@@ -6,6 +6,7 @@
 //! rather than only display them.
 
 mod editor;
+mod file_ops;
 mod knowledge_draft;
 mod knowledge_view;
 mod markdown;
@@ -200,6 +201,10 @@ pub struct HarnessPane {
     pub(crate) knowledge: knowledge_view::KnowledgeState,
     /// The Knowledge view's "New with agent" form.
     pub(crate) knowledge_draft: knowledge_draft::DraftForm,
+    /// Creating, renaming and deleting files in the Specs tree.
+    pub(crate) spec_files: file_ops::FileOps,
+    /// Creating, renaming and deleting files in the Knowledge tree.
+    pub(crate) knowledge_files: file_ops::FileOps,
 }
 
 /// Everything a harness pane needs from its window.
@@ -236,6 +241,8 @@ impl HarnessPane {
         let specs_git = store_git::StoreGitPanel::new(cx);
         let knowledge = knowledge_view::KnowledgeState::new(cx);
         let knowledge_draft = knowledge_draft::DraftForm::new(cx);
+        let spec_files = file_ops::FileOps::new(cx);
+        let knowledge_files = file_ops::FileOps::new(cx);
         let mut pane = Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -294,6 +301,8 @@ impl HarnessPane {
             },
             knowledge,
             knowledge_draft,
+            spec_files,
+            knowledge_files,
         };
         match section {
             HarnessSection::Tasks => {

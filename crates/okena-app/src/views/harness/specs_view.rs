@@ -482,6 +482,25 @@ impl HarnessPane {
                         .text_color(rgb(t.text_muted))
                         .child(format!("{}", docs.len())),
                 )
+                // Archived changes are history; nothing is added to them.
+                .children((!change.archived).then(|| {
+                    let change_path = change.path.clone();
+                    self.add_button(
+                        SharedString::from(format!("spec-new-doc-{}", change.name)),
+                        "New document",
+                        move |this, window, cx| {
+                            this.open_new_form(
+                                HarnessSection::Specs,
+                                super::file_ops::NewItem::SpecDocument {
+                                    change: change_path.clone(),
+                                },
+                                window,
+                                cx,
+                            )
+                        },
+                        cx,
+                    )
+                }))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _window, cx| {
@@ -562,7 +581,23 @@ impl HarnessPane {
             ));
         }
 
-        col = col.child(self.section_label("Changes", cx));
+        use super::file_ops::NewItem;
+        let creating = self.spec_files.creating.clone();
+        col = col.child(self.tree_heading_with_add(
+            "Changes",
+            "spec-new-change-folder",
+            "New change",
+            |this, window, cx| {
+                this.open_new_form(HarnessSection::Specs, NewItem::SpecChange, window, cx)
+            },
+            cx,
+        ));
+        if matches!(
+            creating,
+            Some(NewItem::SpecChange | NewItem::SpecDocument { .. })
+        ) {
+            col = col.children(self.render_new_form(HarnessSection::Specs, cx));
+        }
         if tree.changes.is_empty() {
             col = col.child(self.muted_line("No changes in flight.", cx));
         }
@@ -570,7 +605,18 @@ impl HarnessPane {
             col = col.child(self.render_change(change, cx));
         }
 
-        col = col.child(self.section_label("Specs", cx));
+        col = col.child(self.tree_heading_with_add(
+            "Specs",
+            "spec-new-capability",
+            "New spec",
+            |this, window, cx| {
+                this.open_new_form(HarnessSection::Specs, NewItem::SpecCapability, window, cx)
+            },
+            cx,
+        ));
+        if matches!(creating, Some(NewItem::SpecCapability)) {
+            col = col.children(self.render_new_form(HarnessSection::Specs, cx));
+        }
         if tree.specs.is_empty() {
             col = col.child(self.muted_line("No specs yet.", cx));
         }
@@ -803,8 +849,10 @@ impl HarnessPane {
                             .truncate()
                             .child(header),
                     )
-                    .children(self.render_document_controls(section, cx)),
+                    .children(self.render_document_controls(section, cx))
+                    .children(self.render_file_controls(section, cx)),
             )
+            .children(self.render_file_op_bar(section, cx))
             .children(save_error)
             .child(body)
             .into_any_element()

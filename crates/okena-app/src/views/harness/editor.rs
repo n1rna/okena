@@ -147,6 +147,22 @@ impl Documents {
     pub(crate) fn is_dirty(&self, root: &str, path: &str) -> bool {
         self.get(root, path).is_some_and(|b| b.dirty)
     }
+
+    /// Follow a renamed file: its buffer, edits included, moves to `to`.
+    pub(crate) fn rename(&mut self, root: &str, from: &str, to: &str) {
+        if let Some(mut buffer) = self.buffers.remove(&Self::key(root, from)) {
+            buffer.path = to.to_string();
+            self.insert(root, buffer);
+        }
+    }
+
+    /// The buffer an editor input belongs to. Looked up by the input rather
+    /// than by path, so a rename does not cut an open editor off its buffer.
+    fn by_input_mut(&mut self, input: &Entity<InputState>) -> Option<&mut DocumentBuffer> {
+        self.buffers
+            .values_mut()
+            .find(|b| b.input.as_ref() == Some(input))
+    }
 }
 
 impl HarnessPane {
@@ -223,7 +239,7 @@ impl HarnessPane {
                 let value = input.read(cx).value();
                 if let Some(buffer) = this
                     .documents_mut(section)
-                    .and_then(|d| d.get_mut(&root, &path))
+                    .and_then(|d| d.by_input_mut(&input))
                 {
                     let dirty = buffer.saved.as_str() != value.as_ref();
                     if dirty != buffer.dirty {

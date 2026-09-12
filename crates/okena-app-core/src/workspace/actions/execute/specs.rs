@@ -294,6 +294,73 @@ fn write_for(
     }
 }
 
+// ─── Files and folders in a root ─────────────────────────────────────────────
+//
+// Deleting a change's last document leaves its folder, and the tree still
+// lists that change ("no artifacts yet"): an empty change directory is what
+// `openspec new change` makes too. A capability folder emptied of its `spec.md`
+// is simply no longer listed.
+
+pub(super) fn create_file(
+    ws: &Workspace,
+    settings: &AppSettings,
+    root: Option<String>,
+    path: String,
+    content: String,
+) -> ActionResult {
+    in_root(&ws.data.projects, settings, root, |key, dir| {
+        super::document_files::create_file(key, dir, &path, &content, MAX_DOC_BYTES)
+    })
+}
+
+pub(super) fn create_folder(
+    ws: &Workspace,
+    settings: &AppSettings,
+    root: Option<String>,
+    path: String,
+) -> ActionResult {
+    in_root(&ws.data.projects, settings, root, |key, dir| {
+        super::document_files::create_folder(key, dir, &path)
+    })
+}
+
+pub(super) fn rename_file(
+    ws: &Workspace,
+    settings: &AppSettings,
+    root: Option<String>,
+    from: String,
+    to: String,
+) -> ActionResult {
+    in_root(&ws.data.projects, settings, root, |key, dir| {
+        super::document_files::rename(key, dir, tree::resolve_document, &from, &to)
+    })
+}
+
+pub(super) fn delete_file(
+    ws: &Workspace,
+    settings: &AppSettings,
+    root: Option<String>,
+    path: String,
+) -> ActionResult {
+    in_root(&ws.data.projects, settings, root, |key, dir| {
+        super::document_files::delete(key, dir, tree::resolve_document, &path)
+    })
+}
+
+/// Run `op` with the key and path of the root the client named, found exactly
+/// as a read finds it.
+fn in_root(
+    projects: &[ProjectData],
+    settings: &AppSettings,
+    root: Option<String>,
+    op: impl FnOnce(&str, &Path) -> ActionResult,
+) -> ActionResult {
+    match resolve_root(projects, settings, root.as_deref()) {
+        Ok(root) => op(&root.key, Path::new(&root.path)),
+        Err(e) => ActionResult::Err(e),
+    }
+}
+
 // ─── Store management ────────────────────────────────────────────────────────
 
 pub(super) fn register_store(
@@ -841,6 +908,153 @@ mod tests {
             std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
             "SECRET"
         );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn files_are_created_renamed_and_deleted_inside_the_root_and_nowhere_else() {
+        use super::super::document_files as files;
+        use okena_openspec::tree::resolve_document;
+
+        let sandbox = tmpdir("files");
+        let repo = sandbox.join("specs");
+        populated_root(&repo);
+        write(&sandbox.join("outside.md"), "SECRET");
+        let mut settings = sandboxed(&sandbox);
+        settings.harness.specs.folders = vec![repo.to_string_lossy().into_owned()];
+        let run =
+            |op: &dyn Fn(&str, &Path) -> ActionResult| super::in_root(&[], &settings, None, op);
+        let refused = |result: ActionResult| match result {
+            ActionResult::Err(e) => e,
+            ActionResult::Ok(_) => panic!("expected a refusal"),
+        };
+
+        // A new change directory, then a document in it: both show in the tree.
+        assert!(matches!(
+            run(&|k, d| files::create_folder(k, d, "openspec/changes/add-sso")),
+            ActionResult::Ok(_)
+        ));
+        let ActionResult::Ok(Some(created)) = run(&|k, d| {
+            files::create_file(
+                k,
+                d,
+                "openspec/changes/add-sso/proposal.md",
+                "# SSO\n",
+                1024,
+            )
+        }) else {
+            panic!("expected the file to be created");
+        };
+        assert_eq!(created["path"], "openspec/changes/add-sso/proposal.md");
+        let t = tree_of(&settings, None);
+        let change = t
+            .changes
+            .iter()
+            .find(|c| c.name == "add-sso")
+            .expect("listed");
+        assert_eq!(change.artifacts[0].name, "proposal.md");
+
+        // Collisions and names the tree could never list.
+        assert!(
+            refused(run(&|k, d| files::create_folder(
+                k,
+                d,
+                "openspec/changes/add-sso"
+            )))
+            .contains("already exists")
+        );
+        assert!(
+            refused(run(&|k, d| {
+                files::create_file(k, d, "openspec/specs/auth/spec.md", "clobber", 1024)
+            }))
+            .contains("already exists")
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("openspec/specs/auth/spec.md")).unwrap(),
+            "# Auth"
+        );
+        for bad in ["", "openspec/.draft.md", "openspec/../../outside-new.md"] {
+            refused(run(&|k, d| files::create_file(k, d, bad, "x", 1024)));
+        }
+        assert!(!sandbox.join("outside-new.md").exists());
+
+        // Rename follows the file, refuses an occupied or escaping target, and
+        // refuses a source outside the root.
+        let ActionResult::Ok(Some(renamed)) = run(&|k, d| {
+            files::rename(
+                k,
+                d,
+                resolve_document,
+                "openspec/changes/add-sso/proposal.md",
+                "openspec/changes/add-sso/design.md",
+            )
+        }) else {
+            panic!("expected the rename to land");
+        };
+        assert_eq!(renamed["path"], "openspec/changes/add-sso/design.md");
+        assert!(!repo.join("openspec/changes/add-sso/proposal.md").exists());
+        assert!(
+            refused(run(&|k, d| {
+                files::rename(
+                    k,
+                    d,
+                    resolve_document,
+                    "openspec/changes/add-sso/design.md",
+                    "openspec/specs/auth/spec.md",
+                )
+            }))
+            .contains("already exists")
+        );
+        refused(run(&|k, d| {
+            files::rename(
+                k,
+                d,
+                resolve_document,
+                "openspec/../../outside.md",
+                "openspec/x.md",
+            )
+        }));
+        refused(run(&|k, d| {
+            files::rename(
+                k,
+                d,
+                resolve_document,
+                "openspec/changes/add-sso/design.md",
+                "../../moved.md",
+            )
+        }));
+
+        // Delete removes one file; folders and escapes are refused.
+        refused(run(&|k, d| {
+            files::delete(k, d, resolve_document, "openspec/changes/add-sso")
+        }));
+        refused(run(&|k, d| {
+            files::delete(k, d, resolve_document, "openspec/../../outside.md")
+        }));
+        assert!(matches!(
+            run(&|k, d| files::delete(
+                k,
+                d,
+                resolve_document,
+                "openspec/changes/add-sso/design.md"
+            )),
+            ActionResult::Ok(_)
+        ));
+        assert!(!repo.join("openspec/changes/add-sso/design.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
+            "SECRET"
+        );
+
+        // A root key discovery never found is no way in either.
+        let key = format!("path:{}", sandbox.to_string_lossy());
+        assert!(matches!(
+            super::in_root(&[], &settings, Some(key), |k, d| {
+                files::create_file(k, d, "pwned.md", "x", 1024)
+            }),
+            ActionResult::Err(_)
+        ));
+        assert!(!sandbox.join("pwned.md").exists());
         std::fs::remove_dir_all(&sandbox).ok();
     }
 

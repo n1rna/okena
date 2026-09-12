@@ -3026,6 +3026,10 @@ pub async fn daemon_command_loop(
                 | ActionRequest::KnowledgeTree { .. }
                 | ActionRequest::KnowledgeRead { .. }
                 | ActionRequest::KnowledgeWrite { .. }
+                | ActionRequest::KnowledgeFileCreate { .. }
+                | ActionRequest::KnowledgeFolderCreate { .. }
+                | ActionRequest::KnowledgeFileRename { .. }
+                | ActionRequest::KnowledgeFileDelete { .. }
                 | ActionRequest::KnowledgeStoreClone { .. }
                 | ActionRequest::KnowledgeStoreRegister { .. }
                 | ActionRequest::KnowledgeStoreUnregister { .. }

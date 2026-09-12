@@ -230,6 +230,12 @@ the first healthy store, else the first healthy root. "New change" writes the
 the chosen root. When that root is a store, the drafting agent is told to pass
 `--store <id>` to the CLI.
 
+Documents edit in place, the way knowledge entries do (see
+[knowledge.md](knowledge.md#in-okena)). The tree's `+` buttons create a change
+folder, a capability (`openspec/specs/<name>/spec.md`) or a document inside a
+change, and the open document has **Rename** and **Delete…**. Deleting a
+change's last document leaves the change listed with "no artifacts yet".
+
 #### Knowledge
 
 Knowledge stores are git repositories of engineering docs, skills, agents and

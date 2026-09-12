@@ -727,14 +727,33 @@ impl HarnessPane {
         };
 
         col = col.child(
-            div().pt(px(10.0)).child(
-                okena_ui::input::input_container(&t, None)
-                    .w_full()
-                    .px(px(6.0))
-                    .py(px(4.0))
-                    .child(SimpleInput::new(&self.knowledge.filter).text_size(ui_text_md(cx))),
-            ),
+            h_flex()
+                .pt(px(10.0))
+                .gap(px(4.0))
+                .items_center()
+                .child(
+                    okena_ui::input::input_container(&t, None)
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(6.0))
+                        .py(px(4.0))
+                        .child(SimpleInput::new(&self.knowledge.filter).text_size(ui_text_md(cx))),
+                )
+                .child(self.add_button(
+                    "knowledge-new-entry",
+                    "New entry",
+                    |this, window, cx| {
+                        this.open_new_form(
+                            HarnessSection::Knowledge,
+                            super::file_ops::NewItem::Knowledge(KnowledgeKind::Doc),
+                            window,
+                            cx,
+                        )
+                    },
+                    cx,
+                )),
         );
+        col = col.children(self.render_new_form(HarnessSection::Knowledge, cx));
         for d in &tree.status {
             col = col.child(
                 div()
@@ -1050,6 +1069,7 @@ impl HarnessPane {
                             .child(header),
                     )
                     .children(self.render_document_controls(section, cx))
+                    .children(self.render_file_controls(section, cx))
                     .child(self.small_button(
                         "knowledge-close-entry",
                         "Overview",
@@ -1060,6 +1080,7 @@ impl HarnessPane {
                         cx,
                     )),
             )
+            .children(self.render_file_op_bar(section, cx))
             .children(save_error)
             .child(body)
             .into_any_element()
