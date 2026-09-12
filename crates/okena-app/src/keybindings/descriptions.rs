@@ -8,12 +8,13 @@ use super::{
     FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate, JumpToNextFailedCommand,
     JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt, MinimizeTerminal,
     NewProject, NewWindow, OpenSettingsFile, Paste, Quit, ResetZoom, RestartDaemon, ReviewChanges,
-    ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendEscape, ShowBranchSwitcher,
-    ShowCommandPalette, ShowContentSearch, ShowDiffViewer, ShowFileSearch, ShowHarness,
-    ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager, ShowProjectSwitcher,
-    ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal, SplitVertical,
-    StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher, ToggleProjectLayout,
-    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide, ToggleUnread, ZoomIn, ZoomOut,
+    SaveDocument, ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendEscape,
+    ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer, ShowFileSearch,
+    ShowHarness, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager,
+    ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal,
+    SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
+    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
+    ToggleUnread, ZoomIn, ZoomOut,
 };
 
 /// Get human-readable descriptions for all actions
@@ -437,6 +438,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Open the harness window (tasks, specs, knowledge)",
             category: "Global",
             factory: || Box::new(ShowHarness),
+        },
+    );
+    map.insert(
+        "SaveDocument",
+        ActionDescription {
+            name: "Save Document",
+            description: "Save the Specs or Knowledge document being edited",
+            category: "Harness",
+            factory: || Box::new(SaveDocument),
         },
     );
     map.insert(

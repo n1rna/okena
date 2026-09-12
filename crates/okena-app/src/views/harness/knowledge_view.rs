@@ -2,9 +2,10 @@
 //! one you pick.
 //!
 //! Roots are whatever the daemon discovered (ADR-0003): stores in okena's
-//! registry and the kind folders projects carry. Reading, fetching and pulling
-//! all go through the daemon, which refuses roots it did not discover and paths
-//! outside a root; the client never touches the filesystem.
+//! registry and the kind folders projects carry. Reading, saving, fetching and
+//! pulling all go through the daemon, which refuses roots it did not discover
+//! and paths outside a root; the client never touches the filesystem. Files
+//! edit through the editor the Specs view shares (`editor.rs`).
 
 use crate::theme::{ThemeColors, theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
@@ -20,8 +21,8 @@ use okena_core::knowledge::{
 use okena_ui::simple_input::InputChangedEvent;
 use std::collections::HashSet;
 
-use super::HarnessPane;
-use super::markdown::OpenDocument;
+use super::editor::{DocumentBuffer, Documents};
+use super::{HarnessPane, HarnessSection};
 
 /// Width of the root and entry list, matching the Specs view.
 const TREE_WIDTH: f32 = 280.0;
@@ -45,7 +46,8 @@ pub(crate) struct KnowledgeState {
     /// Path of the file being read, relative to the root: an entry, or one of
     /// a skill's supporting files.
     pub(crate) selected: Option<String>,
-    pub(crate) document: Option<OpenDocument>,
+    /// The open file's buffer, and any other with unsaved edits.
+    pub(crate) documents: Documents,
     pub(crate) content_error: Option<String>,
     pub(crate) filter: Entity<SimpleInputState>,
     /// Groups (`docs`) and doc folders (`docs/ci`) folded shut. Collapsed
@@ -72,16 +74,20 @@ impl KnowledgeState {
             syncing: false,
             sync_message: None,
             selected: None,
-            document: None,
+            documents: Documents::default(),
             content_error: None,
             filter,
             collapsed: HashSet::new(),
         }
     }
 
+    /// Stop showing the open file. Its buffer stays only if it holds unsaved
+    /// edits. Call before `root_key` changes: buffers are keyed by it.
     fn clear_selection(&mut self) {
-        self.selected = None;
-        self.document = None;
+        if let Some(path) = self.selected.take() {
+            self.documents
+                .leave(self.root_key.as_deref().unwrap_or_default(), &path);
+        }
         self.content_error = None;
     }
 
@@ -359,9 +365,12 @@ impl HarnessPane {
                                     this.knowledge.tree = Some(tree);
                                     // A file deleted or renamed since it was
                                     // opened must not stay on screen looking
-                                    // current.
+                                    // current — unless it holds edits, which
+                                    // would go with it.
+                                    let root = this.knowledge.root_key.clone().unwrap_or_default();
                                     if let Some(path) = this.knowledge.selected.clone()
                                         && !this.knowledge.tree_contains(&path)
+                                        && !this.knowledge.documents.is_dirty(&root, &path)
                                     {
                                         this.knowledge.clear_selection();
                                     }
@@ -386,20 +395,28 @@ impl HarnessPane {
         if self.knowledge.root_key.as_deref() == Some(key.as_str()) {
             return;
         }
+        self.knowledge.clear_selection();
         self.knowledge.root_key = Some(key);
         self.knowledge.tree = None;
         self.knowledge.sync_message = None;
-        self.knowledge.clear_selection();
         self.knowledge.collapsed.clear();
         self.refresh_knowledge(cx);
     }
 
-    /// Open one file of the current root.
-    fn open_knowledge_file(&mut self, path: String, cx: &mut Context<Self>) {
+    /// Open one file of the current root: its held buffer when it has unsaved
+    /// edits, else a fresh read.
+    pub(super) fn open_knowledge_file(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.knowledge.selected.as_deref() != Some(path.as_str()) {
+            self.knowledge.clear_selection();
+        }
         self.knowledge.selected = Some(path.clone());
-        self.knowledge.document = None;
         self.knowledge.content_error = None;
         cx.notify();
+
+        let root_key = self.knowledge.root_key.clone().unwrap_or_default();
+        if self.knowledge.documents.get(&root_key, &path).is_some() {
+            return;
+        }
 
         let client = self.client.clone();
         let root = self.knowledge.root_key.clone();
@@ -419,17 +436,16 @@ impl HarnessPane {
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     // A slow read must not replace a file opened after it.
-                    if this.knowledge.selected.as_deref() != Some(wanted.as_str()) {
+                    if this.knowledge.selected.as_deref() != Some(wanted.as_str())
+                        || this.knowledge.root_key.clone().unwrap_or_default() != root_key
+                    {
                         return;
                     }
                     match result {
-                        Ok(doc) => {
-                            this.knowledge.document = Some(OpenDocument::from_file(
-                                &doc.path,
-                                doc.content,
-                                theme(cx).is_dark(),
-                            ));
-                        }
+                        Ok(doc) => this.knowledge.documents.insert(
+                            &root_key,
+                            DocumentBuffer::new(doc.path, doc.content, doc.revision),
+                        ),
                         Err(e) => this.knowledge.content_error = Some(e),
                     }
                     cx.notify();
@@ -752,7 +768,12 @@ impl HarnessPane {
                     } else {
                         t.text_secondary
                     }))
-                    .child(entry.title.clone()),
+                    .child(format!(
+                        "{}{}",
+                        self.unsaved_marker(HarnessSection::Knowledge, &entry.path)
+                            .unwrap_or_default(),
+                        entry.title
+                    )),
             )
             .when(warned, |d| {
                 d.child(
@@ -1072,10 +1093,13 @@ impl HarnessPane {
             let mut files = v_flex().gap(px(1.0));
             for file in &entry.files {
                 let path = file.clone();
-                let label = file
-                    .strip_prefix(entry.path.trim_end_matches("SKILL.md"))
-                    .unwrap_or(file)
-                    .to_string();
+                let label = format!(
+                    "{}{}",
+                    self.unsaved_marker(HarnessSection::Knowledge, file)
+                        .unwrap_or_default(),
+                    file.strip_prefix(entry.path.trim_end_matches("SKILL.md"))
+                        .unwrap_or(file)
+                );
                 files = files.child(
                     div()
                         .id(SharedString::from(format!("knowledge-file-{file}")))
@@ -1138,29 +1162,50 @@ impl HarnessPane {
             };
         };
 
-        let entry = self
-            .knowledge
-            .tree
-            .as_ref()
-            .and_then(|tree| tree.entry(&path))
-            .cloned();
-        let mut page = v_flex()
-            .w_full()
-            .max_w(okena_markdown::DOC_MAX_WIDTH)
-            .min_w_0();
-        if let Some(entry) = &entry {
-            page = page.child(self.render_entry_meta(entry, cx));
-        }
-        page = if let Some(err) = &self.knowledge.content_error {
-            page.child(self.error_banner(err.clone(), cx))
-        } else {
-            match &self.knowledge.document {
-                Some(document) => {
-                    page.children(self.render_open_document(document, "knowledge", cx))
+        let section = HarnessSection::Knowledge;
+        let buffer = self.open_buffer(section);
+        let body: AnyElement = match buffer {
+            // The source carries the frontmatter the meta block is drawn from,
+            // so editing shows the editor alone.
+            Some(buffer) if buffer.editing() => self
+                .render_document_editor(section, buffer, cx)
+                .unwrap_or_else(|| self.info_banner("Loading…".into(), cx)),
+            _ => {
+                let entry = self
+                    .knowledge
+                    .tree
+                    .as_ref()
+                    .and_then(|tree| tree.entry(&path))
+                    .cloned();
+                let mut page = v_flex()
+                    .w_full()
+                    .max_w(okena_markdown::DOC_MAX_WIDTH)
+                    .min_w_0();
+                if let Some(entry) = &entry {
+                    page = page.child(self.render_entry_meta(entry, cx));
                 }
-                None => page.child(self.info_banner("Loading…".into(), cx)),
+                page = if let Some(err) = &self.knowledge.content_error {
+                    page.child(self.error_banner(err.clone(), cx))
+                } else {
+                    match buffer {
+                        Some(buffer) => page.children(self.render_document_preview(buffer, cx)),
+                        None => page.child(self.info_banner("Loading…".into(), cx)),
+                    }
+                };
+                v_flex()
+                    .id("knowledge-document-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(20.0))
+                    .py(px(14.0))
+                    .child(page)
+                    .into_any_element()
             }
         };
+        let save_error = buffer
+            .and_then(|b| b.save_error.clone())
+            .map(|e| self.error_banner(e, cx));
 
         let header = match root {
             Some(root) => format!("{} · {path}", root.name),
@@ -1173,6 +1218,8 @@ impl HarnessPane {
             .child(
                 h_flex()
                     .w_full()
+                    .flex_shrink_0()
+                    .items_center()
                     .px(px(16.0))
                     .py(px(6.0))
                     .gap(px(8.0))
@@ -1187,6 +1234,7 @@ impl HarnessPane {
                             .text_color(rgb(t.text_muted))
                             .child(header),
                     )
+                    .children(self.render_document_controls(section, cx))
                     .child(self.small_button(
                         "knowledge-close-entry",
                         "Overview",
@@ -1197,16 +1245,8 @@ impl HarnessPane {
                         cx,
                     )),
             )
-            .child(
-                v_flex()
-                    .id("knowledge-document-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px(px(20.0))
-                    .py(px(14.0))
-                    .child(page),
-            )
+            .children(save_error)
+            .child(body)
             .into_any_element()
     }
 
@@ -1258,7 +1298,12 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    pub(super) fn render_knowledge_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_knowledge_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.ensure_document_input(HarnessSection::Knowledge, window, cx);
         let t = theme(cx);
         let view = v_flex().size_full();
 

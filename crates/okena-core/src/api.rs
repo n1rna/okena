@@ -1279,6 +1279,21 @@ pub enum ActionRequest {
         root: Option<String>,
         path: String,
     },
+    /// Replace one existing document in a root. Replies with the new
+    /// `revision`.
+    ///
+    /// `path` is checked exactly as `SpecRead` checks it, so a write can no
+    /// more land outside a root than a read can leave one. `revision` is the
+    /// one `SpecRead` returned: when the file has changed since, the write is
+    /// refused and nothing is written, so an agent editing the same file is
+    /// never clobbered by a stale buffer.
+    SpecWrite {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+        content: String,
+        revision: String,
+    },
     /// Register an existing store checkout in OpenSpec's machine registry —
     /// `openspec store register <path> [--id <id>] --yes`. A root without
     /// `.openspec-store/store.yaml` becomes a store named `id`, else its
@@ -1363,6 +1378,18 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         path: String,
+    },
+    /// Replace one existing file in a root. Replies with the new `revision`.
+    ///
+    /// `path` is checked exactly as `KnowledgeRead` checks it. `revision` is
+    /// the one the read returned; a file changed since is refused and left
+    /// untouched.
+    KnowledgeWrite {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+        path: String,
+        content: String,
+        revision: String,
     },
     /// Clone a store and register the checkout.
     KnowledgeStoreClone {

@@ -981,6 +981,17 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::SpecStores => ActionRequest::SpecStores,
         ActionRequest::SpecsTree { root } => ActionRequest::SpecsTree { root },
         ActionRequest::SpecRead { root, path } => ActionRequest::SpecRead { root, path },
+        ActionRequest::SpecWrite {
+            root,
+            path,
+            content,
+            revision,
+        } => ActionRequest::SpecWrite {
+            root,
+            path,
+            content,
+            revision,
+        },
         ActionRequest::SpecStoreRegister { path, id } => {
             ActionRequest::SpecStoreRegister { path, id }
         }
@@ -1013,6 +1024,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         passthrough @ (ActionRequest::KnowledgeStores
         | ActionRequest::KnowledgeTree { .. }
         | ActionRequest::KnowledgeRead { .. }
+        | ActionRequest::KnowledgeWrite { .. }
         | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreRegister { .. }
         | ActionRequest::KnowledgeStoreUnregister { .. }

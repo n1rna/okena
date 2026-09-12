@@ -5,6 +5,7 @@
 //! workspace uses, so a view can act on projects (focus one, start a worktree)
 //! rather than only display them.
 
+mod editor;
 mod knowledge_draft;
 mod knowledge_view;
 mod markdown;
@@ -23,6 +24,7 @@ use okena_terminal::TerminalsRegistry;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+pub use editor::EDITOR_CONTEXT;
 pub use okena_core::harness::HarnessSection;
 
 /// Tasks-view state. Grouped so the pane struct stays readable as more views
@@ -103,7 +105,8 @@ pub(crate) struct SpecsState {
     pub(crate) error: Option<String>,
     /// Path of the document being read, relative to the root.
     pub(crate) selected: Option<String>,
-    pub(crate) content: Option<markdown::OpenDocument>,
+    /// The open document's buffer, and any other with unsaved edits.
+    pub(crate) documents: editor::Documents,
     pub(crate) content_error: Option<String>,
     /// The idea a new change is drafted from.
     pub(crate) idea_input: Entity<SimpleInputState>,
@@ -140,6 +143,16 @@ impl SpecsState {
         tree.specs.iter().any(|d| d.path == path)
             || tree.changes.iter().any(in_change)
             || tree.archived.iter().any(in_change)
+    }
+
+    /// Stop showing the selected document. Its buffer stays only if it holds
+    /// unsaved edits. Call before `root_key` changes: buffers are keyed by it.
+    pub(crate) fn leave_selection(&mut self) {
+        if let Some(path) = self.selected.take() {
+            self.documents
+                .leave(self.root_key.as_deref().unwrap_or_default(), &path);
+        }
+        self.content_error = None;
     }
 
     /// Whether the currently-loaded tree still lists `path`.
@@ -265,7 +278,7 @@ impl HarnessPane {
                 load_generation: 0,
                 error: None,
                 selected: None,
-                content: None,
+                documents: editor::Documents::default(),
                 content_error: None,
                 idea_input,
                 composing: false,

@@ -287,6 +287,9 @@ pub struct KnowledgeDocument {
     /// Relative to the root, as sent.
     pub path: String,
     pub content: String,
+    /// What `KnowledgeWrite` must be handed back to replace this file.
+    #[serde(default)]
+    pub revision: String,
 }
 
 /// Where an entry lives, independent of any one machine's checkout path: the

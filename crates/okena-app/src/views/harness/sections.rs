@@ -170,14 +170,14 @@ impl HarnessPane {
 }
 
 impl Render for HarnessPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         // Exhaustive on purpose: a new section must choose its view here rather
         // than silently falling through to a placeholder.
         let body = match self.section {
             HarnessSection::Tasks => self.render_tasks_view(cx),
-            HarnessSection::Specs => self.render_specs_view(cx),
-            HarnessSection::Knowledge => self.render_knowledge_view(cx),
+            HarnessSection::Specs => self.render_specs_view(window, cx),
+            HarnessSection::Knowledge => self.render_knowledge_view(window, cx),
         };
 
         // No title bar and no close button: the sidebar's HARNESS nav already

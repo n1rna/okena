@@ -2983,6 +2983,7 @@ pub async fn daemon_command_loop(
                 action @ (ActionRequest::KnowledgeStores
                 | ActionRequest::KnowledgeTree { .. }
                 | ActionRequest::KnowledgeRead { .. }
+                | ActionRequest::KnowledgeWrite { .. }
                 | ActionRequest::KnowledgeStoreClone { .. }
                 | ActionRequest::KnowledgeStoreRegister { .. }
                 | ActionRequest::KnowledgeStoreUnregister { .. }

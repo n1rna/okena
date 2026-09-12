@@ -35,8 +35,16 @@ okena-ext-updater = { path = "../okena-ext-updater" }
 # UI Framework (from Zed repo)
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 
-# UI Components
-gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
+# UI Components. The grammars are for the harness document editor
+# (`views/harness/editor.rs`): gpui-component declares no default features, so
+# without these its code editor has no highlighting at all. JSON comes with
+# `tree-sitter` itself.
+gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component", features = [
+    "tree-sitter-markdown-inline",
+    "tree-sitter-yaml",
+    "tree-sitter-bash",
+    "tree-sitter-toml",
+] }
 
 # Async / concurrency
 smol = "2.0"

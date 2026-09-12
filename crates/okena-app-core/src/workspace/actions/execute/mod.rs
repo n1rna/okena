@@ -703,6 +703,12 @@ pub fn execute_action(
         ActionRequest::SpecStores => specs::stores(ws, settings),
         ActionRequest::SpecsTree { root } => specs::tree(ws, settings, root),
         ActionRequest::SpecRead { root, path } => specs::read(ws, settings, root, path),
+        ActionRequest::SpecWrite {
+            root,
+            path,
+            content,
+            revision,
+        } => specs::write(ws, settings, root, path, content, revision),
         ActionRequest::SpecStoreRegister { path, id } => specs::register_store(settings, path, id),
         ActionRequest::SpecStoreUnregister { id } => specs::unregister_store(settings, id),
         ActionRequest::SpecStoreSetup {
@@ -735,6 +741,7 @@ pub fn execute_action(
         action @ (ActionRequest::KnowledgeStores
         | ActionRequest::KnowledgeTree { .. }
         | ActionRequest::KnowledgeRead { .. }
+        | ActionRequest::KnowledgeWrite { .. }
         | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreRegister { .. }
         | ActionRequest::KnowledgeStoreUnregister { .. }

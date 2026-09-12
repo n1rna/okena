@@ -7,7 +7,8 @@
 //! root. The client never touches the filesystem itself.
 //!
 //! Documents render as formatted Markdown, through the same renderer as
-//! knowledge entries.
+//! knowledge entries, and edit and save through the shared editor
+//! (`editor.rs`).
 
 use crate::theme::{ThemeColors, theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
@@ -20,8 +21,8 @@ use okena_core::specs::{
     SpecChange, SpecDiagnostic, SpecDoc, SpecRoot, SpecRootKind, SpecSeverity, SpecStores, SpecTree,
 };
 
-use super::HarnessPane;
-use super::markdown::OpenDocument;
+use super::editor::DocumentBuffer;
+use super::{HarnessPane, HarnessSection};
 
 /// Width of the root and document list. Fixed rather than draggable: the list
 /// holds short names, and a second resizable divider in the harness would be
@@ -109,9 +110,7 @@ impl HarnessPane {
                     match result {
                         Ok((stores, key, tree)) => {
                             if key != this.specs.root_key {
-                                this.specs.selected = None;
-                                this.specs.content = None;
-                                this.specs.content_error = None;
+                                this.specs.leave_selection();
                             }
                             this.specs.root_key = key;
                             this.specs.stores = Some(stores);
@@ -121,12 +120,14 @@ impl HarnessPane {
                                     // Drop a selection whose document no longer
                                     // exists, so a deleted or renamed file
                                     // doesn't leave stale content on screen
-                                    // looking current.
+                                    // looking current — unless it holds edits,
+                                    // which would go with it.
+                                    let root = this.specs.root_key.clone().unwrap_or_default();
                                     if let Some(path) = this.specs.selected.clone()
                                         && !this.specs.tree_contains(&path)
+                                        && !this.specs.documents.is_dirty(&root, &path)
                                     {
-                                        this.specs.selected = None;
-                                        this.specs.content = None;
+                                        this.specs.leave_selection();
                                     }
                                 }
                                 Some(Err(e)) => {
@@ -149,21 +150,27 @@ impl HarnessPane {
         if self.specs.root_key.as_deref() == Some(key.as_str()) {
             return;
         }
+        self.specs.leave_selection();
         self.specs.root_key = Some(key);
         self.specs.tree = None;
-        self.specs.selected = None;
-        self.specs.content = None;
-        self.specs.content_error = None;
         self.specs.collapsed.clear();
         self.refresh_specs(cx);
     }
 
-    /// Load one document's content.
+    /// Open one document: its held buffer when it has unsaved edits, else a
+    /// fresh read.
     pub(super) fn open_spec_doc(&mut self, path: String, cx: &mut Context<Self>) {
+        if self.specs.selected.as_deref() != Some(path.as_str()) {
+            self.specs.leave_selection();
+        }
         self.specs.selected = Some(path.clone());
-        self.specs.content = None;
         self.specs.content_error = None;
         cx.notify();
+
+        let root_key = self.specs.root_key.clone().unwrap_or_default();
+        if self.specs.documents.get(&root_key, &path).is_some() {
+            return;
+        }
 
         let client = self.client.clone();
         let root = self.specs.root_key.clone();
@@ -174,10 +181,13 @@ impl HarnessPane {
                     .post_action(ActionRequest::SpecRead { root, path })
                     .and_then(|v| v.ok_or_else(|| "Missing document".to_string()))
                     .map(|v| {
-                        v.get("content")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or_default()
-                            .to_string()
+                        let field = |name: &str| {
+                            v.get(name)
+                                .and_then(|c| c.as_str())
+                                .unwrap_or_default()
+                                .to_string()
+                        };
+                        (field("content"), field("revision"))
                     })
             })
             .await;
@@ -187,17 +197,16 @@ impl HarnessPane {
                     // Ignore a response for a document the user has already
                     // navigated away from, or a slow read would overwrite a
                     // faster one selected afterwards.
-                    if this.specs.selected.as_deref() != Some(wanted.as_str()) {
+                    if this.specs.selected.as_deref() != Some(wanted.as_str())
+                        || this.specs.root_key.clone().unwrap_or_default() != root_key
+                    {
                         return;
                     }
                     match result {
-                        Ok(content) => {
-                            this.specs.content = Some(OpenDocument::from_file(
-                                &wanted,
-                                content,
-                                theme(cx).is_dark(),
-                            ));
-                        }
+                        Ok((content, revision)) => this.specs.documents.insert(
+                            &root_key,
+                            DocumentBuffer::new(wanted.clone(), content, revision),
+                        ),
                         Err(e) => this.specs.content_error = Some(e),
                     }
                     cx.notify();
@@ -272,6 +281,7 @@ impl HarnessPane {
                             // Open the root it went into, with the change
                             // expanded: the user just made it.
                             if let Some(root) = v.get("root").and_then(|r| r.as_str()) {
+                                this.specs.leave_selection();
                                 this.specs.root_key = Some(root.to_string());
                             }
                             this.specs.collapsed.remove(&change);
@@ -383,7 +393,12 @@ impl HarnessPane {
                 t.text_secondary
             }))
             .truncate()
-            .child(doc.name.clone())
+            .child(format!(
+                "{}{}",
+                self.unsaved_marker(HarnessSection::Specs, &doc.path)
+                    .unwrap_or_default(),
+                doc.name
+            ))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _window, cx| {
@@ -714,27 +729,37 @@ impl HarnessPane {
             };
         };
 
+        let section = HarnessSection::Specs;
+        let buffer = self.open_buffer(section);
         let body: AnyElement = if let Some(err) = &self.specs.content_error {
             self.error_banner(err.clone(), cx)
-        } else if let Some(document) = &self.specs.content {
-            v_flex()
-                .id("spec-document-body")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .px(px(20.0))
-                .py(px(14.0))
-                .child(
-                    v_flex()
-                        .w_full()
-                        .max_w(okena_markdown::DOC_MAX_WIDTH)
-                        .min_w_0()
-                        .children(self.render_open_document(document, "spec", cx)),
-                )
-                .into_any_element()
+        } else if let Some(buffer) = buffer {
+            if buffer.editing() {
+                self.render_document_editor(section, buffer, cx)
+                    .unwrap_or_else(|| self.info_banner("Loading…".into(), cx))
+            } else {
+                v_flex()
+                    .id("spec-document-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(20.0))
+                    .py(px(14.0))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(okena_markdown::DOC_MAX_WIDTH)
+                            .min_w_0()
+                            .children(self.render_document_preview(buffer, cx)),
+                    )
+                    .into_any_element()
+            }
         } else {
             self.info_banner("Loading…".into(), cx)
         };
+        let save_error = buffer
+            .and_then(|b| b.save_error.clone())
+            .map(|e| self.error_banner(e, cx));
 
         let header = match root {
             Some(root) => format!("{} · {path}", root.name),
@@ -745,17 +770,27 @@ impl HarnessPane {
             .min_w_0()
             .h_full()
             .child(
-                div()
+                h_flex()
                     .w_full()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(px(8.0))
                     .px(px(16.0))
                     .py(px(6.0))
                     .border_b_1()
                     .border_color(rgb(t.border))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .truncate()
-                    .child(header),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .truncate()
+                            .child(header),
+                    )
+                    .children(self.render_document_controls(section, cx)),
             )
+            .children(save_error)
             .child(body)
             .into_any_element()
     }
@@ -1052,7 +1087,12 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    pub(super) fn render_specs_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_specs_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.ensure_document_input(HarnessSection::Specs, window, cx);
         let t = theme(cx);
         let root = v_flex().size_full();
 

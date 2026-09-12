@@ -74,6 +74,12 @@ fn execute_at(
         ActionRequest::KnowledgeRead { root, path } => {
             read(registry, projects, root.as_deref(), path)
         }
+        ActionRequest::KnowledgeWrite {
+            root,
+            path,
+            content,
+            revision,
+        } => write(registry, projects, root.as_deref(), path, content, revision),
         ActionRequest::KnowledgeStoreClone { url, path } => match git::clone_store(
             registry,
             url,
@@ -226,6 +232,7 @@ fn read(
             serde_json::to_value(KnowledgeDocument {
                 root_key: root.key,
                 path: path.to_string(),
+                revision: okena_core::fs::content_revision(&content),
                 content,
             }),
             "knowledge document",
@@ -234,6 +241,41 @@ fn read(
             ActionResult::Err(format!("{path} is not a text file"))
         }
         Err(e) => ActionResult::Err(format!("could not read {path}: {e}")),
+    }
+}
+
+/// Replace an existing file, through the same root and path checks as
+/// [`read`]: a write must not be a way out of a root that a read is not.
+fn write(
+    registry: &Path,
+    projects: &[ProjectSource],
+    key: Option<&str>,
+    path: &str,
+    content: &str,
+    revision: &str,
+) -> ActionResult {
+    let root = match resolve_root(registry, projects, key) {
+        Ok(r) => r,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let real = match tree::resolve_document(Path::new(&root.path), path) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    // What could not be opened must not be written either.
+    if content.len() as u64 > MAX_DOC_BYTES {
+        return ActionResult::Err(format!(
+            "{path} is too large to save ({} KB)",
+            content.len() / 1024
+        ));
+    }
+    match okena_core::fs::replace_if_unchanged(&real, content, revision) {
+        Ok(revision) => ActionResult::Ok(Some(serde_json::json!({
+            "root": root.key,
+            "path": path,
+            "revision": revision,
+        }))),
+        Err(e) => ActionResult::Err(e.describe(path)),
     }
 }
 
@@ -672,6 +714,66 @@ mod tests {
                 },
             ))
             .contains("too large")
+        );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn a_write_replaces_what_was_read_and_refuses_stale_revisions_and_escapes() {
+        let sandbox = tmpdir("write");
+        let checkout = sandbox.join("eng");
+        store(&checkout, "acme-eng");
+        write(&sandbox.join("outside.md"), "SECRET");
+        okena_knowledge::registry::register(&registry(&sandbox), &checkout.to_string_lossy(), None)
+            .unwrap();
+        let save = |path: &str, content: &str, revision: &str| {
+            run(
+                &sandbox,
+                &[],
+                ActionRequest::KnowledgeWrite {
+                    root: None,
+                    path: path.into(),
+                    content: content.into(),
+                    revision: revision.into(),
+                },
+            )
+        };
+
+        let doc: KnowledgeDocument = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeRead {
+                root: None,
+                path: "docs/readme.md".into(),
+            },
+        ));
+        let saved: serde_json::Value = ok!(save("docs/readme.md", "# Edited\n", &doc.revision));
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("docs/readme.md")).unwrap(),
+            "# Edited\n"
+        );
+        let reopened: KnowledgeDocument = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeRead {
+                root: None,
+                path: "docs/readme.md".into(),
+            },
+        ));
+        assert_eq!(reopened.content, "# Edited\n");
+        assert_eq!(saved["revision"], reopened.revision);
+
+        // The revision from before the first save is stale now.
+        assert!(
+            err(save("docs/readme.md", "# Clobber\n", &doc.revision)).contains("changed on disk")
+        );
+        assert_eq!(reopened.content, "# Edited\n");
+
+        let outside = okena_core::fs::content_revision("SECRET");
+        assert!(!err(save("docs/../../outside.md", "pwned", &outside)).is_empty());
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
+            "SECRET"
         );
         std::fs::remove_dir_all(&sandbox).ok();
     }

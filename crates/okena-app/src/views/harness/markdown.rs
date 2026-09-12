@@ -3,7 +3,6 @@
 //! code block looks the same wherever it turns up.
 
 use crate::theme::theme;
-use crate::ui::tokens::ui_text;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::v_flex;
@@ -12,26 +11,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::HarnessPane;
-
-/// An opened file, parsed once when it arrives rather than on every frame.
-pub(crate) enum OpenDocument {
-    Markdown(MarkdownDocument),
-    Text(String),
-}
-
-impl OpenDocument {
-    /// Markdown when `path` says so, the file as written otherwise.
-    pub(crate) fn from_file(path: &str, content: String, is_dark: bool) -> Self {
-        let markdown = std::path::Path::new(path)
-            .extension()
-            .is_some_and(|x| x.eq_ignore_ascii_case("md"));
-        if markdown {
-            Self::Markdown(parse(&content, is_dark))
-        } else {
-            Self::Text(content)
-        }
-    }
-}
 
 fn parse(content: &str, is_dark: bool) -> MarkdownDocument {
     let mut doc = MarkdownDocument::parse(content);
@@ -42,9 +21,9 @@ fn parse(content: &str, is_dark: bool) -> MarkdownDocument {
 /// The last Markdown text rendered from a `&self` view, parsed once and kept
 /// until the text or the theme changes.
 ///
-/// Task descriptions arrive inside the task list, not through a load of their
-/// own, so there is no moment to parse them other than the frame that shows
-/// them.
+/// Task descriptions arrive inside the task list, and an edited document's
+/// preview follows its buffer, so neither has a moment to parse in other than
+/// the frame that shows it.
 #[derive(Default)]
 pub(crate) struct MarkdownCache {
     entry: RefCell<Option<CachedMarkdown>>,
@@ -113,62 +92,14 @@ impl HarnessPane {
             })
             .collect()
     }
-
-    /// An opened file's blocks: formatted Markdown, or its lines as written.
-    ///
-    /// Plain text goes line by line so long files wrap, and a single text
-    /// node would collapse blank lines and lose the file's shape.
-    pub(super) fn render_open_document(
-        &self,
-        document: &OpenDocument,
-        id_prefix: &str,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        match document {
-            OpenDocument::Markdown(doc) => self.render_markdown_blocks(doc, cx),
-            OpenDocument::Text(content) => {
-                let t = theme(cx);
-                content
-                    .lines()
-                    .enumerate()
-                    .map(|(i, line)| {
-                        div()
-                            .id(SharedString::from(format!("{id_prefix}-line-{i}")))
-                            .w_full()
-                            .min_h(px(16.0))
-                            .text_size(ui_text(12.5, cx))
-                            .text_color(rgb(t.text_primary))
-                            .child(line.to_string())
-                            .into_any_element()
-                    })
-                    .collect()
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{MarkdownCache, OpenDocument};
+    use super::MarkdownCache;
     use std::rc::Rc;
-
-    #[test]
-    fn only_markdown_files_are_parsed() {
-        for path in ["openspec/changes/x/proposal.md", "docs/README.MD"] {
-            assert!(matches!(
-                OpenDocument::from_file(path, "# Hi".into(), true),
-                OpenDocument::Markdown(_)
-            ));
-        }
-        for path in ["skills/release/run.sh", "openspec/config.yaml", "Makefile"] {
-            assert!(matches!(
-                OpenDocument::from_file(path, "# Hi".into(), true),
-                OpenDocument::Text(_)
-            ));
-        }
-    }
 
     #[test]
     fn the_cache_reparses_only_when_the_text_or_theme_changes() {

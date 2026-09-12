@@ -157,9 +157,56 @@ fn read_for(
         Ok(content) => ActionResult::Ok(Some(serde_json::json!({
             "root": root.key,
             "path": path,
+            "revision": okena_core::fs::content_revision(&content),
             "content": content,
         }))),
         Err(e) => ActionResult::Err(format!("could not read {path}: {e}")),
+    }
+}
+
+pub(super) fn write(
+    ws: &Workspace,
+    settings: &AppSettings,
+    root: Option<String>,
+    path: String,
+    content: String,
+    revision: String,
+) -> ActionResult {
+    write_for(&ws.data.projects, settings, root, path, content, revision)
+}
+
+/// Replace an existing document, through the same root and path checks as
+/// [`read_for`]: a write must not be a way out of a root that a read is not.
+fn write_for(
+    projects: &[ProjectData],
+    settings: &AppSettings,
+    root: Option<String>,
+    path: String,
+    content: String,
+    revision: String,
+) -> ActionResult {
+    let root = match resolve_root(projects, settings, root.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let real = match tree::resolve_document(Path::new(&root.path), &path) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    // What could not be opened must not be written either.
+    if content.len() as u64 > MAX_DOC_BYTES {
+        return ActionResult::Err(format!(
+            "document is too large to save ({} KB)",
+            content.len() / 1024
+        ));
+    }
+    match okena_core::fs::replace_if_unchanged(&real, &content, &revision) {
+        Ok(revision) => ActionResult::Ok(Some(serde_json::json!({
+            "root": root.key,
+            "path": path,
+            "revision": revision,
+        }))),
+        Err(e) => ActionResult::Err(e.describe(&path)),
     }
 }
 
@@ -494,7 +541,7 @@ pub(super) fn draft_change(
 mod tests {
     use super::{
         ActionResult, brief, date_string, prompt_args, proposal_stub, read_for, resolve_root,
-        scaffold_change, tree_for,
+        scaffold_change, tree_for, write_for,
     };
     use crate::workspace::persistence::AppSettings;
     use okena_core::specs::{SpecRootKind, SpecTree};
@@ -630,6 +677,86 @@ mod tests {
             read_for(&[], &settings, None, "openspec/../../outside.md".into()),
             ActionResult::Err(_)
         ));
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn a_write_lands_in_the_root_and_nowhere_else() {
+        let sandbox = tmpdir("write");
+        let repo = sandbox.join("specs");
+        populated_root(&repo);
+        write(&sandbox.join("outside.md"), "SECRET");
+        let mut settings = sandboxed(&sandbox);
+        settings.harness.specs.folders = vec![repo.to_string_lossy().into_owned()];
+        let path = "openspec/changes/add-login/proposal.md";
+
+        let ActionResult::Ok(Some(read)) = read_for(&[], &settings, None, path.into()) else {
+            panic!("expected content");
+        };
+        let revision = read["revision"].as_str().unwrap().to_string();
+        let ActionResult::Ok(Some(saved)) = write_for(
+            &[],
+            &settings,
+            None,
+            path.into(),
+            "# Why not\n".into(),
+            revision.clone(),
+        ) else {
+            panic!("expected the write to land");
+        };
+        let ActionResult::Ok(Some(reopened)) = read_for(&[], &settings, None, path.into()) else {
+            panic!("expected content");
+        };
+        assert_eq!(reopened["content"], "# Why not\n");
+        assert_eq!(saved["revision"], reopened["revision"]);
+
+        // Saving again from the pre-save revision is a stale buffer.
+        let ActionResult::Err(e) = write_for(
+            &[],
+            &settings,
+            None,
+            path.into(),
+            "# Clobber".into(),
+            revision,
+        ) else {
+            panic!("a stale revision must be refused");
+        };
+        assert!(e.contains("changed on disk"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(repo.join(path)).unwrap(),
+            "# Why not\n"
+        );
+
+        // Containment, the way reads are checked: through `..`, and through a
+        // root key discovery never found.
+        let outside = okena_core::fs::content_revision("SECRET");
+        assert!(matches!(
+            write_for(
+                &[],
+                &settings,
+                None,
+                "openspec/../../outside.md".into(),
+                "pwned".into(),
+                outside.clone(),
+            ),
+            ActionResult::Err(_)
+        ));
+        let key = format!("path:{}", sandbox.to_string_lossy());
+        assert!(matches!(
+            write_for(
+                &[],
+                &settings,
+                Some(key),
+                "outside.md".into(),
+                "pwned".into(),
+                outside
+            ),
+            ActionResult::Err(_)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
+            "SECRET"
+        );
         std::fs::remove_dir_all(&sandbox).ok();
     }
 

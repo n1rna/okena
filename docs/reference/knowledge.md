@@ -182,8 +182,8 @@ credential helper, and a prompt fails instead of hanging. Only stores sync. A
 project root is synced with its project's own git.
 
 okena commits nothing to a store except the initial commit when creating one,
-and never pushes. Changes are made in a terminal, or by an agent working in the
-checkout.
+and never pushes. Files are edited in the Knowledge view, in a terminal, or by
+an agent working in the checkout; committing them is left to git.
 
 ## In okena
 
@@ -193,6 +193,12 @@ checkout.
   - **Entry list:** the open root's entries grouped by kind, with docs nested
     by folder, and a filter over titles, names, paths, descriptions and tags.
     Markdown entries render formatted, and a skill lists its supporting files.
+  - **Editing:** an opened file can be edited and saved with `cmd-s`
+    (`ctrl-s`). A Markdown file toggles between **Edit** (the source) and
+    **Preview**; any other file opens straight in the editor. A file with
+    unsaved edits is marked `●` in the list and keeps its edits while another
+    file is open. **Revert** drops them and reloads the file. The Specs view
+    edits spec documents the same way.
   - **Store overview:** the branch, the last fetch, and **Fetch** and **Pull**
     buttons. Pull is offered only when a fast-forward is possible.
   - **Unresolved stores:** projects that follow a store not on this machine are
@@ -215,7 +221,13 @@ checkout.
 | Entries listed per root | 5 000 (`entry_limit` warning past it) |
 | Supporting files listed per skill | 200 |
 | Bytes read per file when listing | 256 KiB |
-| Largest file opened | 2 MiB |
+| Largest file opened or saved | 2 MiB |
 
-Reading is confined to discovered roots. A root key the daemon did not discover
-is refused, and so is a path that resolves outside its root.
+Reading and writing are confined to discovered roots. A root key the daemon did
+not discover is refused, and so is a path that resolves outside its root. A
+save replaces an existing file only; it never creates one.
+
+Every read carries a `revision` of the text, and a save must hand it back. When
+the file has changed on disk since it was opened (an agent or a terminal wrote
+to it), the save is refused and nothing is written. The write goes through a
+temporary file and a rename, and keeps the file's permissions.

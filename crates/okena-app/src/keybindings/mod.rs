@@ -54,6 +54,7 @@ actions!(
         ShowProfileManager,
         NewWindow,
         RestartDaemon,
+        SaveDocument,
     ]
 );
 
@@ -450,6 +451,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowKeybindings" => Some(KeyBinding::new(keystroke, ShowKeybindings, context)),
         "ShowSessionManager" => Some(KeyBinding::new(keystroke, ShowSessionManager, context)),
         "ShowHarness" => Some(KeyBinding::new(keystroke, ShowHarness, context)),
+        "SaveDocument" => Some(KeyBinding::new(keystroke, SaveDocument, context)),
         "ShowThemeSelector" => Some(KeyBinding::new(keystroke, ShowThemeSelector, context)),
         "ShowCommandPalette" => Some(KeyBinding::new(keystroke, ShowCommandPalette, context)),
         "ShowSettings" => Some(KeyBinding::new(keystroke, ShowSettings, context)),
