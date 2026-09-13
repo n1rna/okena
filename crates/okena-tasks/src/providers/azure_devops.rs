@@ -416,19 +416,21 @@ fn parse_work_item(item: &Value, organization_url: &str, category: Option<&str>)
         )
     };
 
+    let kind = kind_from_type(work_item_type);
+    let display_key = format!("#{id}");
+    let title = s("System.Title");
+
     Some(Task {
         id: TaskId::new(PROVIDER_ID, id.to_string()),
-        display_key: format!("#{id}"),
-        title: s("System.Title").to_string(),
+        branch_name: crate::provider::task_branch_name(kind, &display_key, title),
+        display_key,
+        title: title.to_string(),
         description,
         state: category.map_or(TaskState::Unknown, map_category),
         state_name: s("System.State").to_string(),
         url,
-        // Azure DevOps suggests no branch name; the trait's slug default
-        // builds one from the id and title.
-        branch_name: String::new(),
         updated_at: s("System.ChangedDate").to_string(),
-        kind: kind_from_type(work_item_type),
+        kind,
         parent_id: parent.map(|p| p.to_string()),
         parent_key: parent.map(|p| format!("#{p}")),
         labels,
@@ -1230,12 +1232,16 @@ mod tests {
     fn the_branch_is_slugged_from_id_and_title() {
         let p = AzureDevOpsProvider::new(None);
         let t = parse_work_item(
-            &item(1234, json!({ "System.Title": "Fix: checkout / totals" })),
+            &item(
+                1234,
+                json!({ "System.Title": "Fix: checkout / totals", "System.WorkItemType": "Bug" }),
+            ),
             "https://dev.azure.com/contoso",
             None,
         )
         .expect("parses");
-        assert_eq!(p.branch_name(&t), "1234-fix-checkout-totals");
+        assert_eq!(t.branch_name, "fix/1234-fix-checkout-totals");
+        assert_eq!(p.branch_name(&t), "fix/1234-fix-checkout-totals");
     }
 
     #[test]

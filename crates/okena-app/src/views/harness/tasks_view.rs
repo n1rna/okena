@@ -612,8 +612,8 @@ impl HarnessPane {
 
     /// Open the "Start work" dialog for `task`.
     ///
-    /// Pre-filled rather than blank: the provider's branch name (which keeps
-    /// its branch-to-issue linking working), and the projects a one-click
+    /// Pre-filled rather than blank: okena's branch name for the task
+    /// (`<kind>/<key>-<title>`), and the projects a one-click
     /// start would have used. When those cannot be told, none are picked —
     /// guessing one would start work in a repo nobody chose.
     pub(super) fn open_start_form(&mut self, task: &Task, cx: &mut Context<Self>) {
@@ -632,8 +632,8 @@ impl HarnessPane {
         cx: &mut Context<Self>,
     ) {
         // A second run cannot reuse the first's branch: git refuses two
-        // worktrees on one branch, so the provider's name is only free the
-        // first time.
+        // worktrees on one branch, so the task's name is only free the first
+        // time.
         let taken = self.links_for(task, cx).signals.linked;
         let branch = next_branch(&task.branch_name, taken);
         let branch_input = cx.new(|cx| {

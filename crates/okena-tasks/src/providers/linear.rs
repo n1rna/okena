@@ -8,7 +8,9 @@
 //! same OAuth token this provider holds rather than being the harness's own
 //! data path.
 
-use crate::provider::{AuthStatus, Credential, TaskContainer, TaskDraft, TaskError, TaskProvider};
+use crate::provider::{
+    AuthStatus, Credential, TaskContainer, TaskDraft, TaskError, TaskProvider, task_branch_name,
+};
 use okena_core::tasks::{GroupAxis, Task, TaskGroup, TaskId, TaskKind, TaskState};
 use okena_transport::http::{self, HttpError, HttpRequest};
 use std::time::Duration;
@@ -43,7 +45,6 @@ query AssignedIssues($first: Int!) {
         title
         description
         url
-        branchName
         updatedAt
         state { name type }
         parent { id identifier }
@@ -131,7 +132,6 @@ mutation CreateIssue(
       title
       description
       url
-      branchName
       updatedAt
       state { name type }
       parent { id identifier }
@@ -155,7 +155,6 @@ query IssueChildren($id: String!) {
         title
         description
         url
-        branchName
         updatedAt
         state { name type }
         parent { id identifier }
@@ -494,10 +493,22 @@ fn parse_issue(node: &serde_json::Value) -> Option<Task> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    // Linear has no issue-type field, so the breakdown level is derived from
+    // labels. A sub-issue with no telling label falls back to Story rather
+    // than Task: it sits under something, which is what a story is.
+    let kind = TaskKind::from_labels(labels.iter().map(String::as_str)).unwrap_or({
+        if parent.is_some() {
+            TaskKind::Story
+        } else {
+            TaskKind::Task
+        }
+    });
+    let title = str_at("title").unwrap_or_default();
+
     Some(Task {
         id: TaskId::new(PROVIDER_ID, id),
         display_key: identifier.to_string(),
-        title: str_at("title").unwrap_or_default().to_string(),
+        title: title.to_string(),
         description: str_at("description").map(str::to_string),
         state: map_state(state_type),
         state_name: state
@@ -506,20 +517,12 @@ fn parse_issue(node: &serde_json::Value) -> Option<Task> {
             .unwrap_or("")
             .to_string(),
         url: str_at("url").unwrap_or_default().to_string(),
-        // Linear supplies its own branch name; using it keeps Linear's
-        // branch-to-issue automation working.
-        branch_name: str_at("branchName").unwrap_or_default().to_string(),
+        // Not Linear's `branchName`: that follows each user's personal format
+        // and leads with their username. The identifier in okena's name is
+        // enough for Linear to link the branch and its PR.
+        branch_name: task_branch_name(kind, identifier, title),
         updated_at: str_at("updatedAt").unwrap_or_default().to_string(),
-        // Linear has no issue-type field, so the breakdown level is derived
-        // from labels. A sub-issue with no telling label falls back to Story
-        // rather than Task: it sits under something, which is what a story is.
-        kind: TaskKind::from_labels(labels.iter().map(String::as_str)).unwrap_or({
-            if parent.is_some() {
-                TaskKind::Story
-            } else {
-                TaskKind::Task
-            }
-        }),
+        kind,
         parent_id: parent.as_ref().map(|(id, _)| id.clone()),
         parent_key: parent.as_ref().map(|(_, key)| key.clone()),
         labels,
@@ -827,7 +830,6 @@ mod tests {
             "title": "Fix the thing",
             "description": "details",
             "url": "https://linear.app/x/issue/LIN-42",
-            "branchName": "nima/lin-42-fix-the-thing",
             "updatedAt": "2026-08-26T10:00:00.000Z",
             "state": { "name": "In Progress", "type": "started" }
         });
@@ -836,7 +838,7 @@ mod tests {
         assert_eq!(t.display_key, "LIN-42");
         assert_eq!(t.state, TaskState::InProgress);
         assert_eq!(t.state_name, "In Progress");
-        assert_eq!(t.branch_name, "nima/lin-42-fix-the-thing");
+        assert_eq!(t.branch_name, "chore/lin-42-fix-the-thing");
     }
 
     #[test]
@@ -856,24 +858,35 @@ mod tests {
     }
 
     #[test]
-    fn uses_linear_branch_name_when_present() {
+    fn ignores_linear_branch_name() {
         let p = LinearProvider::new(None);
         let t = parse_issue(&serde_json::json!({
             "id": "u", "identifier": "LIN-3", "title": "Some title",
-            "branchName": "nima/lin-3-some-title"
+            "branchName": "nima/lin-3-some-title",
+            "labels": { "nodes": [{ "name": "Feature" }] }
         }))
         .unwrap();
-        assert_eq!(p.branch_name(&t), "nima/lin-3-some-title");
+        assert_eq!(t.branch_name, "feat/lin-3-some-title");
+        assert_eq!(p.branch_name(&t), "feat/lin-3-some-title");
     }
 
     #[test]
-    fn falls_back_to_slug_when_provider_gives_no_branch() {
-        let p = LinearProvider::new(None);
-        let t = parse_issue(&serde_json::json!({
-            "id": "u", "identifier": "LIN-4", "title": "Some Title"
-        }))
-        .unwrap();
-        assert_eq!(p.branch_name(&t), "lin-4-some-title");
+    fn branch_prefix_follows_kind() {
+        let branch = |extra: serde_json::Value| {
+            let mut node = serde_json::json!({
+                "id": "u", "identifier": "LIN-4", "title": "Some Title"
+            });
+            node.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            parse_issue(&node).unwrap().branch_name
+        };
+        let bug = serde_json::json!({ "labels": { "nodes": [{ "name": "Bug" }] } });
+        let sub = serde_json::json!({ "parent": { "id": "p", "identifier": "LIN-1" } });
+        assert_eq!(branch(bug), "fix/lin-4-some-title");
+        assert_eq!(branch(serde_json::json!({})), "chore/lin-4-some-title");
+        // A sub-issue with no kind label reads as a Story.
+        assert_eq!(branch(sub), "feat/lin-4-some-title");
     }
 
     #[test]
