@@ -20,15 +20,24 @@ pub enum HarnessSection {
     Tasks,
     Specs,
     Knowledge,
+    Testing,
 }
 
 impl HarnessSection {
-    pub const fn all() -> [HarnessSection; 3] {
+    pub const fn all() -> [HarnessSection; 4] {
         [
             HarnessSection::Tasks,
             HarnessSection::Specs,
             HarnessSection::Knowledge,
+            HarnessSection::Testing,
         ]
+    }
+
+    /// The section a persisted slug names. `None` for a slug this build does
+    /// not know, so a layout written by a newer okena falls back to no view
+    /// rather than failing to load.
+    pub fn from_slug(slug: &str) -> Option<HarnessSection> {
+        HarnessSection::all().into_iter().find(|s| s.slug() == slug)
     }
 
     pub const fn label(self) -> &'static str {
@@ -36,6 +45,7 @@ impl HarnessSection {
             HarnessSection::Tasks => "Tasks",
             HarnessSection::Specs => "Specs",
             HarnessSection::Knowledge => "Knowledge",
+            HarnessSection::Testing => "Testing",
         }
     }
 
@@ -45,6 +55,7 @@ impl HarnessSection {
             HarnessSection::Tasks => "tasks",
             HarnessSection::Specs => "specs",
             HarnessSection::Knowledge => "knowledge",
+            HarnessSection::Testing => "testing",
         }
     }
 
@@ -60,6 +71,9 @@ impl HarnessSection {
             }
             HarnessSection::Knowledge => {
                 "Skills, technical designs and feature docs. Git-backed collections."
+            }
+            HarnessSection::Testing => {
+                "Agents verifying their work — each run's plan, and every step as it passes or fails."
             }
         }
     }
@@ -85,6 +99,14 @@ mod tests {
             assert!(!s.label().is_empty());
             assert!(!s.blurb().is_empty());
         }
+    }
+
+    #[test]
+    fn every_section_is_found_by_its_own_slug() {
+        for s in HarnessSection::all() {
+            assert_eq!(HarnessSection::from_slug(s.slug()), Some(s));
+        }
+        assert_eq!(HarnessSection::from_slug("deployments"), None);
     }
 
     #[test]

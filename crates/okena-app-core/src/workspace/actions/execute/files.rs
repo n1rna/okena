@@ -989,6 +989,7 @@ mod entry_mutation_tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         };
         Workspace::new(WorkspaceData {
             version: 1,

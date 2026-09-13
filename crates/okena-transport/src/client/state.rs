@@ -239,6 +239,7 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }
     }
 
@@ -492,6 +493,7 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }]);
         let sizes = collect_terminal_sizes(&state);
         assert_eq!(sizes.get("t1"), Some(&(120, 40)));

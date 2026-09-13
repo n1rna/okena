@@ -18,6 +18,8 @@ mod worktree;
 #[cfg(test)]
 mod from_project_test;
 
+pub use harness_nav::harness_nav_entries;
+
 use gpui::*;
 use okena_core::api::ActionRequest;
 use okena_core::theme::FolderColor;

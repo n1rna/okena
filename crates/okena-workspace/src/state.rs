@@ -1633,6 +1633,19 @@ impl Workspace {
         }
     }
 
+    /// Record which harness view a window shows, so it reopens on it.
+    /// Persisted via `notify_data`, which writes only on a real change.
+    pub fn set_harness_section(
+        &mut self,
+        window_id: WindowId,
+        section: Option<okena_core::harness::HarnessSection>,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if self.data.set_harness_section(window_id, section).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
     /// Show or hide the agents overview — every agent session at once — in a
     /// window's main area. Persisted via `notify_data`.
     pub fn set_agents_overview(
@@ -2920,6 +2933,7 @@ mod workspace_tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }
     }
 
@@ -3976,6 +3990,7 @@ mod gpui_tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }
     }
 
@@ -4166,6 +4181,7 @@ mod gpui_tests {
                     is_creating: false,
                     is_closing: false,
                     creating_progress: None,
+                    verification_runs: Vec::new(),
                 }],
                 focused_project_id: None,
                 fullscreen_terminal: None,

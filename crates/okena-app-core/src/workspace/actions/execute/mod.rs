@@ -30,6 +30,7 @@ mod tab;
 mod tasks;
 mod terminal;
 mod terminal_batch;
+mod testing;
 
 use crate::workspace::focus::FocusManager;
 use crate::workspace::hooks;
@@ -776,6 +777,39 @@ pub fn execute_action(
             question,
             suggestions,
         } => tasks::report_status(ws, project_id, status, state, question, suggestions, cx),
+        ActionRequest::AgentTestPlan {
+            project_id,
+            terminal_id,
+            steps,
+        } => testing::test_plan(ws, project_id, terminal_id, steps, cx),
+        ActionRequest::AgentTestStepStart {
+            project_id,
+            terminal_id,
+            step,
+        } => testing::test_step_start(ws, project_id, terminal_id, step, cx),
+        ActionRequest::AgentTestStepResult {
+            project_id,
+            terminal_id,
+            step,
+            outcome,
+            reason,
+            evidence,
+        } => testing::test_step_result(
+            ws,
+            project_id,
+            terminal_id,
+            step,
+            outcome,
+            reason,
+            evidence,
+            cx,
+        ),
+        ActionRequest::AgentTestRunFinish {
+            project_id,
+            terminal_id,
+            verdict,
+            summary,
+        } => testing::test_run_finish(ws, project_id, terminal_id, verdict, summary, cx),
         ActionRequest::AgentSendInstruction { project_id, text } => {
             tasks::send_instruction(ws, project_id, text, backend, terminals, settings, cx)
         }
@@ -1807,6 +1841,7 @@ mod reconnect_shell_tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         };
         Workspace::new(WorkspaceData {
             version: 1,

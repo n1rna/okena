@@ -17,6 +17,7 @@ mod specs_view;
 mod store_git;
 mod task_filter;
 mod tasks_view;
+mod testing_view;
 
 use crate::views::components::SimpleInputState;
 use crate::workspace::focus::FocusManager;
@@ -303,6 +304,8 @@ pub struct HarnessPane {
     pub(crate) spec_files: file_ops::FileOps,
     /// Creating, renaming and deleting files in the Knowledge tree.
     pub(crate) knowledge_files: file_ops::FileOps,
+    /// The Testing view's canvas. Built only for that section's pane.
+    pub(crate) testing: Option<Entity<testing_view::TestingView>>,
 }
 
 /// Everything a harness pane needs from its window.
@@ -367,6 +370,14 @@ impl HarnessPane {
         let knowledge_refine = doc_agents::DocRefine::new(cx);
         let spec_files = file_ops::FileOps::new(cx);
         let knowledge_files = file_ops::FileOps::new(cx);
+        let testing = (section == HarnessSection::Testing).then(|| {
+            let (workspace, focus_manager, window_id) = (
+                ctx.workspace.clone(),
+                ctx.focus_manager.clone(),
+                ctx.window_id,
+            );
+            cx.new(|cx| testing_view::TestingView::new(workspace, focus_manager, window_id, cx))
+        });
         let mut pane = Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -433,6 +444,7 @@ impl HarnessPane {
             knowledge_refine,
             spec_files,
             knowledge_files,
+            testing,
         };
         match section {
             HarnessSection::Tasks => {
@@ -449,6 +461,8 @@ impl HarnessPane {
                 // So "New" defaults to the configured agent.
                 pane.refresh_default_agent(cx);
             }
+            // Runs come with the daemon's state; there is nothing to fetch.
+            HarnessSection::Testing => {}
         }
         pane
     }

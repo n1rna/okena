@@ -408,6 +408,135 @@ fn tool_definitions() -> Value {
                 "required": ["kind", "title"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "okena_test_plan",
+            "description":
+                "Plan how you will verify your work, before you run anything: submit \
+                 the ordered steps of this session's test run, each with a title and \
+                 what passing it proves. okena shows the plan in Harness → Testing as \
+                 soon as you send it, then every step as it advances, so plan first \
+                 and report as you go. Until a step starts you can call this again to \
+                 replace the plan. Once one has started it is rejected, so the steps \
+                 already run keep their results — finish the run with \
+                 `okena_test_run_finish` and plan a new one instead.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "The plan, in the order you will run it.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {
+                                    "type": "string",
+                                    "description": "What you will do: \"Run the auth test suite\"."
+                                },
+                                "proves": {
+                                    "type": "string",
+                                    "description":
+                                        "What passing it shows: \"Expired tokens are refused\"."
+                                }
+                            },
+                            "required": ["title", "proves"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["steps"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_test_step_start",
+            "description":
+                "Mark a step of your test run as running, just before you run it, so \
+                 whoever is watching sees which step is live. Steps are numbered from \
+                 1, in plan order. Starting a step that already has a result runs it \
+                 again and clears that result — use it to re-verify after a fix.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "step": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The step's number in the plan, from 1."
+                    }
+                },
+                "required": ["step"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_test_step_result",
+            "description":
+                "Record a step's outcome once it has run: `passed`, `failed` or \
+                 `skipped`, with a one-line `reason`. For a failure the reason is shown \
+                 in place of a bare red mark, so say what went wrong, specifically. \
+                 Attach evidence whenever you have it — the last lines of the output \
+                 that decided the step, a URL you checked, a screenshot's path. A \
+                 result without evidence is a claim; with it, the user can check.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "step": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The step's number in the plan, from 1."
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["passed", "failed", "skipped"]
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description":
+                            "One line: why it passed, what failed, or why it was skipped."
+                    },
+                    "log_tail": {
+                        "type": "string",
+                        "description":
+                            "The last lines of the output that decided the step — not the \
+                             whole log."
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "A page or CI run that shows the result."
+                    },
+                    "screenshot_path": {
+                        "type": "string",
+                        "description": "Absolute path of a screenshot you took."
+                    }
+                },
+                "required": ["step", "outcome", "reason"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_test_run_finish",
+            "description":
+                "Close this session's test run with an overall verdict — `passed`, \
+                 `failed`, or `inconclusive` when the run could not settle it — and a \
+                 short summary. Steps you never reached are marked skipped. Call it when \
+                 you are done verifying, including when you stop early; an \
+                 `okena_test_plan` after it starts a fresh run.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["passed", "failed", "inconclusive"]
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "What the run established, in a sentence or two."
+                    }
+                },
+                "required": ["verdict"],
+                "additionalProperties": false
+            }
         }
     ])
 }
@@ -457,6 +586,10 @@ fn call_tool(params: &Value) -> Result<Value, Value> {
         "okena_comment_task" => comment_task(&args),
         "okena_start_work" => start_work(&args),
         "okena_register_asset" => register_asset(&args),
+        "okena_test_plan" => test_plan(&args),
+        "okena_test_step_start" => test_step_start(&args),
+        "okena_test_step_result" => test_step_result(&args),
+        "okena_test_run_finish" => test_run_finish(&args),
         other => {
             return Err(rpc_error(
                 METHOD_NOT_FOUND,
@@ -480,11 +613,7 @@ struct Session {
 }
 
 fn current_session() -> Result<Session, String> {
-    let terminal_id = std::env::var("OKENA_TERMINAL_ID").map_err(|_| {
-        "Not running inside an okena terminal (OKENA_TERMINAL_ID is unset), so there is \
-         no session to act on."
-            .to_string()
-    })?;
+    let terminal_id = session_terminal(std::env::var("OKENA_TERMINAL_ID").ok())?;
 
     let token = super::ensure_token()?;
     let state = super::commands::fetch_state(&token)?;
@@ -502,6 +631,16 @@ fn current_session() -> Result<Session, String> {
     Ok(Session {
         terminal_id,
         project,
+    })
+}
+
+/// The terminal this server speaks for, from `$OKENA_TERMINAL_ID`. Without one
+/// there is no session, and every tool that writes refuses.
+fn session_terminal(env: Option<String>) -> Result<String, String> {
+    env.filter(|id| !id.trim().is_empty()).ok_or_else(|| {
+        "Not running inside an okena terminal (OKENA_TERMINAL_ID is unset), so there is \
+         no session to act on."
+            .to_string()
     })
 }
 
@@ -1045,6 +1184,103 @@ fn register_asset(args: &Value) -> Result<Value, String> {
     Ok(json!({ "ok": true, "response": response }))
 }
 
+// ─── Verification runs ───────────────────────────────────────────────────────
+//
+// Arguments are checked before the session is looked up, so a malformed call
+// is told what is wrong without a round trip. The session still gates every
+// write: none of these posts anything without one.
+
+/// A test-run action for the session: `fields` plus who is reporting.
+fn run_body(action: &str, session: (&str, &str), fields: Value) -> Value {
+    let mut body = fields;
+    body["action"] = json!(action);
+    body["project_id"] = json!(session.0);
+    body["terminal_id"] = json!(session.1);
+    body
+}
+
+/// A step number as an agent sent it: a whole number from 1.
+fn step_arg(args: &Value) -> Result<u64, String> {
+    args.get("step")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n >= 1)
+        .ok_or_else(|| "`step` is required: the step's number in the plan, from 1".to_string())
+}
+
+fn plan_fields(args: &Value) -> Result<Value, String> {
+    let steps = args
+        .get("steps")
+        .and_then(|v| v.as_array())
+        .filter(|a| !a.is_empty())
+        .ok_or("`steps` is required: the plan, as a list of { title, proves }")?;
+    let steps = steps
+        .iter()
+        .enumerate()
+        .map(|(i, step)| {
+            let title =
+                str_arg(step, "title").ok_or_else(|| format!("step {} needs a `title`", i + 1))?;
+            Ok(json!({ "title": title, "proves": str_arg(step, "proves").unwrap_or("") }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(json!({ "steps": steps }))
+}
+
+fn step_start_fields(args: &Value) -> Result<Value, String> {
+    Ok(json!({ "step": step_arg(args)? }))
+}
+
+fn step_result_fields(args: &Value) -> Result<Value, String> {
+    let step = step_arg(args)?;
+    let outcome = str_arg(args, "outcome")
+        .map(str::to_ascii_lowercase)
+        .filter(|o| ["passed", "failed", "skipped"].contains(&o.as_str()))
+        .ok_or("`outcome` is required: passed, failed or skipped")?;
+    let reason = str_arg(args, "reason")
+        .ok_or("`reason` is required: one line on why — for a failure, what went wrong")?;
+    let mut evidence = json!({});
+    for key in ["log_tail", "url", "screenshot_path"] {
+        if let Some(value) = str_arg(args, key) {
+            evidence[key] = json!(value);
+        }
+    }
+    Ok(json!({ "step": step, "outcome": outcome, "reason": reason, "evidence": evidence }))
+}
+
+fn run_finish_fields(args: &Value) -> Result<Value, String> {
+    let verdict = str_arg(args, "verdict")
+        .map(str::to_ascii_lowercase)
+        .filter(|v| ["passed", "failed", "inconclusive"].contains(&v.as_str()))
+        .ok_or("`verdict` is required: passed, failed or inconclusive")?;
+    Ok(json!({ "verdict": verdict, "summary": str_arg(args, "summary") }))
+}
+
+/// Post a test-run action for this session.
+fn report_run(action_name: &str, fields: Value) -> Result<Value, String> {
+    let session = current_session()?;
+    let reply = action(&run_body(
+        action_name,
+        (&session.project.id, &session.terminal_id),
+        fields,
+    ))?;
+    Ok(json!({ "ok": true, "result": reply }))
+}
+
+fn test_plan(args: &Value) -> Result<Value, String> {
+    report_run("agent_test_plan", plan_fields(args)?)
+}
+
+fn test_step_start(args: &Value) -> Result<Value, String> {
+    report_run("agent_test_step_start", step_start_fields(args)?)
+}
+
+fn test_step_result(args: &Value) -> Result<Value, String> {
+    report_run("agent_test_step_result", step_result_fields(args)?)
+}
+
+fn test_run_finish(args: &Value) -> Result<Value, String> {
+    report_run("agent_test_run_finish", run_finish_fields(args)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1143,6 +1379,112 @@ mod tests {
     }
 
     #[test]
+    fn outside_an_okena_terminal_there_is_no_session_to_write_for() {
+        use super::session_terminal;
+        assert!(session_terminal(None).is_err());
+        assert!(session_terminal(Some("  ".into())).is_err());
+        assert_eq!(session_terminal(Some("t1".into())), Ok("t1".to_string()));
+    }
+
+    /// Parse a tool's body as the daemon will.
+    fn as_action(action: &str, fields: serde_json::Value) -> okena_core::api::ActionRequest {
+        serde_json::from_value(super::run_body(action, ("session-1", "term-1"), fields))
+            .expect("an action the daemon accepts")
+    }
+
+    #[test]
+    fn a_plan_crosses_to_the_daemon_as_its_steps() {
+        use okena_core::api::ActionRequest;
+        let fields = super::plan_fields(&json!({ "steps": [
+            { "title": "Build", "proves": "it compiles" },
+            { "title": "Run e2e" },
+        ]}))
+        .expect("fields");
+        match as_action("agent_test_plan", fields) {
+            ActionRequest::AgentTestPlan {
+                project_id,
+                terminal_id,
+                steps,
+            } => {
+                assert_eq!(
+                    (project_id.as_str(), terminal_id.as_str()),
+                    ("session-1", "term-1")
+                );
+                assert_eq!(steps.len(), 2);
+                assert_eq!(steps[0].proves, "it compiles");
+                assert_eq!(steps[1].proves, "");
+            }
+            other => panic!("expected a plan, got {other:?}"),
+        }
+        assert!(super::plan_fields(&json!({ "steps": [] })).is_err());
+        let untitled = super::plan_fields(&json!({ "steps": [{ "proves": "x" }] }));
+        assert!(untitled.is_err_and(|e| e.contains("step 1")));
+    }
+
+    #[test]
+    fn a_step_result_carries_its_evidence_to_the_daemon() {
+        use okena_core::api::{ActionRequest, VerificationStepState};
+        let fields = super::step_result_fields(&json!({
+            "step": 2,
+            "outcome": "Failed",
+            "reason": "login redirects forever",
+            "log_tail": "302 /login",
+            "screenshot_path": "/tmp/login.png",
+            "url": "",
+        }))
+        .expect("fields");
+        match as_action("agent_test_step_result", fields) {
+            ActionRequest::AgentTestStepResult {
+                step,
+                outcome,
+                reason,
+                evidence,
+                ..
+            } => {
+                assert_eq!(step, 2);
+                assert_eq!(outcome, VerificationStepState::Failed);
+                assert_eq!(reason, "login redirects forever");
+                assert_eq!(evidence.log_tail.as_deref(), Some("302 /login"));
+                assert_eq!(evidence.screenshot_path.as_deref(), Some("/tmp/login.png"));
+                assert_eq!(evidence.url, None, "a blank url is no evidence");
+            }
+            other => panic!("expected a step result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_run_reports_are_refused_before_any_call() {
+        use super::{run_finish_fields, step_result_fields, step_start_fields};
+        assert!(step_start_fields(&json!({ "step": 0 })).is_err());
+        assert!(step_start_fields(&json!({ "step": "1" })).is_err());
+        assert!(
+            step_result_fields(&json!({ "step": 1, "outcome": "running", "reason": "x" })).is_err()
+        );
+        assert!(step_result_fields(&json!({ "step": 1, "outcome": "passed" })).is_err());
+        assert!(run_finish_fields(&json!({ "verdict": "shipped" })).is_err());
+    }
+
+    #[test]
+    fn a_start_and_a_finish_parse_as_the_daemon_reads_them() {
+        use okena_core::api::{ActionRequest, VerificationVerdict};
+        let start = super::step_start_fields(&json!({ "step": 1 })).expect("fields");
+        assert!(matches!(
+            as_action("agent_test_step_start", start),
+            ActionRequest::AgentTestStepStart { step: 1, .. }
+        ));
+        let finish =
+            super::run_finish_fields(&json!({ "verdict": "inconclusive" })).expect("fields");
+        assert!(matches!(
+            as_action("agent_test_run_finish", finish),
+            ActionRequest::AgentTestRunFinish {
+                verdict: VerificationVerdict::Inconclusive,
+                summary: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn initialize_reports_protocol_and_tools_capability() {
         let r = dispatch("initialize", &json!({})).expect("initialize must succeed");
         assert_eq!(r["protocolVersion"], PROTOCOL_VERSION);
@@ -1179,6 +1521,10 @@ mod tests {
                 "okena_report_status",
                 "okena_set_task_state",
                 "okena_start_work",
+                "okena_test_plan",
+                "okena_test_run_finish",
+                "okena_test_step_result",
+                "okena_test_step_start",
                 "okena_update_task",
                 "okena_whoami",
             ]

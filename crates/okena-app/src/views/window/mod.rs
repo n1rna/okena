@@ -232,6 +232,10 @@ pub struct WindowView {
         okena_core::harness::HarnessSection,
         Entity<crate::views::harness::HarnessPane>,
     )>,
+    /// The harness view this window showed when okena last closed, until it
+    /// has been reopened. Waits for the local daemon connection, which every
+    /// pane needs; a view the user picks first replaces it.
+    pending_harness_restore: Option<okena_core::harness::HarnessSection>,
     /// Grid scroll offset captured when entering project focus, restored on exit
     /// so the project stays in the same place rather than jumping to center.
     /// (The offset is otherwise clamped to 0 while a single project is zoomed.)
@@ -372,9 +376,27 @@ impl WindowView {
         // too), so this window must re-render when it changes — otherwise
         // selecting a project in the sidebar would clear the state without the
         // main area switching back to the grid.
+        //
+        // It is also where the choice is saved, so the window reopens on it:
+        // every way of changing views — nav, a project click, a request — ends
+        // in this state.
         if let Some(harness) = okena_workspace::harness_state::harness_state_entity(cx) {
-            cx.observe(&harness, |_this, _state, cx| cx.notify())
-                .detach();
+            cx.observe(&harness, |this, state, cx| {
+                let window_id = this.window_id;
+                let section = state.read(cx).active(window_id);
+                if section.is_some() {
+                    this.pending_harness_restore = None;
+                }
+                // Until the saved view is back, "no view" is only startup, not
+                // a choice to forget it.
+                if this.pending_harness_restore.is_none() {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.set_harness_section(window_id, section, cx);
+                    });
+                }
+                cx.notify()
+            })
+            .detach();
         }
 
         // Observe the shared project-hover state so this window re-renders its
@@ -414,6 +436,12 @@ impl WindowView {
             });
         }
 
+        let pending_harness_restore = workspace
+            .read(cx)
+            .data()
+            .window(window_id)
+            .and_then(|w| w.harness_section);
+
         let mut view = Self {
             window_id,
             focus_manager,
@@ -432,6 +460,7 @@ impl WindowView {
             focus_handle,
             projects_scroll_handle: ScrollHandle::new(),
             harness_panes: Vec::new(),
+            pending_harness_restore,
             projects_grid_bounds: Rc::new(RefCell::new(Bounds {
                 origin: Point::default(),
                 size: Size {
@@ -614,6 +643,7 @@ impl WindowView {
                 cx,
             );
             this.sync_project_columns(cx);
+            this.restore_harness_view(cx);
             cx.notify();
         })
         .detach();
@@ -681,6 +711,7 @@ impl WindowView {
         }
 
         self.remote_manager = Some(manager);
+        self.restore_harness_view(cx);
 
         // Rebuild dispatch callback with remote manager
         self.rebuild_sidebar_dispatch(cx);

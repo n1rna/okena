@@ -2096,7 +2096,10 @@ mod tests {
             }),
             undefined_field("somethingElse"),
         ] {
-            assert!(!super::errors_reject_readiness(&[error.clone()]), "{error}");
+            assert!(
+                !super::errors_reject_readiness(std::slice::from_ref(&error)),
+                "{error}"
+            );
         }
         assert!(!super::errors_reject_readiness(&[]));
     }

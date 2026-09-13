@@ -215,6 +215,8 @@ pub fn apply_remote_snapshot(
                     // optimistic closing flag against this after the snapshot
                     // applies (see `Workspace::apply_remote_snapshot`).
                     existing.is_closing = api_project.is_closing;
+                    existing.verification_runs =
+                        mirror_verification_runs(&api_project.verification_runs, conn_id);
                     // Per-project hooks are daemon-authoritative (it applies them on
                     // PTY spawn). The settings panel edits a separate input buffer and
                     // dispatches UpdateProjectHooks on close, so syncing here won't
@@ -287,6 +289,10 @@ pub fn apply_remote_snapshot(
                         is_creating: api_project.is_creating,
                         is_closing: api_project.is_closing,
                         creating_progress: api_project.creating_progress.clone(),
+                        verification_runs: mirror_verification_runs(
+                            &api_project.verification_runs,
+                            conn_id,
+                        ),
                     });
                 }
                 // Update the transient remote snapshot regardless of create/update path.
@@ -527,6 +533,21 @@ fn apply_initial_remote_project_visibility(
     }
 }
 
+/// A daemon's verification runs, with terminal ids in the mirror's prefixed
+/// form so a run can be matched to the terminal it names.
+fn mirror_verification_runs(
+    runs: &[okena_core::api::VerificationRun],
+    conn_id: &str,
+) -> Vec<okena_core::api::VerificationRun> {
+    runs.iter()
+        .cloned()
+        .map(|mut run| {
+            run.terminal_id = format!("remote:{}:{}", conn_id, run.terminal_id);
+            run
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,6 +615,7 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }
     }
 

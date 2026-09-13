@@ -45,6 +45,7 @@ fn make_project(id: &str) -> ProjectData {
         is_creating: false,
         is_closing: false,
         creating_progress: None,
+        verification_runs: Vec::new(),
     }
 }
 
@@ -523,6 +524,7 @@ fn make_project_with_layout(id: &str, layout: LayoutNode) -> ProjectData {
         is_creating: false,
         is_closing: false,
         creating_progress: None,
+        verification_runs: Vec::new(),
     }
 }
 

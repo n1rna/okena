@@ -170,7 +170,7 @@ impl HarnessPane {
         match section {
             HarnessSection::Specs => Some(&self.specs.documents),
             HarnessSection::Knowledge => Some(&self.knowledge.documents),
-            HarnessSection::Tasks => None,
+            HarnessSection::Tasks | HarnessSection::Testing => None,
         }
     }
 
@@ -178,7 +178,7 @@ impl HarnessPane {
         match section {
             HarnessSection::Specs => Some(&mut self.specs.documents),
             HarnessSection::Knowledge => Some(&mut self.knowledge.documents),
-            HarnessSection::Tasks => None,
+            HarnessSection::Tasks | HarnessSection::Testing => None,
         }
     }
 
@@ -187,7 +187,7 @@ impl HarnessPane {
         let (root, selected) = match section {
             HarnessSection::Specs => (&self.specs.root_key, &self.specs.selected),
             HarnessSection::Knowledge => (&self.knowledge.root_key, &self.knowledge.selected),
-            HarnessSection::Tasks => return None,
+            HarnessSection::Tasks | HarnessSection::Testing => return None,
         };
         Some((root.clone().unwrap_or_default(), selected.clone()?))
     }
@@ -289,7 +289,7 @@ impl HarnessPane {
                 content: content.clone(),
                 revision,
             },
-            HarnessSection::Tasks => return,
+            HarnessSection::Tasks | HarnessSection::Testing => return,
         };
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
@@ -348,7 +348,7 @@ impl HarnessPane {
         match section {
             HarnessSection::Specs => self.open_spec_doc(path, cx),
             HarnessSection::Knowledge => self.open_knowledge_file(path, cx),
-            HarnessSection::Tasks => {}
+            HarnessSection::Tasks | HarnessSection::Testing => {}
         }
     }
 
@@ -528,7 +528,7 @@ impl HarnessPane {
         let root = match section {
             HarnessSection::Specs => self.specs.root_key.as_deref(),
             HarnessSection::Knowledge => self.knowledge.root_key.as_deref(),
-            HarnessSection::Tasks => return None,
+            HarnessSection::Tasks | HarnessSection::Testing => return None,
         };
         self.documents(section)?
             .is_dirty(root.unwrap_or_default(), path)

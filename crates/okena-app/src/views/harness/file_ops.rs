@@ -197,7 +197,7 @@ impl HarnessPane {
         match section {
             HarnessSection::Specs => Some(&self.spec_files),
             HarnessSection::Knowledge => Some(&self.knowledge_files),
-            HarnessSection::Tasks => None,
+            HarnessSection::Tasks | HarnessSection::Testing => None,
         }
     }
 
@@ -205,7 +205,7 @@ impl HarnessPane {
         match section {
             HarnessSection::Specs => Some(&mut self.spec_files),
             HarnessSection::Knowledge => Some(&mut self.knowledge_files),
-            HarnessSection::Tasks => None,
+            HarnessSection::Tasks | HarnessSection::Testing => None,
         }
     }
 
@@ -213,7 +213,7 @@ impl HarnessPane {
         match section {
             HarnessSection::Specs => self.specs.root_key.clone(),
             HarnessSection::Knowledge => self.knowledge.root_key.clone(),
-            HarnessSection::Tasks => None,
+            HarnessSection::Tasks | HarnessSection::Testing => None,
         }
     }
 
@@ -221,7 +221,7 @@ impl HarnessPane {
         match section {
             HarnessSection::Specs => self.specs.selected.clone(),
             HarnessSection::Knowledge => self.knowledge.selected.clone(),
-            HarnessSection::Tasks => None,
+            HarnessSection::Tasks | HarnessSection::Testing => None,
         }
     }
 
@@ -316,7 +316,7 @@ impl HarnessPane {
                     match section {
                         HarnessSection::Specs => this.refresh_specs(cx),
                         HarnessSection::Knowledge => this.refresh_knowledge(cx),
-                        HarnessSection::Tasks => {}
+                        HarnessSection::Tasks | HarnessSection::Testing => {}
                     }
                     cx.notify();
                 });
@@ -360,7 +360,7 @@ impl HarnessPane {
             (HarnessSection::Knowledge, true) => {
                 ActionRequest::KnowledgeFolderCreate { root, path }
             }
-            (HarnessSection::Tasks, _) => return,
+            (HarnessSection::Tasks | HarnessSection::Testing, _) => return,
         };
         self.run_file_action(
             section,
@@ -413,7 +413,7 @@ impl HarnessPane {
                 self.knowledge.documents.insert(&root, buffer);
                 self.knowledge.selected = Some(path);
             }
-            HarnessSection::Tasks => {}
+            HarnessSection::Tasks | HarnessSection::Testing => {}
         }
     }
 
@@ -464,7 +464,7 @@ impl HarnessPane {
                 from: from.clone(),
                 to,
             },
-            HarnessSection::Tasks => return,
+            HarnessSection::Tasks | HarnessSection::Testing => return,
         };
         self.run_file_action(
             section,
@@ -490,7 +490,7 @@ impl HarnessPane {
                             this.knowledge.selected = Some(to);
                         }
                     }
-                    HarnessSection::Tasks => {}
+                    HarnessSection::Tasks | HarnessSection::Testing => {}
                 }
             },
             cx,
@@ -522,7 +522,7 @@ impl HarnessPane {
                 root,
                 path: path.clone(),
             },
-            HarnessSection::Tasks => return,
+            HarnessSection::Tasks | HarnessSection::Testing => return,
         };
         self.run_file_action(
             section,
@@ -544,7 +544,7 @@ impl HarnessPane {
                         this.knowledge.content_error = None;
                     }
                 }
-                HarnessSection::Tasks => {}
+                HarnessSection::Tasks | HarnessSection::Testing => {}
             },
             cx,
         );

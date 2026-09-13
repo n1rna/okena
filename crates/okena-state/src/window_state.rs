@@ -268,6 +268,30 @@ pub struct WindowState {
     /// canvas to its cards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas_viewport: Option<CanvasViewport>,
+    /// The harness view this window last showed, so it reopens on it. `None`
+    /// when it showed the projects grid or an overview.
+    ///
+    /// Read by slug and leniently: a section a newer okena wrote, or one since
+    /// removed, reopens on no view instead of discarding the whole layout file.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_harness_section"
+    )]
+    pub harness_section: Option<okena_core::harness::HarnessSection>,
+}
+
+/// A persisted harness section, or `None` for one this build does not know.
+fn lenient_harness_section<'de, D>(
+    deserializer: D,
+) -> Result<Option<okena_core::harness::HarnessSection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let slug: Option<String> = Option::deserialize(deserializer)?;
+    Ok(slug
+        .as_deref()
+        .and_then(okena_core::harness::HarnessSection::from_slug))
 }
 
 impl Default for WindowState {
@@ -293,6 +317,7 @@ impl Default for WindowState {
             sidebar_open: None,
             canvas_positions: HashMap::new(),
             canvas_viewport: None,
+            harness_section: None,
         }
     }
 }
@@ -323,6 +348,26 @@ impl WindowState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_harness_section_survives_a_round_trip_and_an_unknown_one_is_dropped() {
+        use okena_core::harness::HarnessSection;
+        for section in HarnessSection::all() {
+            let window = WindowState {
+                harness_section: Some(section),
+                ..WindowState::default()
+            };
+            let json = serde_json::to_string(&window).expect("encode");
+            let back: WindowState = serde_json::from_str(&json).expect("decode");
+            assert_eq!(back.harness_section, Some(section));
+        }
+        // A section a newer okena wrote must not cost the whole layout file.
+        let back: WindowState =
+            serde_json::from_str(r#"{"harness_section":"deployments","sidebar_open":true}"#)
+                .expect("decode");
+        assert_eq!(back.harness_section, None);
+        assert_eq!(back.sidebar_open, Some(true));
+    }
 
     #[test]
     fn the_canvas_is_its_own_mode_and_flips_back_to_columns() {
@@ -414,6 +459,7 @@ mod tests {
             sidebar_open: Some(false),
             canvas_positions: HashMap::new(),
             canvas_viewport: None,
+            harness_section: None,
         };
 
         let json = serde_json::to_string(&original).unwrap();

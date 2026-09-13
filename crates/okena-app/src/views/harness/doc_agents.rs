@@ -128,7 +128,7 @@ impl HarnessPane {
                 self.knowledge.selected.clone()?,
                 &self.knowledge.documents,
             ),
-            HarnessSection::Tasks => return None,
+            HarnessSection::Tasks | HarnessSection::Testing => return None,
         };
         let dirty = documents.is_dirty(&root, &path);
         Some((root, path, dirty))
