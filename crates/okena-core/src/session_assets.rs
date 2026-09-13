@@ -233,11 +233,13 @@ fn checkout_row(c: &LinkedCheckout<'_>) -> Option<SessionAsset> {
 /// Whether a registered asset and a row describe the same thing.
 ///
 /// The single place a match key lives, used both against detected rows and to
-/// collapse repeated registrations: the same URL, or the same task. A task is
-/// named by its key — from okena's own record of it, or parsed from a ticket
-/// URL — so a hand-registered `…/issue/QBL-375` is the task okena recorded at
+/// collapse repeated registrations: the same URL, or the same task. Two
+/// recorded tasks are the same when their ids are. Otherwise a task is named by
+/// its [`TaskKey`] — from okena's record of it, or parsed from a ticket URL —
+/// so a hand-registered `…/issue/QBL-375` is the task okena recorded at
 /// `…/issue/QBL-375/its-title-slug`, and a link copied before the ticket was
-/// renamed still matches.
+/// renamed still matches. The key carries where the task lives, so `#42` in
+/// one Azure DevOps organization is not `#42` in another.
 fn matches(asset: &AgentAsset, row: &SessionAsset) -> bool {
     if matches!(
         (asset.url.as_deref(), row.url.as_deref()),
@@ -245,27 +247,65 @@ fn matches(asset: &AgentAsset, row: &SessionAsset) -> bool {
     ) {
         return true;
     }
-    let key = |task: Option<&TaskRef>, url: Option<&str>| {
-        task.map(|t| t.display_key.clone())
-            .or_else(|| url.and_then(task_key_from_url))
+    if let (Some(a), Some(b)) = (&asset.task, &row.task) {
+        return a.id == b.id;
+    }
+    let key = |task: Option<&TaskRef>, url: Option<&str>| match task {
+        Some(task) => recorded_task_key(task),
+        None => url.and_then(task_key_from_url),
     };
     matches!(
         (
             key(asset.task.as_ref(), asset.url.as_deref()),
             key(row.task.as_ref(), row.url.as_deref()),
         ),
-        (Some(a), Some(b)) if a.eq_ignore_ascii_case(&b)
+        (Some(a), Some(b)) if a == b
     )
 }
 
-/// The task key a ticket URL names: `QBL-375` from a Linear issue URL, with or
-/// without its title slug, or `#42` from an Azure DevOps work item URL. `None`
-/// for anything else, pull requests included.
-pub fn task_key_from_url(url: &str) -> Option<String> {
+/// A task as a ticket URL names it: the provider, where on that provider it
+/// lives, and its key there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskKey {
+    /// Provider id, as in [`TaskId::provider`](crate::tasks::TaskId).
+    pub provider: &'static str,
+    /// Lowercased: Linear's workspace slug, or the Azure DevOps organization.
+    /// Not the Azure DevOps project — work item ids are unique across an
+    /// organization, and okena links a work item with no project without one.
+    pub scope: String,
+    /// `QBL-375`, or `#42`.
+    pub key: String,
+}
+
+impl std::fmt::Display for TaskKey {
+    /// `linear:qblok/QBL-375`, `azure_devops:contoso#42`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sep = if self.key.starts_with('#') { "" } else { "/" };
+        write!(f, "{}:{}{sep}{}", self.provider, self.scope, self.key)
+    }
+}
+
+/// The key of a task okena recorded: its current key, where its URL says it
+/// lives. `None` when the URL is not one of its provider's.
+fn recorded_task_key(task: &TaskRef) -> Option<TaskKey> {
+    let from_url = task_key_from_url(&task.url)?;
+    (from_url.provider == task.id.provider).then(|| TaskKey {
+        key: task.display_key.to_ascii_uppercase(),
+        ..from_url
+    })
+}
+
+/// The task a ticket URL names: `QBL-375` in its workspace from a Linear issue
+/// URL, with or without its title slug, or `#42` in its organization from an
+/// Azure DevOps work item URL. `None` for anything else, pull requests
+/// included.
+pub fn task_key_from_url(url: &str) -> Option<TaskKey> {
     let url = url.trim().split(['?', '#']).next()?;
     let path = url.split_once("://").map_or(url, |(_, rest)| rest);
     let mut segments = path.split('/').filter(|s| !s.is_empty());
-    let host = segments.next()?.to_ascii_lowercase();
+    // Clone URLs carry a user name: `https://contoso@dev.azure.com/…`.
+    let authority = segments.next()?;
+    let host = authority.rsplit('@').next()?.to_ascii_lowercase();
     let rest: Vec<&str> = segments.collect();
     let after = |name: &str| {
         rest.iter()
@@ -276,19 +316,35 @@ pub fn task_key_from_url(url: &str) -> Option<String> {
     let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
 
     if host == "linear.app" {
-        let key = after("issue")?;
+        // `linear.app/<workspace>/issue/<KEY>[/<slug>]`
+        let [workspace, issue, key, ..] = rest.as_slice() else {
+            return None;
+        };
+        issue.eq_ignore_ascii_case("issue").then_some(())?;
         let (team, number) = key.split_once('-')?;
         let team_ok = !team.is_empty() && team.chars().all(|c| c.is_ascii_alphanumeric());
-        return (team_ok && digits(number)).then(|| key.to_ascii_uppercase());
+        return (team_ok && digits(number)).then(|| TaskKey {
+            provider: "linear",
+            scope: workspace.to_ascii_lowercase(),
+            key: key.to_ascii_uppercase(),
+        });
     }
-    if host == "dev.azure.com" || host.ends_with(".visualstudio.com") {
-        rest.iter()
-            .any(|s| s.eq_ignore_ascii_case("_workitems"))
-            .then_some(())?;
-        let number = after("edit")?;
-        return digits(number).then(|| format!("#{number}"));
-    }
-    None
+    let organization = if host == "dev.azure.com" {
+        rest.first()
+            .filter(|s| !s.starts_with('_'))?
+            .to_ascii_lowercase()
+    } else {
+        host.strip_suffix(".visualstudio.com")?.to_string()
+    };
+    rest.iter()
+        .any(|s| s.eq_ignore_ascii_case("_workitems"))
+        .then_some(())?;
+    let number = after("edit")?;
+    digits(number).then(|| TaskKey {
+        provider: "azure_devops",
+        scope: organization,
+        key: format!("#{number}"),
+    })
 }
 
 /// The detected row a registered asset describes, if any.
@@ -395,10 +451,11 @@ mod tests {
 
     /// A task okena recorded when an agent filed it: titled after the ticket.
     fn filed_task(key: &str, url: &str) -> AgentAsset {
+        let provider = task_key_from_url(url).map_or("linear", |k| k.provider);
         let mut asset = registered(AgentAssetKind::Task, "Split payments");
         asset.url = Some(url.into());
         asset.task = Some(TaskRef {
-            id: crate::tasks::TaskId::new("linear", format!("uuid-{key}")),
+            id: crate::tasks::TaskId::new(provider, format!("uuid-{url}")),
             display_key: key.into(),
             title: "Split payments".into(),
             url: url.into(),
@@ -556,30 +613,94 @@ mod tests {
         assert!(rows[1].task.is_some());
     }
 
+    fn ticket_link(title: &str, url: &str) -> AgentAsset {
+        let mut asset = registered(AgentAssetKind::Other, title);
+        asset.url = Some(url.into());
+        asset
+    }
+
+    #[test]
+    fn the_same_azure_devops_number_in_two_organizations_stays_two_rows() {
+        let a = "https://dev.azure.com/contoso/Shop/_workitems/edit/42";
+        let b = "https://dev.azure.com/fabrikam/Shop/_workitems/edit/42";
+        let links = [ticket_link("contoso", a), ticket_link("fabrikam", b)];
+        assert_eq!(derive_session_assets(&links, &[], &[]).len(), 2);
+
+        let filed_and_linked = [filed_task("#42", a), ticket_link("fabrikam", b)];
+        for order in [
+            filed_and_linked.clone(),
+            [filed_and_linked[1].clone(), filed_and_linked[0].clone()],
+        ] {
+            assert_eq!(
+                derive_session_assets(&order, &[], &[]).len(),
+                2,
+                "{order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_linear_key_in_two_workspaces_stays_two_rows() {
+        let a = "https://linear.app/qblok/issue/ENG-12/a";
+        let b = "https://linear.app/acme/issue/ENG-12/b";
+        let links = [ticket_link("qblok", a), ticket_link("acme", b)];
+        assert_eq!(derive_session_assets(&links, &[], &[]).len(), 2);
+
+        let filed = [filed_task("ENG-12", a), filed_task("ENG-12", b)];
+        assert_eq!(derive_session_assets(&filed, &[], &[]).len(), 2);
+
+        let by_hand = [
+            filed_task("ENG-12", a),
+            ticket_link("acme", "https://linear.app/acme/issue/ENG-12"),
+        ];
+        assert_eq!(derive_session_assets(&by_hand, &[], &[]).len(), 2);
+    }
+
+    #[test]
+    fn a_work_item_link_collapses_into_the_filed_work_item_with_or_without_a_project() {
+        // okena links a work item with no project without one.
+        let filed = filed_task("#42", "https://dev.azure.com/contoso/_workitems/edit/42");
+        let by_hand = ticket_link(
+            "Split payments",
+            "https://contoso.visualstudio.com/Web%20Shop/_workitems/edit/42/",
+        );
+        for order in [[filed.clone(), by_hand.clone()], [by_hand, filed]] {
+            let rows = derive_session_assets(&order, &[], &[]);
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert!(rows[0].task.is_some());
+        }
+    }
+
     #[test]
     fn task_keys_come_from_linear_and_azure_devops_links_only() {
-        let key = |url| task_key_from_url(url);
+        let key = |url| task_key_from_url(url).map(|k| k.to_string());
         assert_eq!(
             key("https://linear.app/qblok/issue/QBL-375/session-tasks").as_deref(),
-            Some("QBL-375")
+            Some("linear:qblok/QBL-375")
         );
         assert_eq!(
-            key("linear.app/qblok/issue/qbl-375/").as_deref(),
-            Some("QBL-375")
+            key("linear.app/QBLOK/issue/qbl-375/").as_deref(),
+            Some("linear:qblok/QBL-375")
         );
         assert_eq!(
-            key("https://dev.azure.com/contoso/Web%20Shop/_workitems/edit/42/").as_deref(),
-            Some("#42")
+            key("https://dev.azure.com/Contoso/Web%20Shop/_workitems/edit/42/").as_deref(),
+            Some("azure_devops:contoso#42")
+        );
+        assert_eq!(
+            key("https://me@dev.azure.com/contoso/_workitems/edit/42").as_deref(),
+            Some("azure_devops:contoso#42")
         );
         assert_eq!(
             key("https://contoso.visualstudio.com/Shop/_workitems/edit/7?x=1").as_deref(),
-            Some("#7")
+            Some("azure_devops:contoso#7")
         );
         for other in [
             "https://github.com/o/r/pull/7",
             "https://linear.app/qblok/project/harness-1",
             "https://linear.app/qblok/issue/not-a-key",
+            "https://linear.app/issue/QBL-375",
             "https://dev.azure.com/contoso/Shop/_git/repo/pullrequest/42",
+            "https://dev.azure.com/_workitems/edit/42",
         ] {
             assert_eq!(key(other), None, "{other}");
         }
