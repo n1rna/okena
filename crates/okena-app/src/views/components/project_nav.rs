@@ -33,15 +33,20 @@ pub fn focus_project(
     okena_workspace::harness_state::set_active_harness(window_id, None, cx);
 }
 
-/// Show what changed in a checkout.
-pub fn open_diff(request_broker: &Entity<RequestBroker>, project_id: &str, cx: &mut App) {
+/// Show what changed in a checkout: in `mode`, or the uncommitted changes.
+pub fn open_diff(
+    request_broker: &Entity<RequestBroker>,
+    project_id: &str,
+    mode: Option<okena_core::types::DiffMode>,
+    cx: &mut App,
+) {
     request_broker.update(cx, |broker, cx| {
         broker.push_overlay_request(
             OverlayRequest::Project(ProjectOverlay {
                 project_id: project_id.to_string(),
                 kind: ProjectOverlayKind::DiffViewer {
                     file: None,
-                    mode: None,
+                    mode,
                     commit_message: None,
                     commits: None,
                     commit_index: None,

@@ -127,33 +127,58 @@ impl Sidebar {
         let attention = row.card.wants_attention();
         let focused = row.focused;
         let body = row.status.clone().or_else(|| row.subtitle.clone());
-        // Each agent's own colour, faint enough that the state and role colours
-        // on top of it still read. The border carries more of it than the fill
-        // so neighbouring cards separate at a glance.
+        // Flat and neutral, so a list of ten is calm. The agent's own colour
+        // is only the thin bar on its left edge, enough to tell neighbours
+        // apart without every card shouting. The selected card stands out by
+        // a primary border over a faint primary wash, and stays exactly that
+        // under the pointer: hovering what is already selected should not
+        // look like a second, different state.
         let AgentColor { hue, lightness } = color;
-        let tint = hsla(hue, 0.65, lightness, 0.09);
-        let tint_hover = hsla(hue, 0.65, lightness, 0.16);
-        let edge = hsla(hue, 0.65, lightness, if nested { 0.35 } else { 0.45 });
+        let accent = hsla(hue, 0.55, lightness, 0.9);
+        let border = if focused {
+            okena_ui::theme::with_alpha(t.button_primary_bg, 0.7)
+        } else if attention {
+            okena_ui::theme::with_alpha(state_color, 0.45)
+        } else {
+            okena_ui::theme::with_alpha(t.border, if nested { 0.5 } else { 0.7 })
+        };
+        let fill = if focused {
+            okena_ui::theme::with_alpha(t.button_primary_bg, 0.06)
+        } else {
+            okena_ui::theme::with_alpha(t.bg_secondary, 1.0)
+        };
+        // Unselected cards answer the pointer with the list's usual hover
+        // fill and a firmer edge; the selected one does not change.
+        let hover_fill = okena_ui::theme::with_alpha(t.bg_hover, 1.0);
+        let hover_border = okena_ui::theme::with_alpha(t.border_active, 0.8);
 
         v_flex()
             .id(SharedString::from(format!("agent-session-{id}")))
+            .relative()
             .cursor_pointer()
             .w_full()
             .min_w_0()
             .gap(px(3.0))
-            .px(px(8.0))
+            .pl(px(11.0))
+            .pr(px(8.0))
             .py(px(6.0))
-            .rounded(px(6.0))
+            .rounded(px(7.0))
             .border_1()
-            .border_color(if focused {
-                hsla(hue, 0.65, lightness, 1.0)
-            } else if attention {
-                okena_ui::theme::with_alpha(state_color, 0.6)
-            } else {
-                edge
+            .border_color(border)
+            .bg(fill)
+            .when(!focused, |d| {
+                d.hover(move |s| s.bg(hover_fill).border_color(hover_border))
             })
-            .bg(tint)
-            .hover(move |s| s.bg(tint_hover))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(3.0))
+                    .top(px(7.0))
+                    .bottom(px(7.0))
+                    .w(px(3.0))
+                    .rounded(px(2.0))
+                    .bg(accent),
+            )
             .child(
                 h_flex()
                     .w_full()
@@ -264,9 +289,8 @@ impl Sidebar {
 
         let t = theme(cx);
         let attention = child_states.iter().any(|c| c.wants_attention());
-        // The container takes its parent agent's colour, so the group reads as
-        // that agent's work.
-        let AgentColor { hue, lightness } = color;
+        // A quiet frame: the cards inside carry the family's colour on their
+        // accent bars, so the frame itself needs none.
         let group = v_flex()
             .w_full()
             .min_w_0()
@@ -277,9 +301,9 @@ impl Sidebar {
             .border_color(if attention {
                 okena_ui::theme::with_alpha(t.warning, 0.5)
             } else {
-                hsla(hue, 0.65, lightness, 0.3)
+                okena_ui::theme::with_alpha(t.border, 0.5)
             })
-            .bg(hsla(hue, 0.65, lightness, 0.04))
+            .bg(okena_ui::theme::with_alpha(t.bg_secondary, 0.35))
             .child(card)
             .child(
                 div()

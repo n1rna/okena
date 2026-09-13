@@ -548,7 +548,7 @@ pub(super) fn sort_tasks(tasks: &mut [Task], sort: TaskSort) {
 }
 
 /// A provider's name before the daemon has reported its own.
-pub(super) fn provider_label(provider: &str) -> &str {
+pub(crate) fn provider_label(provider: &str) -> &str {
     match provider {
         "linear" => "Linear",
         super::AZURE_DEVOPS => "Azure DevOps",
@@ -1556,6 +1556,11 @@ impl HarnessPane {
     ///
     /// Every path into the detail pane goes through here, so a task reached by
     /// clicking its parent gets the same treatment as one clicked in the list.
+    /// Select a task from outside the view: an agent panel's task card.
+    pub(crate) fn open_task(&mut self, external_id: String, cx: &mut Context<Self>) {
+        self.select_task(external_id, cx);
+    }
+
     pub(super) fn select_task(&mut self, external_id: String, cx: &mut Context<Self>) {
         // The form and a task's detail share the one panel, so picking a row
         // is how you leave the form. Without this, clicking a task while
@@ -3053,7 +3058,7 @@ impl HarnessPane {
             out = out.child(crate::views::components::render_worktree_card(
                 &summary,
                 |this, id, cx| this.open_session(id.to_string(), cx),
-                |this, id, cx| this.open_diff(id, cx),
+                |this, id, mode, cx| this.open_diff(id, mode, cx),
                 cx,
             ));
         }

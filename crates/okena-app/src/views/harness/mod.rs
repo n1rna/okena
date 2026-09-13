@@ -28,6 +28,7 @@ use std::rc::Rc;
 
 pub use editor::EDITOR_CONTEXT;
 pub use okena_core::harness::HarnessSection;
+pub(crate) use tasks_view::provider_label;
 
 /// Tasks-view state. Grouped so the pane struct stays readable as more views
 /// grow their own state.

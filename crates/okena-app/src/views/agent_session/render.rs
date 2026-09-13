@@ -5,6 +5,7 @@
 //! so a session reads identically whether you meet it in the sidebar or in the
 //! overview.
 
+use super::model::short_path;
 use super::{AgentSessionInfo, AgentSessionKind, AgentSessionPanel, PanelTab, SessionActivity};
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_ms};
@@ -60,6 +61,222 @@ impl AgentSessionPanel {
             .into_any_element()
     }
 
+    /// Restart, stop and start as icon buttons in one small segment, beside
+    /// the session facts so they line up with them.
+    ///
+    /// Restart resumes the conversation; Start begins again from the brief.
+    /// Both are offered while stopped because they mean different things.
+    fn render_controls(&self, info: &AgentSessionInfo, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let button = |id: &'static str, icon: &'static str, tip: &'static str| {
+            okena_ui::icon_button::icon_button_sized(id, icon, 24.0, 14.0, &t).tooltip(
+                move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx),
+            )
+        };
+        let mut row = h_flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(t.border))
+            .bg(rgb(t.bg_secondary));
+        if info.resumable {
+            let tip = if info.running {
+                "Restart agent, resuming its conversation"
+            } else {
+                "Resume session"
+            };
+            row = row.child(
+                button("agent-panel-resume", "icons/refresh.svg", tip)
+                    .on_click(cx.listener(|this, _, _window, cx| this.resume_agent(cx))),
+            );
+        }
+        row = if info.running {
+            row.child(
+                button("agent-panel-stop", "icons/stop.svg", "Stop agent")
+                    .on_click(cx.listener(|this, _, _window, cx| this.stop_agent(cx))),
+            )
+        } else {
+            row.child(
+                button(
+                    "agent-panel-start",
+                    "icons/play.svg",
+                    "Start agent again from its brief",
+                )
+                .on_click(cx.listener(|this, _, _window, cx| this.restart_agent(cx))),
+            )
+        };
+        row.into_any_element()
+    }
+
+    /// The working directory as a chip: its end on the chip, all of it on
+    /// hover, and a click copies it.
+    fn path_chip(&self, path: &str, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let full = path.to_string();
+        let tip = SharedString::from(format!("{path}\nClick to copy"));
+        h_flex()
+            .id(SharedString::from(format!(
+                "agent-path-{}",
+                self.project_id
+            )))
+            .min_w_0()
+            .items_center()
+            .gap(px(5.0))
+            .px(px(7.0))
+            .py(px(2.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(rgb(t.border))
+            .bg(rgb(t.bg_secondary))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .child(
+                svg()
+                    .path("icons/folder.svg")
+                    .flex_shrink_0()
+                    .size(px(11.0))
+                    .text_color(rgb(t.text_muted)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(short_path(path, 2)),
+            )
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            })
+            .on_click(move |_, _window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(full.clone()));
+                crate::workspace::toast::ToastManager::success("Copied the working directory", cx);
+            })
+            .into_any_element()
+    }
+
+    /// The task this agent works on, as a card: click to open it in Tasks,
+    /// with its link one click away to copy or open in the provider.
+    fn task_card(&self, task: &okena_core::tasks::TaskRef, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let external_id = task.id.external_id.clone();
+        let open_url = task.url.clone();
+        let copy_url = task.url.clone();
+        let provider = crate::views::harness::provider_label(&task.id.provider).to_string();
+        let open_tip = SharedString::from(format!("Open in {provider}"));
+        let has_url = !task.url.is_empty();
+
+        v_flex()
+            .id(SharedString::from(format!(
+                "agent-task-{}",
+                self.project_id
+            )))
+            .cursor_pointer()
+            .w_full()
+            .min_w_0()
+            .gap(px(4.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(t.border))
+            .bg(rgb(t.bg_secondary))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(self.chip(task.display_key.clone(), t.button_primary_bg, cx))
+                    .children(task.parent_key.as_ref().map(|key| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(format!("↳ {key}"))
+                            .into_any_element()
+                    }))
+                    .child(div().flex_1().min_w_0())
+                    .when(has_url, |row| {
+                        row.child(
+                            okena_ui::icon_button::icon_button_sized(
+                                "agent-task-copy-link",
+                                "icons/link.svg",
+                                22.0,
+                                13.0,
+                                &t,
+                            )
+                            .tooltip(|window, cx| {
+                                gpui_component::tooltip::Tooltip::new("Copy link").build(window, cx)
+                            })
+                            .on_click(move |_, _window, cx| {
+                                // The card opens the task; this button only copies.
+                                cx.stop_propagation();
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_url.clone()));
+                                crate::workspace::toast::ToastManager::success(
+                                    "Copied the task link",
+                                    cx,
+                                );
+                            }),
+                        )
+                        .child(
+                            okena_ui::icon_button::icon_button_sized(
+                                "agent-task-open-provider",
+                                "icons/external-link.svg",
+                                22.0,
+                                13.0,
+                                &t,
+                            )
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(open_tip.clone())
+                                    .build(window, cx)
+                            })
+                            .on_click(move |_, _window, cx| {
+                                cx.stop_propagation();
+                                okena_core::process::open_url(&open_url);
+                            }),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .line_clamp(2)
+                    .text_size(ui_text(13.0, cx))
+                    .text_color(rgb(t.text_primary))
+                    .child(task.title.clone()),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("Open in Tasks")
+                    .child(
+                        svg()
+                            .path("icons/chevron-right.svg")
+                            .size(px(10.0))
+                            .text_color(rgb(t.text_muted)),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                let external_id = external_id.clone();
+                this.request_broker.update(cx, |broker, cx| {
+                    broker.push_workbench_request(
+                        crate::workspace::requests::WorkbenchRequest::OpenTask { external_id },
+                        cx,
+                    );
+                });
+            }))
+            .into_any_element()
+    }
+
     /// The status pill: what the terminal says, not what the agent claims.
     ///
     /// An agent that stopped reporting still shows as waiting when its prompt
@@ -105,15 +322,22 @@ impl AgentSessionPanel {
 
         body = body
             .child(self.section_heading("SESSION", None, cx))
-            .child(h_flex().gap(px(4.0)).flex_wrap().children(facts))
             .child(
-                div()
+                h_flex()
                     .w_full()
                     .min_w_0()
-                    .truncate()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(info.root.clone()),
+                    .items_center()
+                    .justify_between()
+                    .gap(px(6.0))
+                    .child(h_flex().min_w_0().gap(px(4.0)).flex_wrap().children(facts))
+                    .child(self.render_controls(info, cx)),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .pt(px(4.0))
+                    .child(self.path_chip(&info.root, cx)),
             );
 
         // What it needs from you, first: an agent waiting on a decision is
@@ -147,21 +371,6 @@ impl AgentSessionPanel {
             body = body.child(attention);
         }
 
-        // What the agent says it is doing, as opposed to what the terminal
-        // state implies — the two disagree often enough to show both.
-        if let Some(status) = &info.status {
-            body = body.child(
-                div()
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .rounded(px(4.0))
-                    .bg(with_alpha(t.success, 0.1))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_primary))
-                    .child(format!("“{status}”")),
-            );
-        }
-
         // The agent's own suggested next steps, as one-click instructions.
         // Only these: anything else you want to say, you say in its terminal,
         // where the conversation is — a second text box here was a worse copy
@@ -170,92 +379,15 @@ impl AgentSessionPanel {
             body = body.child(self.render_suggestions(info, cx));
         }
 
-        // Restart beside Stop while it runs, beside Start when it does not.
-        // Restart resumes the conversation; Start begins again from the brief.
-        // Both are offered when stopped because they mean different things.
-        let mut controls = h_flex().mt(px(4.0)).gap(px(4.0)).flex_wrap();
-        if info.resumable {
-            controls = controls.child(
-                div()
-                    .id("agent-panel-resume")
-                    .cursor_pointer()
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.bg_secondary))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_primary))
-                    .child(if info.running {
-                        "Restart agent"
-                    } else {
-                        "Resume session"
-                    })
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new(
-                            "Restart and resume the same conversation",
-                        )
-                        .build(window, cx)
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.resume_agent(cx);
-                        }),
-                    ),
-            );
-        }
-        if info.running {
-            controls = controls.child(
-                div()
-                    .id("agent-panel-stop")
-                    .cursor_pointer()
-                    .mt(px(4.0))
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.bg_secondary))
-                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_primary))
-                    .child("Stop agent")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.stop_agent(cx);
-                        }),
-                    ),
-            );
-        } else {
-            controls = controls.child(
-                div()
-                    .id("agent-panel-restart")
-                    .cursor_pointer()
-                    .mt(px(4.0))
-                    .px(px(10.0))
-                    .py(px(5.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.button_primary_bg))
-                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.button_primary_fg))
-                    .child("Start agent")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.restart_agent(cx);
-                        }),
-                    ),
-            );
-        }
-        body = body.child(controls);
-
         // ── What it is working on ────────────────────────────────────────────
-        if let Some(subject) = info.kind.subject() {
+        if let AgentSessionKind::Task(task) = &info.kind {
+            body = body
+                .child(self.section_heading("TASK", None, cx))
+                .child(self.task_card(task, cx));
+        } else if let Some(subject) = info.kind.subject() {
             let heading = match info.kind {
                 AgentSessionKind::Spec { .. } => "CHANGE",
-                AgentSessionKind::Custom { .. } => "GOAL",
-                _ => "TASK",
+                _ => "GOAL",
             };
             body = body.child(self.section_heading(heading, None, cx)).child(
                 div()
@@ -263,17 +395,6 @@ impl AgentSessionPanel {
                     .text_color(rgb(t.text_secondary))
                     .child(subject),
             );
-            if let AgentSessionKind::Task(task) = &info.kind {
-                body = body.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_muted))
-                        .child(task.url.clone()),
-                );
-            }
         }
 
         // ── The breakdown around it ──────────────────────────────────────────
@@ -324,7 +445,7 @@ impl AgentSessionPanel {
             body = body.child(crate::views::components::render_worktree_card(
                 &summary,
                 |this, id, cx| this.open_project(id.to_string(), cx),
-                |this, id, cx| this.open_diff(id, cx),
+                |this, id, mode, cx| this.open_diff(id, mode, cx),
                 cx,
             ));
         }

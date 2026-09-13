@@ -1254,6 +1254,12 @@ impl WindowView {
                         pane.update(cx, |pane, cx| pane.open_knowledge_doc(root_key, path, cx));
                     }
                 }
+                crate::workspace::requests::WorkbenchRequest::OpenTask { external_id } => {
+                    self.show_harness_view(okena_core::harness::HarnessSection::Tasks, cx);
+                    if let Some(pane) = self.active_harness_pane(cx) {
+                        pane.update(cx, |pane, cx| pane.open_task(external_id, cx));
+                    }
+                }
             }
         }
 

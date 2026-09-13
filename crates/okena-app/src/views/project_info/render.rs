@@ -653,7 +653,7 @@ impl Render for ProjectInfoPanel {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _window, cx| {
-                            this.open_diff(&diff_id, cx);
+                            this.open_diff(&diff_id, None, cx);
                         }),
                     ),
             );
@@ -684,7 +684,7 @@ impl Render for ProjectInfoPanel {
                 body = body.child(crate::views::components::render_worktree_card(
                     summary,
                     |this: &mut Self, id, cx| this.open_project(id.to_string(), cx),
-                    |this: &mut Self, id, cx| this.open_diff(id, cx),
+                    |this: &mut Self, id, mode, cx| this.open_diff(id, mode, cx),
                     cx,
                 ));
             }

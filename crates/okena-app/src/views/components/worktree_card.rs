@@ -16,6 +16,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::{CiStatus, PrState};
+use okena_core::types::DiffMode;
 
 /// Everything the card shows about one worktree.
 #[derive(Clone, Debug)]
@@ -33,6 +34,18 @@ pub struct WorktreeSummary {
     pub unpushed: Option<usize>,
     pub pr: Option<(u32, PrState)>,
     pub ci: Option<(CiStatus, usize, usize, usize)>,
+    /// The ref this branch is reviewed against (e.g. `origin/main`), so a
+    /// checkout with nothing uncommitted can still show what its branch did.
+    pub review_base: Option<String>,
+}
+
+/// What clicking a worktree card opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CardClick {
+    /// The diff viewer, in this mode: `None` for the uncommitted changes.
+    Diff(Option<DiffMode>),
+    /// The workspace, when there is no diff to show.
+    Open,
 }
 
 impl WorktreeSummary {
@@ -67,7 +80,28 @@ impl WorktreeSummary {
                     .as_ref()
                     .map(|c| (c.status.clone(), c.passed, c.failed, c.pending))
             }),
+            review_base: git.and_then(|g| g.review_base.clone()),
         })
+    }
+
+    /// What a click on the card opens.
+    ///
+    /// Uncommitted changes first, since that is the work still in the
+    /// checkout. With none — a branch whose work is committed and pushed, the
+    /// usual state of a finished agent — the branch against its review base,
+    /// which is the work itself; the uncommitted diff there would be empty.
+    /// Only a checkout with neither opens the workspace instead.
+    pub fn click(&self) -> CardClick {
+        if self.has_changes() {
+            CardClick::Diff(None)
+        } else if let Some(base) = self.review_base.clone() {
+            CardClick::Diff(Some(DiffMode::BranchCompare {
+                base,
+                head: "HEAD".to_string(),
+            }))
+        } else {
+            CardClick::Open
+        }
     }
 
     /// Whether anything has changed in this checkout.
@@ -160,29 +194,39 @@ pub fn chip(text: String, color: u32, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// Render one worktree.
+/// Render one worktree, minimally: its branch and what changed on one line,
+/// the rest as a quiet caption.
 ///
-/// `on_open` focuses it; `on_diff` shows what changed in it. Both are the
-/// host's, because "open" means something slightly different in each place the
-/// card appears.
+/// A click opens the diff, since what the work changed is what you open a
+/// worktree card to see ([`WorktreeSummary::click`] says which diff); the icon
+/// button opens the workspace itself. Both actions are the host's, because
+/// "open" means something slightly different in each place the card appears.
 pub fn render_worktree_card<V: 'static>(
     w: &WorktreeSummary,
     on_open: impl Fn(&mut V, &str, &mut Context<V>) + 'static,
-    on_diff: impl Fn(&mut V, &str, &mut Context<V>) + 'static,
+    on_diff: impl Fn(&mut V, &str, Option<DiffMode>, &mut Context<V>) + 'static,
     cx: &mut Context<V>,
 ) -> AnyElement {
     let t = theme(cx);
+    let on_open = std::rc::Rc::new(on_open);
+    let open_from_button = on_open.clone();
 
-    let mut chips: Vec<AnyElement> = Vec::new();
-    if w.has_changes() {
-        chips.push(chip(
-            format!("+{} −{}", w.lines_added, w.lines_removed),
-            t.text_muted,
-            cx,
-        ));
+    // The caption: repo, push state, review, checks, as coloured words rather
+    // than a row of chips.
+    let mut caption: Vec<AnyElement> = Vec::new();
+    let word = |text: String, color: u32, cx: &App| -> AnyElement {
+        div()
+            .flex_shrink_0()
+            .text_size(ui_text_ms(cx))
+            .text_color(rgb(color))
+            .child(text)
+            .into_any_element()
+    };
+    if let Some(repo) = &w.repo {
+        caption.push(word(repo.clone(), t.text_muted, cx));
     }
     let push = PushState::from_unpushed(w.unpushed);
-    chips.push(chip(
+    caption.push(word(
         push.label(),
         if push.is_pending() {
             t.warning
@@ -193,26 +237,42 @@ pub fn render_worktree_card<V: 'static>(
     ));
     if let Some((number, state)) = &w.pr {
         let (color, label) = pr_chip_style(*number, state, &t);
-        chips.push(chip(label, color, cx));
+        caption.push(word(label, color, cx));
     }
     if let Some((status, passed, failed, pending)) = &w.ci {
         let (color, label) = ci_chip_style(status, *passed, *failed, *pending, &t);
-        chips.push(chip(label, color, cx));
+        caption.push(word(label, color, cx));
     }
+    let caption = caption
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, el)| {
+            let dot = (i > 0).then(|| {
+                div()
+                    .flex_shrink_0()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("·")
+                    .into_any_element()
+            });
+            dot.into_iter().chain(std::iter::once(el))
+        })
+        .collect::<Vec<_>>();
 
+    let id = w.project_id.clone();
     let open_id = w.project_id.clone();
-    let diff_id = w.project_id.clone();
-    let show_diff = w.has_changes();
+    let shows_diff = w.has_changes();
+    let click = w.click();
 
     v_flex()
         .id(SharedString::from(format!("wt-card-{}", w.project_id)))
         .cursor_pointer()
         .w_full()
         .min_w_0()
-        .gap(px(3.0))
+        .gap(px(2.0))
         .px(px(8.0))
-        .py(px(6.0))
-        .rounded(px(4.0))
+        .py(px(5.0))
+        .rounded(px(6.0))
         .bg(rgb(t.bg_primary))
         .border_1()
         .border_color(rgb(t.border))
@@ -224,60 +284,71 @@ pub fn render_worktree_card<V: 'static>(
                 .items_center()
                 .gap(px(6.0))
                 .child(
-                    // The repo leads: in a task's detail or a session's panel
-                    // the same branch name exists in several repos at once, and
-                    // which one this is is the first thing you need.
+                    svg()
+                        .path("icons/git-branch.svg")
+                        .flex_shrink_0()
+                        .size(px(12.0))
+                        .text_color(rgb(t.text_muted)),
+                )
+                .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
                         .text_size(ui_text_ms(cx))
                         .text_color(rgb(t.text_primary))
-                        .child(w.repo.clone().unwrap_or_else(|| w.name.clone())),
+                        .child(w.branch.clone().unwrap_or_else(|| w.name.clone())),
                 )
-                .when(show_diff, |d| {
-                    d.child(
-                        div()
-                            .id(SharedString::from(format!("wt-diff-{}", w.project_id)))
-                            .cursor_pointer()
+                .when(shows_diff, |row| {
+                    row.child(
+                        h_flex()
                             .flex_shrink_0()
-                            .px(px(6.0))
-                            .py(px(1.0))
-                            .rounded(px(3.0))
-                            .bg(rgb(t.bg_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .gap(px(4.0))
                             .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_secondary))
-                            .child("Diff")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _window, cx| {
-                                    // The card itself opens the worktree; the
-                                    // button must not do both.
-                                    cx.stop_propagation();
-                                    on_diff(this, &diff_id, cx);
-                                }),
+                            .child(
+                                div()
+                                    .text_color(rgb(t.success))
+                                    .child(format!("+{}", w.lines_added)),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(t.error))
+                                    .child(format!("−{}", w.lines_removed)),
                             ),
                     )
-                }),
+                })
+                .child(
+                    okena_ui::icon_button::icon_button_sized(
+                        SharedString::from(format!("wt-open-{}", w.project_id)),
+                        "icons/terminal.svg",
+                        22.0,
+                        13.0,
+                        &t,
+                    )
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Open workspace").build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        // The card opens the diff; this button opens the
+                        // workspace, and must not do both.
+                        cx.stop_propagation();
+                        open_from_button(this, &open_id, cx);
+                    })),
+                ),
         )
-        .children(w.branch.clone().map(|branch| {
-            div()
+        .child(
+            h_flex()
                 .w_full()
                 .min_w_0()
-                .truncate()
-                .text_size(ui_text_ms(cx))
-                .text_color(rgb(t.text_muted))
-                .child(branch)
-                .into_any_element()
-        }))
-        .child(h_flex().gap(px(4.0)).flex_wrap().children(chips))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, _window, cx| {
-                on_open(this, &open_id, cx);
-            }),
+                .gap(px(5.0))
+                .pl(px(18.0))
+                .flex_wrap()
+                .children(caption),
         )
+        .on_click(cx.listener(move |this, _, _window, cx| match &click {
+            CardClick::Diff(mode) => on_diff(this, &id, mode.clone(), cx),
+            CardClick::Open => on_open(this, &id, cx),
+        }))
         .into_any_element()
 }
 
@@ -285,7 +356,8 @@ pub fn render_worktree_card<V: 'static>(
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{PushState, WorktreeSummary};
+    use super::{CardClick, PushState, WorktreeSummary};
+    use okena_core::types::DiffMode;
 
     fn summary(added: usize, removed: usize) -> WorktreeSummary {
         WorktreeSummary {
@@ -298,7 +370,33 @@ mod tests {
             unpushed: Some(0),
             pr: None,
             ci: None,
+            review_base: Some("origin/main".into()),
         }
+    }
+
+    #[test]
+    fn uncommitted_changes_open_the_working_tree_diff() {
+        assert_eq!(summary(3, 1).click(), CardClick::Diff(None));
+    }
+
+    #[test]
+    fn a_clean_checkout_shows_its_branch_against_the_base() {
+        // The bug this fixes: a finished agent's pushed branch has nothing
+        // uncommitted, so the card opened the workspace instead of a diff.
+        assert_eq!(
+            summary(0, 0).click(),
+            CardClick::Diff(Some(DiffMode::BranchCompare {
+                base: "origin/main".into(),
+                head: "HEAD".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn with_no_base_and_no_changes_the_workspace_opens() {
+        let mut w = summary(0, 0);
+        w.review_base = None;
+        assert_eq!(w.click(), CardClick::Open);
     }
 
     #[test]
