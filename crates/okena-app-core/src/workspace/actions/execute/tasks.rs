@@ -504,6 +504,11 @@ pub(super) fn start_work(
     // The one task, by id or display key, rather than the assigned queue: a
     // sub-task a coordinator just filed has no assignee, and the queue poll is
     // rate-floored, so two starts back to back would be refused.
+    //
+    // Trade-off: unlike the other task actions this read still runs under the
+    // workspace lock, because the rest of this function creates worktrees.
+    // Moving it onto the blocking pool means splitting start_work into a fetch
+    // and an apply step; it is one round trip, so that waits until it shows.
     let id = okena_core::tasks::TaskId::new(provider.clone(), task_external_id.clone());
     let task = match p.get_task(&id) {
         Ok(task) => task,
