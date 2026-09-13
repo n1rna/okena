@@ -800,6 +800,9 @@ impl HarnessPane {
                 cx,
             ));
         }
+        // Above the entries, under the root: where a draft will land is the
+        // agent's call, so the root is as near as okena can place it.
+        col = col.children(self.render_knowledge_drafts(&tree, cx));
         for group in groups {
             col = col.child(div().pt(px(6.0)).child(self.render_fold_row(
                 group.kind.folder().to_string(),
@@ -817,25 +820,7 @@ impl HarnessPane {
                 });
             }
         }
-        // Last, under the material they are writing: what is running matters
-        // less than what exists, right up until you want to know.
-        col.children(self.render_related_agents(self.knowledge_session_ids(cx), cx))
-            .into_any_element()
-    }
-
-    /// Sessions writing knowledge.
-    ///
-    /// Every knowledge session, not only ones in the open root: a user
-    /// switching roots to check on an agent would otherwise have to guess
-    /// which root it was started under.
-    fn knowledge_session_ids(&self, cx: &App) -> Vec<String> {
-        self.workspace
-            .read(cx)
-            .projects()
-            .iter()
-            .filter(|p| p.is_knowledge_session())
-            .map(|p| p.id.clone())
-            .collect()
+        col.into_any_element()
     }
 
     /// Right column with nothing open: what this root is, its sync state, its
@@ -1126,6 +1111,15 @@ impl HarnessPane {
             .children(self.render_file_op_bar(section, cx))
             .children(save_error)
             .child(body)
+            .children(self.render_document_agent(section, cx).map(|card| {
+                div()
+                    .flex_shrink_0()
+                    .px(px(16.0))
+                    .py(px(10.0))
+                    .border_t_1()
+                    .border_color(rgb(t.border))
+                    .child(card)
+            }))
             .into_any_element()
     }
 

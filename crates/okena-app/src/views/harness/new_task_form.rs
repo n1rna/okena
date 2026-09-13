@@ -16,6 +16,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
+use okena_core::harness::AgentPurpose;
 use okena_core::tasks::{Task, TaskKind};
 use std::collections::BTreeMap;
 
@@ -216,31 +217,35 @@ impl HarnessPane {
         .detach();
     }
 
-    /// Start `agent` on breaking `task` into sub-tasks.
+    /// Start `agent` on one of a task's helpers: breaking it into sub-tasks,
+    /// or refining what it says.
     ///
     /// A free-form session rather than a task session: it is not doing the
     /// work, it is deciding what the work is, so it gets no worktrees. okena's
-    /// MCP server is what makes it useful — the agent reads the existing
-    /// children and writes new ones back through `okena_create_task`,
-    /// rather than handing the user a list to retype.
-    pub(super) fn break_down_with_agent(
+    /// MCP server is what makes it useful — the agent reads the task and
+    /// writes back through `okena_create_task` or `okena_update_task`, rather
+    /// than handing the user text to retype.
+    pub(super) fn start_task_helper(
         &mut self,
         task: &Task,
+        helper: TaskHelper,
         agent: String,
         project_ids: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        let vars = breakdown_vars(task);
+        let vars = helper.vars(task);
 
-        if self.tasks.breaking_down.is_some() {
+        if helper.starting(&mut self.tasks).is_some() {
             return;
         }
-        self.tasks.breaking_down = Some(task.id.external_id.clone());
+        *helper.starting(&mut self.tasks) = Some(task.id.external_id.clone());
         cx.notify();
 
         let project_ids: Vec<String> = project_ids.iter().map(|id| self.daemon_id(id)).collect();
         let client = self.client.clone();
-        let name = breakdown_name(task);
+        let name = helper.session_name(task);
+        let flow = helper.flow();
+        let purpose = helper.purpose();
         // The session is linked to the task so the agent's `okena_whoami`
         // resolves it, and so the MCP tools default to the right parent.
         let link = okena_core::tasks::TaskRef::from(task);
@@ -249,19 +254,20 @@ impl HarnessPane {
                 // Two round trips rather than one: rendering has to happen
                 // where the store registry is, and starting a session with a
                 // half-rendered brief would be worse than a moment's wait.
-                let goal = render_brief(&client, "break-down", vars)?;
+                let goal = render_brief(&client, flow, vars)?;
                 client
                     .post_action(ActionRequest::AgentStartSession {
                         goal,
                         name,
                         root: String::new(),
                         // Context only: named in the brief, never given
-                        // worktrees — a breakdown decides the work, it does
-                        // not do it.
+                        // worktrees — a helper decides the work, it does not
+                        // do it.
                         project_ids,
                         agent_command: Some(agent),
                         task_draft: None,
                         task: Some(link),
+                        purpose: Some(purpose),
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing session result".to_string()))
             })
@@ -269,8 +275,8 @@ impl HarnessPane {
 
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
-                    this.tasks.breaking_down = None;
-                    // Deliberately not opening it: you asked for a breakdown
+                    *helper.starting(&mut this.tasks) = None;
+                    // Deliberately not opening it: you asked for a helper
                     // while reading the task, and yanking you into a terminal
                     // loses the place you were reading. The launcher becomes
                     // the way in once the session appears.
@@ -597,6 +603,8 @@ impl HarnessPane {
                         agent_command: Some(agent),
                         task_draft: Some(draft),
                         task: None,
+                        // A draft is told apart by `task_draft`; no card lists it.
+                        purpose: None,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing session result".to_string()))
             })
@@ -659,6 +667,72 @@ pub(super) fn breakdown_vars(task: &Task) -> BTreeMap<String, String> {
 /// Session name for a breakdown of `task`.
 pub(super) fn breakdown_name(task: &Task) -> String {
     format!("{} breakdown", task.display_key)
+}
+
+/// What a refine brief is filled from. No ids: the agent's MCP calls default
+/// to the task its session is linked to, which is this one.
+pub(super) fn refine_vars(task: &Task) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("key".to_string(), task.display_key.clone()),
+        ("title".to_string(), task.title.clone()),
+        ("kind".to_string(), task.kind.label().to_string()),
+        ("url".to_string(), task.url.clone()),
+        (
+            "description".to_string(),
+            task.description
+                .clone()
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        ),
+    ])
+}
+
+/// The agents a task has beside the one doing it: each with its own card, its
+/// own brief and its own purpose, so each card lists only its own sessions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TaskHelper {
+    BreakDown,
+    Refine,
+}
+
+impl TaskHelper {
+    /// The flow the agent is briefed from.
+    pub(super) fn flow(self) -> &'static str {
+        match self {
+            TaskHelper::BreakDown => "break-down",
+            TaskHelper::Refine => "task-refine",
+        }
+    }
+
+    fn purpose(self) -> AgentPurpose {
+        match self {
+            TaskHelper::BreakDown => AgentPurpose::Breakdown,
+            TaskHelper::Refine => AgentPurpose::Refine,
+        }
+    }
+
+    fn vars(self, task: &Task) -> BTreeMap<String, String> {
+        match self {
+            TaskHelper::BreakDown => breakdown_vars(task),
+            TaskHelper::Refine => refine_vars(task),
+        }
+    }
+
+    fn session_name(self, task: &Task) -> String {
+        match self {
+            TaskHelper::BreakDown => breakdown_name(task),
+            TaskHelper::Refine => format!("{} refine", task.display_key),
+        }
+    }
+
+    /// The task this helper is starting on, which blocks a second start.
+    pub(super) fn starting(self, tasks: &mut super::TasksState) -> &mut Option<String> {
+        match self {
+            TaskHelper::BreakDown => &mut tasks.breaking_down,
+            TaskHelper::Refine => &mut tasks.refining,
+        }
+    }
 }
 
 /// Ask the daemon to render a launch brief.

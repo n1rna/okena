@@ -30,10 +30,16 @@ pub enum Flow {
     TasksCoordinate,
     /// Drafting a new task from a title and a kind.
     TaskCreate,
+    /// Rewriting a task that exists: asking what it would otherwise guess,
+    /// then updating its title and description in place.
+    TaskRefine,
     /// Drafting an OpenSpec change into a scaffolded directory.
     SpecDraft,
     /// Adding to or updating a knowledge root.
     KnowledgeDraft,
+    /// Changing one open document — a spec, a change file or a knowledge
+    /// entry — at the user's request, without committing.
+    DocumentRefine,
     /// A free-form session against a goal the user typed.
     AgentSession,
     /// Writing or updating a repository's project map (ADR-0005).
@@ -55,8 +61,10 @@ impl Flow {
             Flow::TaskCoordinate => "task-coordinate",
             Flow::TasksCoordinate => "tasks-coordinate",
             Flow::TaskCreate => "task-create",
+            Flow::TaskRefine => "task-refine",
             Flow::SpecDraft => "spec-draft",
             Flow::KnowledgeDraft => "knowledge-draft",
+            Flow::DocumentRefine => "doc-refine",
             Flow::AgentSession => "agent-session",
             Flow::ProjectScan => "project-scan",
             Flow::ProjectsScan => "projects-scan",
@@ -71,8 +79,10 @@ impl Flow {
             Flow::TaskCoordinate => "Split a task among agents",
             Flow::TasksCoordinate => "Split picked tasks among agents",
             Flow::TaskCreate => "Draft a new task",
+            Flow::TaskRefine => "Refine a task",
             Flow::SpecDraft => "Draft a spec change",
             Flow::KnowledgeDraft => "Write knowledge",
+            Flow::DocumentRefine => "Change a document",
             Flow::AgentSession => "Free-form session",
             Flow::ProjectScan => "Map a project",
             Flow::ProjectsScan => "Link projects",
@@ -140,6 +150,19 @@ impl Flow {
                 "child_kind",
             ],
             Flow::TaskCreate => &["title", "kind", "container", "parent", "description"],
+            // No `parent_id`: a refine rewrites the task itself, and its MCP
+            // calls default to the task its session is linked to.
+            Flow::TaskRefine => &["key", "title", "kind", "url", "description"],
+            Flow::DocumentRefine => &[
+                "request",
+                // Relative to the root, as the user sees it in the tree.
+                "file",
+                // Absolute, where the agent edits it.
+                "path",
+                "root_path",
+                // What kind of document it is, in words.
+                "what",
+            ],
             Flow::SpecDraft => &[
                 "idea",
                 "change",
@@ -172,8 +195,10 @@ impl Flow {
             Flow::TaskCoordinate,
             Flow::TasksCoordinate,
             Flow::TaskCreate,
+            Flow::TaskRefine,
             Flow::SpecDraft,
             Flow::KnowledgeDraft,
+            Flow::DocumentRefine,
             Flow::AgentSession,
             Flow::ProjectScan,
             Flow::ProjectsScan,

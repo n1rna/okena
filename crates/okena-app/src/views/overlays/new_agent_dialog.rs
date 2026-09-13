@@ -164,6 +164,8 @@ impl NewAgentDialog {
                         // exists; drafting a task is its own flow.
                         task_draft: None,
                         task,
+                        // Free-form: no card started it, so none lists it.
+                        purpose: None,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing session result".to_string()))
             })

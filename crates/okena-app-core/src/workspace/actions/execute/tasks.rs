@@ -803,6 +803,9 @@ pub(super) fn start_work(
         ) {
             Ok(session_id) => {
                 link_task(ws, &session_id, &task_ref, &also_refs);
+                if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id) {
+                    p.agent_purpose = Some(okena_core::harness::AgentPurpose::Work);
+                }
                 // Set before spawning: the terminal reads the project's default
                 // shell as it starts.
                 if let Some(shell) = shell
@@ -1694,6 +1697,7 @@ pub(super) fn start_custom_session(
     agent_command: Option<String>,
     task_draft: Option<String>,
     task: Option<okena_core::tasks::TaskRef>,
+    purpose: Option<okena_core::harness::AgentPurpose>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -1751,6 +1755,8 @@ pub(super) fn start_custom_session(
         // Or about a task that does not exist yet, which the list shows as a
         // placeholder until the agent files it.
         p.task_draft = task_draft;
+        // Which card started it, so that card — and only that one — lists it.
+        p.agent_purpose = purpose;
     }
 
     let brief = custom_brief(

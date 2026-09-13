@@ -29,6 +29,7 @@ fn make_project(id: &str) -> ProjectData {
         project_scan: None,
         task_draft: None,
         custom_session: None,
+        agent_purpose: None,
         agent: None,
         folder_color: FolderColor::default(),
         hooks: HooksConfig::default(),

@@ -701,6 +701,7 @@ mod tests {
             project_scan: None,
             task_draft: None,
             custom_session: None,
+            agent_purpose: None,
             agent: None,
             id: id.to_string(),
             name: id.to_string(),

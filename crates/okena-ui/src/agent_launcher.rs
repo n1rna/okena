@@ -103,6 +103,11 @@ pub struct AgentLauncher {
     sessions: Vec<LauncherSession>,
     /// Shown in place of the buttons while a start is in flight.
     busy: Option<SharedString>,
+    /// Why nothing can be started right now, shown in place of the buttons.
+    disabled: Option<SharedString>,
+    /// What the start needs beside the agent — a request to type, say — drawn
+    /// under the header.
+    body: Option<AnyElement>,
     /// Whether the start buttons stay once a session exists. Off by default:
     /// for most things a second session duplicates the first.
     launch_alongside_sessions: bool,
@@ -125,6 +130,8 @@ impl AgentLauncher {
             preferred: None,
             sessions: Vec::new(),
             busy: None,
+            disabled: None,
+            body: None,
             launch_alongside_sessions: false,
             on_launch: None,
             on_configure: None,
@@ -183,6 +190,19 @@ impl AgentLauncher {
         self
     }
 
+    /// Refuse to start, saying why where the buttons would be. The sessions
+    /// stay listed and openable.
+    pub fn disabled(mut self, reason: Option<impl Into<SharedString>>) -> Self {
+        self.disabled = reason.map(Into::into);
+        self
+    }
+
+    /// Draw `body` between the header and the sessions.
+    pub fn body(mut self, body: impl IntoElement) -> Self {
+        self.body = Some(body.into_any_element());
+        self
+    }
+
     pub fn launch_alongside_sessions(mut self) -> Self {
         self.launch_alongside_sessions = true;
         self
@@ -237,6 +257,15 @@ impl AgentLauncher {
                         .text_color(rgb(t.text_secondary))
                         .child(label),
                 )
+                .into_any_element();
+        }
+        if let Some(reason) = self.disabled.clone() {
+            return div()
+                .flex_shrink_1()
+                .min_w_0()
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(t.text_muted))
+                .child(reason)
                 .into_any_element();
         }
 
@@ -510,8 +539,9 @@ const BUTTON_SIZE: f32 = 28.0;
 const ICON_SIZE: f32 = 14.0;
 
 impl RenderOnce for AgentLauncher {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = theme(cx);
+        let body = self.body.take();
 
         let header = h_flex()
             .w_full()
@@ -568,6 +598,7 @@ impl RenderOnce for AgentLauncher {
             })
             .child(header)
             .children(modes)
+            .children(body)
             .children(sessions)
     }
 }

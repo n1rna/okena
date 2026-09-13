@@ -280,6 +280,71 @@ pub struct AgentSessionState {
     pub tracked_prs: Vec<TrackedPullRequest>,
 }
 
+/// What an agent session was started for: which card started it, and on what.
+///
+/// Set by the daemon when it starts the session, so every card lists exactly
+/// the sessions it started. Matching on the markers alone could not tell two
+/// helpers on the same ticket apart — a breakdown and a refine both carry the
+/// task and a goal — so each card would have listed the other's agents.
+///
+/// A task's own identity is the session's `task_ref`; the document variants
+/// name their target here because nothing else on the session does.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentPurpose {
+    /// Doing the work a task describes.
+    Work,
+    /// Breaking a task into sub-tasks.
+    Breakdown,
+    /// Rewriting a task's title and description.
+    Refine,
+    /// Drafting a new OpenSpec change. `root` is the spec root's key.
+    SpecDraft { root: String, change: String },
+    /// Changing one document of a spec root, by path relative to the root.
+    SpecEdit { root: String, path: String },
+    /// Adding to a knowledge root. `root` is the root's key.
+    KnowledgeDraft { root: String },
+    /// Changing one file of a knowledge root, by path relative to the root.
+    KnowledgeEdit { root: String, path: String },
+}
+
+#[cfg(test)]
+mod purpose_tests {
+    use super::AgentPurpose;
+
+    #[test]
+    fn a_purpose_round_trips_with_its_target() {
+        for purpose in [
+            AgentPurpose::Work,
+            AgentPurpose::Refine,
+            AgentPurpose::SpecEdit {
+                root: "store:plans".into(),
+                path: "openspec/specs/auth/spec.md".into(),
+            },
+            AgentPurpose::KnowledgeDraft {
+                root: "store:eng".into(),
+            },
+        ] {
+            let json = serde_json::to_value(&purpose).expect("encode");
+            assert_eq!(
+                serde_json::from_value::<AgentPurpose>(json).expect("decode"),
+                purpose
+            );
+        }
+    }
+
+    #[test]
+    fn the_wire_names_the_kind() {
+        let json = serde_json::to_value(AgentPurpose::KnowledgeEdit {
+            root: "r".into(),
+            path: "docs/ci.md".into(),
+        })
+        .expect("encode");
+        assert_eq!(json["kind"], "knowledge_edit");
+        assert_eq!(json["path"], "docs/ci.md");
+    }
+}
+
 #[cfg(test)]
 mod agent_tests {
     use super::{AgentAsset, AgentAssetKind, AgentSessionState};

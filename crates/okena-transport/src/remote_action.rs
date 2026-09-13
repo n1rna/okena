@@ -88,6 +88,10 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // Same shape as drafting a spec change: creates a project, runs its
         // hooks, and launches an agent.
         ActionRequest::KnowledgeDraft { .. } => ActionClientKind::LongMutation,
+        // Refining an open document is the same shape again, in either section.
+        ActionRequest::SpecRefineDocument { .. } | ActionRequest::KnowledgeRefineDocument { .. } => {
+            ActionClientKind::LongMutation
+        }
         // Same again: a scan creates a session project, runs its hooks, and
         // launches an agent. Reading a map stays in the fast bucket — one
         // small file.

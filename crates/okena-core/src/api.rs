@@ -420,6 +420,11 @@ pub struct ApiProject {
     /// so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_session: Option<String>,
+    /// What the session was started for, and on what. Names tasks by the
+    /// session's `task_ref` and documents by root key and path, neither of
+    /// which is an okena-side id, so it crosses unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_purpose: Option<crate::harness::AgentPurpose>,
     /// Whether this project is pinned to the top of the activity-sorted view.
     /// Carried over the wire so daemon-client projects keep their pin marker
     /// and stable pinned-tier ordering.
@@ -1400,6 +1405,10 @@ pub enum ActionRequest {
         /// worktrees and must not move the task into "in progress".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task: Option<crate::tasks::TaskRef>,
+        /// Which card started the session, recorded on it so that card lists
+        /// it and no other does. `None` for a session no card lists.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        purpose: Option<crate::harness::AgentPurpose>,
     },
     /// Render one launch brief, so a client can show or send it.
     ///
@@ -1588,6 +1597,24 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
     },
+    /// Open an agent session on one document of a spec root — a spec or a
+    /// change's file — briefed to change it as `request` says.
+    ///
+    /// The agent edits only that file and commits nothing. The client refuses
+    /// while the document has unsaved edits, so the two cannot conflict. Runs
+    /// on the workspace path, since it creates a session project.
+    SpecRefineDocument {
+        /// Root key from `SpecStores`.
+        root: String,
+        /// Document path, relative to the root.
+        path: String,
+        /// What to change, in the user's words.
+        request: String,
+        /// Override the agent to launch. `None` uses
+        /// `settings.harness.agent_command`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_command: Option<String>,
+    },
     // ─── Engineering harness: knowledge ───────────────────────────────────
     //
     // Knowledge stores (ADR-0003) are git repositories of engineering docs,
@@ -1731,6 +1758,21 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         /// What to write or change, in the user's words.
+        request: String,
+        /// Override the agent to launch. `None` uses
+        /// `settings.harness.agent_command`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_command: Option<String>,
+    },
+    /// Open an agent session on one file of a knowledge root, briefed to
+    /// change it as `request` says. The knowledge counterpart of
+    /// `SpecRefineDocument`, with the same rules.
+    KnowledgeRefineDocument {
+        /// Root key from `KnowledgeStores`.
+        root: String,
+        /// File path, relative to the root.
+        path: String,
+        /// What to change, in the user's words.
         request: String,
         /// Override the agent to launch. `None` uses
         /// `settings.harness.agent_command`.
@@ -2148,6 +2190,7 @@ mod tests {
                 project_scan: None,
                 task_draft: None,
                 custom_session: None,
+                agent_purpose: None,
                 pinned: true,
                 last_activity_at: Some(1_700_000_000_000),
                 default_shell: Some(ShellType::Default),

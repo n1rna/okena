@@ -512,6 +512,9 @@ impl HarnessPane {
                     }),
                 ),
         );
+        // At the folder okena scaffolded, whether or not it is folded: an
+        // agent writing into it is worth seeing either way.
+        col = col.children(self.render_spec_drafts(change, cx));
         if !collapsed {
             for doc in &docs {
                 col = col.child(self.render_doc_row(doc, 12.0, cx));
@@ -636,26 +639,9 @@ impl HarnessPane {
                 col = col.child(self.render_change(change, cx));
             }
         }
-        // Last, under the material they are writing: what is running matters
-        // less than what exists, right up until you want to know.
-        col.children(self.render_related_agents(self.spec_session_ids(cx), cx))
-            .into_any_element()
-    }
-
-    /// Sessions drafting a spec change, newest last.
-    ///
-    /// Every spec session, not only ones in the open root: a session is marked
-    /// with the change it drafts rather than the root it sits in, and a user
-    /// switching roots to check on an agent would have to guess which one it
-    /// was under.
-    fn spec_session_ids(&self, cx: &App) -> Vec<String> {
-        self.workspace
-            .read(cx)
-            .projects()
-            .iter()
-            .filter(|p| p.is_spec_session())
-            .map(|p| p.id.clone())
-            .collect()
+        // Agents are listed where they work: a draft in its change's folder,
+        // and every agent on a file on that file's card.
+        col.into_any_element()
     }
 
     pub(super) fn fact_row(&self, label: &str, value: String, cx: &Context<Self>) -> AnyElement {
@@ -878,6 +864,15 @@ impl HarnessPane {
             .children(self.render_file_op_bar(section, cx))
             .children(save_error)
             .child(body)
+            .children(self.render_document_agent(section, cx).map(|card| {
+                div()
+                    .flex_shrink_0()
+                    .px(px(16.0))
+                    .py(px(10.0))
+                    .border_t_1()
+                    .border_color(rgb(t.border))
+                    .child(card)
+            }))
             .into_any_element()
     }
 
@@ -1107,9 +1102,22 @@ impl HarnessPane {
         .subtitle("okena scaffolds it, then briefs the agent")
         .options(options)
         .preferred(self.tasks.default_agent.clone())
+        // The drafts already going into this root, so a second idea is not
+        // started blind.
+        .sessions(self.launcher_sessions(
+            self.sessions_for(cx, |purpose| {
+                matches!(purpose, okena_core::harness::AgentPurpose::SpecDraft { root, .. }
+                    if root.is_empty() || Some(root) == target.as_ref())
+            }),
+            cx,
+        ))
+        .launch_alongside_sessions()
         .busy(drafting.then_some("Starting…"))
         .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
             this.draft_spec_change(command.to_string(), cx);
+        }))
+        .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
+            this.open_session(id.to_string(), cx);
         }));
 
         body = body.child(launcher);

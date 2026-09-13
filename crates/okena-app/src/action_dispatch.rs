@@ -997,6 +997,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             agent_command,
             task_draft,
             task,
+            purpose,
         } => ActionRequest::AgentStartSession {
             goal,
             name,
@@ -1005,6 +1006,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             agent_command,
             task_draft,
             task,
+            purpose,
         },
         // Spec actions carry no ids — root keys and paths are the daemon's
         // own, discovered and checked on its side.
@@ -1058,7 +1060,8 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::SpecFileCreate { .. }
         | ActionRequest::SpecFolderCreate { .. }
         | ActionRequest::SpecFileRename { .. }
-        | ActionRequest::SpecFileDelete { .. }) => passthrough,
+        | ActionRequest::SpecFileDelete { .. }
+        | ActionRequest::SpecRefineDocument { .. }) => passthrough,
         // Knowledge actions likewise carry only root keys the daemon
         // discovered, paths and URLs.
         passthrough @ (ActionRequest::KnowledgeStores
@@ -1077,7 +1080,8 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::KnowledgeStorePull { .. }
         | ActionRequest::KnowledgeStoreCommit { .. }
         | ActionRequest::KnowledgeStorePush { .. }
-        | ActionRequest::KnowledgeDraft { .. }) => passthrough,
+        | ActionRequest::KnowledgeDraft { .. }
+        | ActionRequest::KnowledgeRefineDocument { .. }) => passthrough,
         // Project ids are client-side and must be stripped for the daemon.
         ActionRequest::ProjectScan {
             project_id,

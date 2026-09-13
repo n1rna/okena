@@ -42,8 +42,9 @@ pub fn spec_sources(projects: &[ProjectData], settings: &AppSettings) -> Sources
             .iter()
             // A worktree is a second checkout of a repo already listed, and a
             // session is rooted at a spec root or above several repos — neither
-            // is a root of its own.
-            .filter(|p| p.worktree_info.is_none() && !p.is_spec_session() && !p.is_agent_session())
+            // is a root of its own. Any session, not only spec drafts: one
+            // refining a document sits at the root it edits.
+            .filter(|p| p.worktree_info.is_none() && !p.is_any_agent_session())
             .map(|p| ProjectSource {
                 name: p.name.clone(),
                 path: p.path.clone(),
@@ -152,7 +153,7 @@ fn sync(
 
 /// A root the client named, checked against what discovery found — never a
 /// path taken on trust.
-fn resolve_root(
+pub(super) fn resolve_root(
     projects: &[ProjectData],
     settings: &AppSettings,
     key: Option<&str>,
@@ -662,6 +663,11 @@ pub(super) fn draft_change(
             // spec session from the first snapshot the client sees.
             if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id) {
                 p.spec_change = Some(slug.clone());
+                // With its root: two roots can each hold a change of this name.
+                p.agent_purpose = Some(okena_core::harness::AgentPurpose::SpecDraft {
+                    root: root.key.clone(),
+                    change: slug.clone(),
+                });
             }
             // Set before spawning: the terminal reads the project's default
             // shell as it starts.
