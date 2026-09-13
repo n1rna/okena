@@ -5,6 +5,7 @@
 //! workspace uses, so a view can act on projects (focus one, start a worktree)
 //! rather than only display them.
 
+mod doc_agents;
 mod editor;
 mod file_ops;
 mod knowledge_draft;
@@ -76,6 +77,9 @@ pub(crate) struct TasksState {
     /// second start: creating a project and launching an agent takes seconds,
     /// and without this a second click during the wait made a second agent.
     pub(crate) breaking_down: Option<String>,
+    /// External id of the task whose refine agent is starting, for the same
+    /// reason as `breaking_down`.
+    pub(crate) refining: Option<String>,
     /// Open "New task" form, if any.
     pub(crate) new_task: Option<new_task_form::NewTaskForm>,
     pub(crate) new_task_title: Entity<SimpleInputState>,
@@ -245,6 +249,8 @@ pub(crate) enum LaunchFlow {
     Work,
     /// Breaking the task into sub-tasks, or refining the ones it has.
     BreakDown,
+    /// Rewriting the task's own title and description.
+    Refine,
 }
 
 /// Smallest share either lane may be squeezed to, so a drag can never collapse
@@ -293,6 +299,10 @@ pub struct HarnessPane {
     pub(crate) knowledge: knowledge_view::KnowledgeState,
     /// The Knowledge view's "New" form.
     pub(crate) knowledge_draft: knowledge_draft::DraftForm,
+    /// The agent card under an open spec document.
+    pub(crate) spec_refine: doc_agents::DocRefine,
+    /// The agent card under an open knowledge file.
+    pub(crate) knowledge_refine: doc_agents::DocRefine,
     /// Creating, renaming and deleting files in the Specs tree.
     pub(crate) spec_files: file_ops::FileOps,
     /// Creating, renaming and deleting files in the Knowledge tree.
@@ -356,6 +366,8 @@ impl HarnessPane {
         let specs_git = store_git::StoreGitPanel::new(cx);
         let knowledge = knowledge_view::KnowledgeState::new(cx);
         let knowledge_draft = knowledge_draft::DraftForm::new(cx);
+        let spec_refine = doc_agents::DocRefine::new(cx);
+        let knowledge_refine = doc_agents::DocRefine::new(cx);
         let spec_files = file_ops::FileOps::new(cx);
         let knowledge_files = file_ops::FileOps::new(cx);
         let mut pane = Self {
@@ -387,6 +399,7 @@ impl HarnessPane {
                 description: markdown::MarkdownCache::default(),
                 sections_collapsed: std::collections::HashSet::new(),
                 breaking_down: None,
+                refining: None,
                 new_task: None,
                 new_task_title,
                 new_task_body,
@@ -421,6 +434,8 @@ impl HarnessPane {
             },
             knowledge,
             knowledge_draft,
+            spec_refine,
+            knowledge_refine,
             spec_files,
             knowledge_files,
         };

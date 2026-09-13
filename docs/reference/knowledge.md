@@ -261,8 +261,10 @@ putting a file at `templates/<flow>.md`; its frontmatter should say
 | `tasks-coordinate` | Splitting several hand-picked tasks among agents and starting them, from a `coordinate/…` branch of its own | `key`, `title`, `branch`, `tasks`, `projects`, `note` |
 | `break-down` | Splitting a task into sub-tasks over MCP | `key`, `parent_id`, `title`, `kind`, `url`, `description`, `child_kind` |
 | `task-create` | Drafting a new task | `title`, `kind`, `container`, `parent`, `description` |
+| `task-refine` | Rewriting an existing task's title and description in place, after asking what it would otherwise guess | `key`, `title`, `kind`, `url`, `description` |
 | `spec-draft` | Filling in a scaffolded OpenSpec change | `idea`, `change`, `change_dir`, `root_path`, `store_note`, `references` |
 | `knowledge-draft` | Adding to or updating a knowledge root | `request`, `path`, `what`, `commit_note` |
+| `doc-refine` | Changing one open spec, change file or knowledge file, without committing | `request`, `file`, `path`, `root_path`, `what` |
 | `agent-session` | A free-form session against a goal you typed | `goal`, `projects` |
 | `project-scan` | Writing or updating a repository's [project map](project-map.md#scanning) | `project`, `path`, `map_root`, `skill`, `start` |
 | `projects-scan` | Finding [links](project-map.md#scanning-links) between repositories | `projects`, `skill` |

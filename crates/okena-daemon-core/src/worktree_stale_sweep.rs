@@ -135,6 +135,7 @@ mod tests {
             project_scan: None,
             task_draft: None,
             custom_session: None,
+            agent_purpose: None,
             id: id.to_string(),
             name: id.to_string(),
             path: path.to_string(),

@@ -17,6 +17,7 @@ use okena_ui::resize_handle::ResizeHandle;
 use okena_views_terminal::layout::split_pane::DragState;
 
 use super::HarnessPane;
+use super::new_task_form::TaskHelper;
 use super::task_filter::{FacetValue, LABELS_HEADING, STATUS_HEADING, collect_facets, status_name};
 
 /// Accent colour for a workflow-state category.
@@ -184,14 +185,16 @@ pub(super) struct TaskLinks {
     pub session: Option<String>,
     /// Sessions running a detected coding agent.
     pub agents_running: usize,
-    /// Sessions started *about* this task rather than to do it — an agent
-    /// breaking it down, say. `(project_id, name)`.
+    /// Sessions breaking this task down, by project id.
     ///
-    /// Kept apart from `session` because they answer different questions:
-    /// one is where the work is happening, the other is who is helping think
-    /// about it. Counting a helper as work would move the task into "in
-    /// progress" the moment you asked an agent for a breakdown.
-    pub helpers: Vec<(String, String)>,
+    /// Kept apart from `session`, like `refines`, because they answer a
+    /// different question: one is where the work is happening, the other is
+    /// who is helping think about it. Counting a helper as work would move the
+    /// task into "in progress" the moment you asked an agent for a breakdown.
+    pub breakdowns: Vec<String>,
+    /// Sessions refining what this task says, by project id. Apart from
+    /// `breakdowns` so each card lists only the agents it started.
+    pub refines: Vec<String>,
 }
 
 /// What okena knows about the sessions linked to one task.
@@ -813,7 +816,8 @@ impl HarnessPane {
     /// The template id that will brief the agent the dialog is configuring.
     fn launch_template(&self, form: &super::StartWorkForm) -> &'static str {
         match form.flow {
-            super::LaunchFlow::BreakDown => "break-down",
+            super::LaunchFlow::BreakDown => TaskHelper::BreakDown.flow(),
+            super::LaunchFlow::Refine => TaskHelper::Refine.flow(),
             super::LaunchFlow::Work if !form.selection.is_empty() => {
                 self.tasks.selection_strategy.template()
             }
@@ -1305,7 +1309,17 @@ impl HarnessPane {
         match form.flow {
             super::LaunchFlow::BreakDown => {
                 self.tasks.start_form = None;
-                self.break_down_with_agent(&task, agent_command, project_ids, cx);
+                self.start_task_helper(
+                    &task,
+                    TaskHelper::BreakDown,
+                    agent_command,
+                    project_ids,
+                    cx,
+                );
+            }
+            super::LaunchFlow::Refine => {
+                self.tasks.start_form = None;
+                self.start_task_helper(&task, TaskHelper::Refine, agent_command, project_ids, cx);
             }
             super::LaunchFlow::Work => {
                 if project_ids.is_empty() {
@@ -1495,9 +1509,14 @@ impl HarnessPane {
             // but it is not work on the task: no worktrees, and it must not
             // move the task out of Todo.
             if project.is_custom_session() {
-                links
-                    .helpers
-                    .push((project.id.clone(), project.name.clone()));
+                // By the card that started it. A helper from before purposes
+                // were stored reads as a breakdown, which is all it could be.
+                match project.purpose() {
+                    Some(okena_core::harness::AgentPurpose::Refine) => {
+                        links.refines.push(project.id.clone())
+                    }
+                    _ => links.breakdowns.push(project.id.clone()),
+                }
                 continue;
             }
 
@@ -2368,7 +2387,7 @@ impl HarnessPane {
     /// that could not be got rid of at all: the placeholder had no control on
     /// it, and the session panel's own "Delete workspace…" is behind opening
     /// the very session you are trying to be done with.
-    fn discard_draft(&mut self, project_id: String, cx: &mut Context<Self>) {
+    pub(super) fn discard_draft(&mut self, project_id: String, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let daemon_id = okena_transport::client::strip_prefix(&project_id, client.connection_id());
         cx.spawn(async move |this, cx| {
@@ -2495,7 +2514,10 @@ impl HarnessPane {
                     .text_color(rgb(t.text_primary))
                     .child(task.title.clone()),
             )
-            .child(self.render_work_launcher(&task, &links, cx));
+            .child(self.render_work_launcher(&task, &links, cx))
+            // Beside doing it: what the task says is what the work is judged
+            // by, so sharpening it belongs next to starting it.
+            .child(self.render_refine_launcher(&task, &links, cx));
 
         // Where it sits in the breakdown. The parent is clickable when okena
         // knows it; when it does not — a parent assigned to somebody else and
@@ -2915,7 +2937,7 @@ impl HarnessPane {
 
     /// Sessions in `project_ids`, as a launcher lists them. A project that has
     /// gone since is skipped rather than shown blank.
-    fn launcher_sessions(
+    pub(super) fn launcher_sessions(
         &self,
         project_ids: impl IntoIterator<Item = String>,
         cx: &App,
@@ -3047,7 +3069,7 @@ impl HarnessPane {
         let t = theme(cx);
         let external_id = task.id.external_id.clone();
         let starting = self.tasks.breaking_down.as_deref() == Some(external_id.as_str());
-        let sessions = self.launcher_sessions(links.helpers.iter().map(|(id, _)| id.clone()), cx);
+        let sessions = self.launcher_sessions(links.breakdowns.iter().cloned(), cx);
 
         let title = if !sessions.is_empty() {
             "Breaking down"
@@ -3075,13 +3097,76 @@ impl HarnessPane {
             .busy(starting.then_some("Starting…"))
             .on_launch(
                 cx.listener(move |this, command: &SharedString, _window, cx| {
-                    this.break_down_with_agent(&for_launch, command.to_string(), Vec::new(), cx);
+                    this.start_task_helper(
+                        &for_launch,
+                        TaskHelper::BreakDown,
+                        command.to_string(),
+                        Vec::new(),
+                        cx,
+                    );
                 }),
             )
             .on_configure(
                 "Choose projects first…",
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.open_launch_form(&for_configure, super::LaunchFlow::BreakDown, cx);
+                }),
+            )
+            .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
+                this.open_session(id.to_string(), cx);
+            }))
+            .into_any_element()
+    }
+
+    /// Sharpening the task itself: an agent that asks what it would otherwise
+    /// guess, then rewrites the title and description in place — and the
+    /// sessions already doing so.
+    fn render_refine_launcher(
+        &self,
+        task: &Task,
+        links: &TaskLinks,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let external_id = task.id.external_id.clone();
+        let starting = self.tasks.refining.as_deref() == Some(external_id.as_str());
+        let sessions = self.launcher_sessions(links.refines.iter().cloned(), cx);
+
+        let title = if sessions.is_empty() {
+            "Refine with agent"
+        } else {
+            "Refining"
+        };
+
+        let for_launch = task.clone();
+        let for_configure = task.clone();
+        okena_ui::agent_launcher::AgentLauncher::new(format!("task-refine-{external_id}"), title)
+            .subtitle("Asks what it would guess, then rewrites the task")
+            .options(crate::views::agent_session::launch_options(
+                self.tasks.default_agent.as_deref(),
+                &t,
+            ))
+            .preferred(self.tasks.default_agent.clone())
+            .sessions(sessions)
+            // Nothing on disk to collide over, and a finished refine must not
+            // hide the way to run another once the task has moved on.
+            .launch_alongside_sessions()
+            .busy(starting.then_some("Starting…"))
+            .on_launch(
+                cx.listener(move |this, command: &SharedString, _window, cx| {
+                    this.start_task_helper(
+                        &for_launch,
+                        TaskHelper::Refine,
+                        command.to_string(),
+                        Vec::new(),
+                        cx,
+                    );
+                }),
+            )
+            .on_configure(
+                "Choose projects first…",
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.open_launch_form(&for_configure, super::LaunchFlow::Refine, cx);
                 }),
             )
             .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
@@ -3628,7 +3713,10 @@ impl HarnessPane {
             (super::LaunchFlow::BreakDown, 0) => {
                 "Optional. Pick the repos the agent should read to break it down well.".to_string()
             }
-            (super::LaunchFlow::BreakDown, n) => {
+            (super::LaunchFlow::Refine, 0) => {
+                "Optional. Pick the repos the agent should read to refine it.".to_string()
+            }
+            (super::LaunchFlow::BreakDown | super::LaunchFlow::Refine, n) => {
                 format!("{n} named in the brief as context — no worktrees are created")
             }
         };
@@ -3649,6 +3737,10 @@ impl HarnessPane {
             super::LaunchFlow::BreakDown => (
                 format!("Break down {}", form.task.display_key),
                 "Start the breakdown".to_string(),
+            ),
+            super::LaunchFlow::Refine => (
+                format!("Refine {}", form.task.display_key),
+                "Start refining".to_string(),
             ),
         };
 

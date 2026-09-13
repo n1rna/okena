@@ -10,6 +10,7 @@
 #![allow(clippy::expect_used)]
 
 mod briefs;
+mod doc_refine;
 mod document_files;
 mod files;
 mod git;
@@ -798,6 +799,7 @@ pub fn execute_action(
             agent_command,
             task_draft,
             task,
+            purpose,
         } => tasks::start_custom_session(
             ws,
             window_id,
@@ -808,6 +810,7 @@ pub fn execute_action(
             agent_command,
             task_draft,
             task,
+            purpose,
             backend,
             terminals,
             settings,
@@ -878,6 +881,23 @@ pub fn execute_action(
             settings,
             cx,
         ),
+        ActionRequest::SpecRefineDocument {
+            root,
+            path,
+            request,
+            agent_command,
+        } => doc_refine::refine_spec_document(
+            ws,
+            window_id,
+            root,
+            path,
+            request,
+            agent_command,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
         // ── Engineering harness: knowledge ─────────────────────────────────
         // The daemon runs these off the workspace lock before they reach this
         // match; the arm keeps any other caller of `execute_action` correct.
@@ -910,6 +930,23 @@ pub fn execute_action(
             ws,
             window_id,
             root,
+            request,
+            agent_command,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::KnowledgeRefineDocument {
+            root,
+            path,
+            request,
+            agent_command,
+        } => doc_refine::refine_knowledge_document(
+            ws,
+            window_id,
+            root,
+            path,
             request,
             agent_command,
             backend,
@@ -1752,6 +1789,7 @@ mod reconnect_shell_tests {
             project_scan: None,
             task_draft: None,
             custom_session: None,
+            agent_purpose: None,
             agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig::default(),

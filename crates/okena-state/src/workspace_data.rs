@@ -79,6 +79,18 @@ impl ProjectData {
     /// `task_ref`, and a work session carries `task_ref` alone, so the
     /// narrower markers have to be checked first.
     pub fn agent_role(&self) -> Option<AgentRole> {
+        use okena_core::harness::AgentPurpose;
+        // A session refining a document carries only a goal, which on its own
+        // would read as free-form.
+        match self.agent_purpose {
+            Some(AgentPurpose::SpecDraft { .. } | AgentPurpose::SpecEdit { .. }) => {
+                return Some(AgentRole::Spec);
+            }
+            Some(AgentPurpose::KnowledgeDraft { .. } | AgentPurpose::KnowledgeEdit { .. }) => {
+                return Some(AgentRole::Knowledge);
+            }
+            _ => {}
+        }
         if self.spec_change.is_some() {
             return Some(AgentRole::Spec);
         }
@@ -101,6 +113,36 @@ impl ProjectData {
             });
         }
         self.is_agent_session().then_some(AgentRole::Implement)
+    }
+
+    /// What this session was started for, and on what.
+    ///
+    /// The stored purpose when there is one. A session started before purposes
+    /// were stored gets the one its markers meant then, so every card keeps
+    /// listing what it listed: any helper on a ticket was a breakdown, a spec
+    /// session drafted its change, and a knowledge session wrote into its
+    /// root. The spec root was never stored, so such a draft names none.
+    pub fn purpose(&self) -> Option<okena_core::harness::AgentPurpose> {
+        use okena_core::harness::AgentPurpose;
+        if let Some(purpose) = &self.agent_purpose {
+            return Some(purpose.clone());
+        }
+        if let Some(change) = &self.spec_change {
+            return Some(AgentPurpose::SpecDraft {
+                root: String::new(),
+                change: change.clone(),
+            });
+        }
+        if let Some(root) = &self.knowledge_root {
+            return Some(AgentPurpose::KnowledgeDraft { root: root.clone() });
+        }
+        if self.project_scan.is_some() || self.task_draft.is_some() {
+            return None;
+        }
+        if self.custom_session.is_some() {
+            return self.task_ref.is_some().then_some(AgentPurpose::Breakdown);
+        }
+        self.is_agent_session().then_some(AgentPurpose::Work)
     }
 
     /// Whether this project is any kind of agent session.
@@ -415,6 +457,14 @@ pub struct ProjectData {
     /// what it is for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_session: Option<String>,
+    /// What the session was started for, and on what — which card started it.
+    ///
+    /// Stored, unlike the role, because the markers cannot say it: a breakdown
+    /// and a refine of the same ticket carry identical ones. `None` on sessions
+    /// started before it existed; read it through [`ProjectData::purpose`],
+    /// which works those out from their markers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_purpose: Option<okena_core::harness::AgentPurpose>,
     /// Folder icon color for this project
     #[serde(default)]
     pub folder_color: FolderColor,
@@ -558,6 +608,7 @@ mod tests {
             project_scan: None,
             task_draft: None,
             custom_session: None,
+            agent_purpose: None,
             folder_color: Default::default(),
             hooks: Default::default(),
             connection_id: None,
@@ -2257,6 +2308,7 @@ mod agent_session_tests {
             project_scan: None,
             task_draft: None,
             custom_session: None,
+            agent_purpose: None,
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
@@ -2408,6 +2460,74 @@ mod agent_role_tests {
         assert_eq!(p.agent_role(), Some(AgentRole::Scan));
         assert!(p.is_any_agent_session());
         assert_eq!(AgentRole::Scan.badge(), "scan");
+    }
+
+    #[test]
+    fn a_stored_purpose_tells_two_helpers_on_one_ticket_apart() {
+        use okena_core::harness::AgentPurpose;
+        let helper = |purpose: &str| {
+            project(serde_json::json!({
+                "task_ref": task_ref(),
+                "custom_session": "QBL-1",
+                "agent_purpose": { "kind": purpose },
+            }))
+        };
+        assert_eq!(helper("breakdown").purpose(), Some(AgentPurpose::Breakdown));
+        assert_eq!(helper("refine").purpose(), Some(AgentPurpose::Refine));
+        // Both are still agents on the ticket rather than on its work.
+        assert_eq!(helper("refine").agent_role(), Some(AgentRole::Task));
+    }
+
+    #[test]
+    fn a_session_from_before_purposes_keeps_what_its_markers_meant() {
+        use okena_core::harness::AgentPurpose;
+        let breakdown = project(serde_json::json!({
+            "task_ref": task_ref(),
+            "custom_session": "QBL-1 breakdown",
+        }));
+        assert_eq!(breakdown.purpose(), Some(AgentPurpose::Breakdown));
+        assert_eq!(
+            project(serde_json::json!({ "task_ref": task_ref() })).purpose(),
+            Some(AgentPurpose::Work)
+        );
+        assert_eq!(
+            project(serde_json::json!({ "spec_change": "add-login" })).purpose(),
+            Some(AgentPurpose::SpecDraft {
+                root: String::new(),
+                change: "add-login".into(),
+            })
+        );
+        assert_eq!(
+            project(serde_json::json!({
+                "knowledge_root": "store:eng",
+                "custom_session": "Knowledge: ci",
+            }))
+            .purpose(),
+            Some(AgentPurpose::KnowledgeDraft {
+                root: "store:eng".into()
+            })
+        );
+        // No card lists these.
+        for p in [
+            serde_json::json!({ "task_draft": "Add SSO", "custom_session": "Draft: Add SSO" }),
+            serde_json::json!({ "custom_session": "audit unwraps" }),
+            serde_json::json!({}),
+        ] {
+            assert_eq!(project(p).purpose(), None);
+        }
+    }
+
+    #[test]
+    fn a_session_refining_a_document_takes_its_section_s_role() {
+        let spec = project(serde_json::json!({
+            "custom_session": "openspec/specs/auth/spec.md: tighten",
+            "agent_purpose": {
+                "kind": "spec_edit",
+                "root": "store:plans",
+                "path": "openspec/specs/auth/spec.md",
+            },
+        }));
+        assert_eq!(spec.agent_role(), Some(AgentRole::Spec));
     }
 
     #[test]

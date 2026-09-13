@@ -199,6 +199,7 @@ pub fn apply_remote_snapshot(
                     existing.project_scan = api_project.project_scan.clone();
                     existing.task_draft = api_project.task_draft.clone();
                     existing.custom_session = api_project.custom_session.clone();
+                    existing.agent_purpose = api_project.agent_purpose.clone();
                     existing.agent = api_project.agent.clone();
                     existing.pinned = api_project.pinned;
                     existing.last_activity_at = api_project.last_activity_at;
@@ -273,6 +274,7 @@ pub fn apply_remote_snapshot(
                         project_scan: api_project.project_scan.clone(),
                         task_draft: api_project.task_draft.clone(),
                         custom_session: api_project.custom_session.clone(),
+                        agent_purpose: api_project.agent_purpose.clone(),
                         agent: api_project.agent.clone(),
                         folder_color: project_color,
                         hooks: HooksConfig::from_api(&api_project.hooks),
@@ -575,6 +577,7 @@ mod tests {
             project_scan: None,
             task_draft: None,
             custom_session: None,
+            agent_purpose: None,
             agent: None,
             pinned: false,
             last_activity_at: None,

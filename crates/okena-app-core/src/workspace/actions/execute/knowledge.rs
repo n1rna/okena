@@ -230,7 +230,7 @@ fn stores(registry: &Path, projects: &[ProjectSource]) -> KnowledgeStores {
 
 /// A usable root the client named, checked against what discovery found —
 /// never a path taken on trust.
-fn resolve_root(
+pub(super) fn resolve_root(
     registry: &Path,
     projects: &[ProjectSource],
     key: Option<&str>,
@@ -506,6 +506,9 @@ pub(super) fn draft(
         // The root it writes into, so the Knowledge view can list it beside
         // the entries rather than matching on the goal text.
         p.knowledge_root = Some(root.key.clone());
+        p.agent_purpose = Some(okena_core::harness::AgentPurpose::KnowledgeDraft {
+            root: root.key.clone(),
+        });
         p.default_shell = Some(shell);
     }
     if let ActionResult::Err(e) = super::spawn_uninitialized_terminals(

@@ -341,7 +341,9 @@ impl Sidebar {
             // subtitle used to repeat it — a row read "add-login (spec)" over
             // "add-login" — which cost a line to say nothing.
             let subtitle = match role {
-                AgentRole::Spec => p.spec_change.clone(),
+                // A session refining a spec document has no change; its goal
+                // names the document instead.
+                AgentRole::Spec => p.spec_change.clone().or_else(|| p.custom_session.clone()),
                 AgentRole::Knowledge => p.custom_session.clone(),
                 AgentRole::Task | AgentRole::Implement => {
                     p.task_ref.as_ref().map(|t| t.display_key.clone())

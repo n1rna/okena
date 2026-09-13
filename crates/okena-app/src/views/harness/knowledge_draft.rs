@@ -13,7 +13,9 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
+use okena_core::harness::AgentPurpose;
 use okena_core::knowledge::{KnowledgeRootKind, KnowledgeStores};
+use std::collections::{HashMap, HashSet};
 
 /// State of the Knowledge view's "New" form.
 pub(crate) struct DraftForm {
@@ -25,6 +27,9 @@ pub(crate) struct DraftForm {
     pub(crate) error: Option<String>,
     /// What the last start did, shown above the view once the form closes.
     pub(crate) notice: Option<String>,
+    /// The entries each draft's root had when it started, by daemon project
+    /// id — how its Drafting row knows the files it wrote have shown up.
+    pub(crate) baselines: HashMap<String, HashSet<String>>,
 }
 
 impl DraftForm {
@@ -41,6 +46,7 @@ impl DraftForm {
             starting: false,
             error: None,
             notice: None,
+            baselines: HashMap::new(),
         }
     }
 }
@@ -122,11 +128,24 @@ impl HarnessPane {
                                 .get("name")
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("the session");
-                            // The session runs in its own terminal, reachable
-                            // from the sidebar; what it writes shows up here on
-                            // the next refresh.
+                            // What the root holds now, so its Drafting row can
+                            // tell when the files it writes have shown up.
+                            if let (Some(id), Some(tree)) = (
+                                v.get("project_id").and_then(|p| p.as_str()),
+                                this.knowledge.tree.as_ref(),
+                            ) && this.knowledge.root_key.as_deref()
+                                == v.get("root").and_then(|r| r.as_str())
+                            {
+                                this.knowledge_draft.baselines.insert(
+                                    id.to_string(),
+                                    tree.entries.iter().map(|e| e.path.clone()).collect(),
+                                );
+                            }
+                            // The session runs in its own terminal; its row in
+                            // the tree opens it, and what it writes shows up
+                            // here on the next refresh.
                             this.knowledge_draft.notice = Some(format!(
-                                "Started {name} — it is in the sidebar. Refresh to see what it writes."
+                                "Started {name} — it shows as Drafting in the tree. Refresh to see what it writes."
                             ));
                         }
                         Err(e) => this.knowledge_draft.error = Some(e),
@@ -261,9 +280,20 @@ impl HarnessPane {
             &t,
         ))
         .preferred(self.tasks.default_agent.clone())
+        // The drafts already writing into this root.
+        .sessions(self.launcher_sessions(
+            self.sessions_for(cx, |purpose| {
+                matches!(purpose, AgentPurpose::KnowledgeDraft { root } if Some(root) == target.as_ref())
+            }),
+            cx,
+        ))
+        .launch_alongside_sessions()
         .busy(starting.then_some("Starting…"))
         .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
             this.start_knowledge_draft(command.to_string(), cx);
+        }))
+        .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
+            this.open_session(id.to_string(), cx);
         }));
 
         body = body.child(launcher);

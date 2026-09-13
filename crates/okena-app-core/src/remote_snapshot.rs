@@ -72,6 +72,7 @@ pub fn build_api_project(
         project_scan: p.project_scan.clone(),
         task_draft: p.task_draft.clone(),
         custom_session: p.custom_session.clone(),
+        agent_purpose: p.agent_purpose.clone(),
         agent: p.agent.clone(),
         pinned: p.pinned,
         last_activity_at: p.last_activity_at,

@@ -968,6 +968,7 @@ mod entry_mutation_tests {
             project_scan: None,
             task_draft: None,
             custom_session: None,
+            agent_purpose: None,
             agent: None,
             id: "p1".to_string(),
             name: "Project".to_string(),
