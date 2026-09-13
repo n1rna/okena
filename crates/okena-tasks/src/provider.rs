@@ -162,8 +162,29 @@ pub struct TaskDraft {
     pub container_id: Option<String>,
 }
 
+/// Changes to an existing task. A field left `None` is left as it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TaskPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Markdown. An empty string clears the description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl TaskPatch {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.description.is_none()
+    }
+}
+
 /// A task source. Implementations are expected to be cheap to construct and
 /// are called from daemon worker threads, so methods are blocking.
+///
+/// Methods that take a [`TaskId`] accept either the provider's own id or the
+/// task's display key (`QBL-371`, `#42`) in `external_id`: an agent is handed
+/// the key, and making it look up an id first would be a round-trip for
+/// nothing.
 pub trait TaskProvider: Send + Sync {
     /// Stable identifier, e.g. `"linear"`. Must match [`TaskId::provider`].
     fn id(&self) -> &'static str;
@@ -216,6 +237,30 @@ pub trait TaskProvider: Send + Sync {
         Err(TaskError::Unsupported {
             provider: self.id(),
             what: "listing sub-tasks",
+        })
+    }
+
+    /// One task, with its description, whoever it is assigned to.
+    fn get_task(&self, _id: &TaskId) -> Result<Task, TaskError> {
+        Err(TaskError::Unsupported {
+            provider: self.id(),
+            what: "reading a task",
+        })
+    }
+
+    /// Change a task's title or description, and return it as it now is.
+    fn update_task(&self, _id: &TaskId, _patch: &TaskPatch) -> Result<Task, TaskError> {
+        Err(TaskError::Unsupported {
+            provider: self.id(),
+            what: "editing tasks",
+        })
+    }
+
+    /// Add a comment to a task. `body` is Markdown.
+    fn add_comment(&self, _id: &TaskId, _body: &str) -> Result<(), TaskError> {
+        Err(TaskError::Unsupported {
+            provider: self.id(),
+            what: "commenting on tasks",
         })
     }
 

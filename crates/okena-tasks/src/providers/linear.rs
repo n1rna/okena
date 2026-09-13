@@ -9,7 +9,8 @@
 //! data path.
 
 use crate::provider::{
-    AuthStatus, Credential, TaskContainer, TaskDraft, TaskError, TaskProvider, task_branch_name,
+    AuthStatus, Credential, TaskContainer, TaskDraft, TaskError, TaskPatch, TaskProvider,
+    task_branch_name,
 };
 use okena_core::tasks::{GroupAxis, Task, TaskGroup, TaskId, TaskKind, TaskState};
 use okena_transport::http::{self, HttpError, HttpRequest};
@@ -193,6 +194,66 @@ mutation SetState($id: String!, $stateId: String!) {
 }
 "#;
 
+/// One issue, by UUID or identifier — `issue(id:)` takes either.
+const QUERY_ISSUE: &str = r#"
+query Issue($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    title
+    description
+    url
+    updatedAt
+    state { name type }
+    parent { id identifier }
+    labels(first: 20) { nodes { name } }
+    team { id key name }
+    project { id name }
+    cycle { id number name }
+  }
+}
+"#;
+
+/// The UUID behind an identifier. Mutations are handed the UUID: an
+/// identifier changes when its issue moves team, the UUID never does.
+const QUERY_ISSUE_ID: &str = r#"
+query IssueId($id: String!) {
+  issue(id: $id) { id }
+}
+"#;
+
+/// Edit an issue. `$input` carries only the fields being changed — an explicit
+/// `null` would clear one.
+const MUTATION_UPDATE_ISSUE: &str = r#"
+mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) {
+    success
+    issue {
+      id
+      identifier
+      title
+      description
+      url
+      updatedAt
+      state { name type }
+      parent { id identifier }
+      labels(first: 20) { nodes { name } }
+      team { id key name }
+      project { id name }
+      cycle { id number name }
+    }
+  }
+}
+"#;
+
+const MUTATION_CREATE_COMMENT: &str = r#"
+mutation CreateComment($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    success
+  }
+}
+"#;
+
 pub struct LinearProvider {
     credential: Option<Credential>,
     /// Cached display name of the authenticated account, filled by the first
@@ -278,6 +339,27 @@ impl LinearProvider {
         }
     }
 
+    /// The UUID for a UUID or an identifier, asked for only when it is the
+    /// latter.
+    fn issue_uuid(&self, id: &str) -> Result<String, TaskError> {
+        if is_uuid(id) {
+            return Ok(id.to_string());
+        }
+        let data = self.graphql(
+            "linear.issue_id",
+            QUERY_ISSUE_ID,
+            serde_json::json!({ "id": id }),
+        )?;
+        data.get("issue")
+            .and_then(|i| i.get("id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: format!("no issue `{id}`"),
+            })
+    }
+
     fn graphql(
         &self,
         label: &'static str,
@@ -285,14 +367,17 @@ impl LinearProvider {
         variables: serde_json::Value,
     ) -> Result<serde_json::Value, TaskError> {
         let cred = self.credential()?;
-        let req = Self::authorize(
-            HttpRequest::post(API_URL)
-                .json(&serde_json::json!({ "query": query, "variables": variables }))
-                .label(label)
-                .min_interval(MIN_INTERVAL)
-                .timeout(TIMEOUT),
-            cred,
-        );
+        let mut req = HttpRequest::post(API_URL)
+            .json(&serde_json::json!({ "query": query, "variables": variables }))
+            .label(label)
+            .timeout(TIMEOUT);
+        // Only the queue poll is floored. The floor refuses rather than waits,
+        // so on anything else it would fail an agent's second comment or
+        // second sub-task in a row.
+        if label == "linear.assigned" {
+            req = req.min_interval(MIN_INTERVAL);
+        }
+        let req = Self::authorize(req, cred);
 
         let resp = http::send(req).map_err(|e| match e {
             // 401/403 mean the credential is bad — surfaced distinctly so the
@@ -357,6 +442,38 @@ impl LinearProvider {
                 message: "response had no `data`".into(),
             })
     }
+}
+
+fn check_provider(id: &TaskId) -> Result<(), TaskError> {
+    if id.provider == PROVIDER_ID {
+        Ok(())
+    } else {
+        Err(TaskError::Protocol {
+            provider: PROVIDER_ID,
+            message: format!("task belongs to provider `{}`", id.provider),
+        })
+    }
+}
+
+/// Whether `id` is a Linear UUID rather than an identifier like `QBL-12`.
+fn is_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// The `issueUpdate` input for a patch: only the fields it changes.
+fn update_input(patch: &TaskPatch) -> serde_json::Value {
+    let mut input = serde_json::Map::new();
+    if let Some(title) = patch.title.as_deref() {
+        input.insert("title".into(), title.trim().into());
+    }
+    if let Some(description) = patch.description.as_deref() {
+        input.insert("description".into(), description.into());
+    }
+    serde_json::Value::Object(input)
 }
 
 /// Map a Linear workflow-state type onto a normalized category.
@@ -633,7 +750,7 @@ impl TaskProvider for LinearProvider {
         // A sub-task inherits its parent's team — Linear has no cross-team
         // parenting, and asking the user to pick one that must match would be
         // a choice with exactly one right answer.
-        let (team_id, labels) = match draft.parent_external_id.as_deref() {
+        let (team_id, labels, parent_id) = match draft.parent_external_id.as_deref() {
             Some(parent) => {
                 let data = self.graphql(
                     "linear.parent_context",
@@ -647,7 +764,15 @@ impl TaskProvider for LinearProvider {
                         provider: PROVIDER_ID,
                         message: "could not read the parent issue's team".into(),
                     })?;
-                (team_id_of(team)?, label_map(team))
+                // The parent may have been named by its identifier; the
+                // mutation gets the UUID this lookup returned.
+                let parent_id = data
+                    .get("issue")
+                    .and_then(|i| i.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(parent)
+                    .to_string();
+                (team_id_of(team)?, label_map(team), Some(parent_id))
             }
             None => {
                 let team_id = draft.container_id.clone().ok_or_else(|| {
@@ -666,7 +791,7 @@ impl TaskProvider for LinearProvider {
                     provider: PROVIDER_ID,
                     message: "could not read the team".into(),
                 })?;
-                (team_id, label_map(team))
+                (team_id, label_map(team), None)
             }
         };
 
@@ -679,7 +804,7 @@ impl TaskProvider for LinearProvider {
                 "teamId": team_id,
                 "title": draft.title.trim(),
                 "description": draft.description,
-                "parentId": draft.parent_external_id,
+                "parentId": parent_id,
                 "labelIds": label_ids,
             }),
         )?;
@@ -777,10 +902,17 @@ impl TaskProvider for LinearProvider {
                 message: format!("the issue's team has no `{want}` workflow state"),
             })?;
 
+        // `id` may be an identifier; the lookup above returned the UUID.
+        let issue_id = data
+            .get("issue")
+            .and_then(|i| i.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(id.external_id.as_str())
+            .to_string();
         let data = self.graphql(
             "linear.set_state",
             MUTATION_SET_STATE,
-            serde_json::json!({ "id": id.external_id, "stateId": chosen }),
+            serde_json::json!({ "id": issue_id, "stateId": chosen }),
         )?;
 
         let ok = data
@@ -794,6 +926,68 @@ impl TaskProvider for LinearProvider {
             Err(TaskError::Protocol {
                 provider: PROVIDER_ID,
                 message: "issueUpdate reported failure".into(),
+            })
+        }
+    }
+
+    fn get_task(&self, id: &TaskId) -> Result<Task, TaskError> {
+        check_provider(id)?;
+        let data = self.graphql(
+            "linear.issue",
+            QUERY_ISSUE,
+            serde_json::json!({ "id": id.external_id }),
+        )?;
+        data.get("issue")
+            .and_then(parse_issue)
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: format!("could not read issue `{}`", id.external_id),
+            })
+    }
+
+    fn update_task(&self, id: &TaskId, patch: &TaskPatch) -> Result<Task, TaskError> {
+        check_provider(id)?;
+        let issue_id = self.issue_uuid(&id.external_id)?;
+        let data = self.graphql(
+            "linear.update_issue",
+            MUTATION_UPDATE_ISSUE,
+            serde_json::json!({ "id": issue_id, "input": update_input(patch) }),
+        )?;
+        let updated = data
+            .get("issueUpdate")
+            .filter(|u| u.get("success").and_then(|v| v.as_bool()).unwrap_or(false))
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: "issueUpdate reported failure".into(),
+            })?;
+        updated
+            .get("issue")
+            .and_then(parse_issue)
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: "issueUpdate returned an issue okena could not read".into(),
+            })
+    }
+
+    fn add_comment(&self, id: &TaskId, body: &str) -> Result<(), TaskError> {
+        check_provider(id)?;
+        let issue_id = self.issue_uuid(&id.external_id)?;
+        let data = self.graphql(
+            "linear.comment",
+            MUTATION_CREATE_COMMENT,
+            serde_json::json!({ "issueId": issue_id, "body": body }),
+        )?;
+        let ok = data
+            .get("commentCreate")
+            .and_then(|c| c.get("success"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if ok {
+            Ok(())
+        } else {
+            Err(TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: "commentCreate reported failure".into(),
             })
         }
     }
@@ -926,6 +1120,42 @@ mod tests {
         let foreign = TaskId::new("jira", "ABC-1");
         assert!(matches!(
             p.set_state(&foreign, TaskState::Done),
+            Err(TaskError::Protocol { .. })
+        ));
+    }
+
+    #[test]
+    fn tells_a_uuid_from_an_identifier() {
+        assert!(is_uuid("f0fe2bc3-d9fe-4db4-b8ce-9aac476ac19d"));
+        assert!(!is_uuid("QBL-373"));
+        assert!(!is_uuid("f0fe2bc3d9fe4db4b8ce9aac476ac19d0000"));
+    }
+
+    #[test]
+    fn an_update_sends_only_what_changes() {
+        // An explicit null would clear what Linear already has.
+        let title_only = update_input(&TaskPatch {
+            title: Some(" New title ".into()),
+            description: None,
+        });
+        assert_eq!(title_only, serde_json::json!({ "title": "New title" }));
+        let cleared = update_input(&TaskPatch {
+            title: None,
+            description: Some(String::new()),
+        });
+        assert_eq!(cleared, serde_json::json!({ "description": "" }));
+    }
+
+    #[test]
+    fn reads_and_writes_refuse_a_foreign_provider_task() {
+        let p = LinearProvider::new(Some(Credential::ApiKey("k".into())));
+        let foreign = TaskId::new("azure_devops", "7");
+        assert!(matches!(
+            p.get_task(&foreign),
+            Err(TaskError::Protocol { .. })
+        ));
+        assert!(matches!(
+            p.add_comment(&foreign, "hi"),
             Err(TaskError::Protocol { .. })
         ));
     }

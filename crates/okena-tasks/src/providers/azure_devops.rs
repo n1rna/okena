@@ -18,7 +18,9 @@
 //! - **Descriptions are HTML**, converted to Markdown for the description pane.
 
 use super::html;
-use crate::provider::{AuthStatus, Credential, TaskContainer, TaskDraft, TaskError, TaskProvider};
+use crate::provider::{
+    AuthStatus, Credential, TaskContainer, TaskDraft, TaskError, TaskPatch, TaskProvider,
+};
 use base64::Engine as _;
 use okena_core::tasks::{GroupAxis, Task, TaskGroup, TaskId, TaskKind, TaskState};
 use okena_transport::http::{self, HttpError, HttpRequest, HttpResponse, Method};
@@ -270,12 +272,16 @@ fn basic_auth(token: &str) -> String {
     format!("Basic {encoded}")
 }
 
-/// A work item id as the provider takes it: a positive integer.
+/// A work item id as the provider takes it: a positive integer, with or
+/// without the `#` its display key carries.
 fn work_item_id(raw: &str) -> Result<u64, TaskError> {
-    raw.trim().parse().map_err(|_| TaskError::Protocol {
-        provider: PROVIDER_ID,
-        message: format!("`{raw}` is not an Azure DevOps work item id"),
-    })
+    raw.trim()
+        .trim_start_matches('#')
+        .parse()
+        .map_err(|_| TaskError::Protocol {
+            provider: PROVIDER_ID,
+            message: format!("`{raw}` is not an Azure DevOps work item id"),
+        })
 }
 
 enum Payload {
@@ -452,6 +458,29 @@ fn child_ids(item: &Value) -> Vec<u64> {
         .unwrap_or_default()
 }
 
+/// The field a work item type keeps its body in. A bug's form shows Repro
+/// Steps, not Description.
+fn body_field(work_item_type: &str) -> &'static str {
+    if work_item_type.eq_ignore_ascii_case("bug") {
+        "Microsoft.VSTS.TCM.ReproSteps"
+    } else {
+        "System.Description"
+    }
+}
+
+/// The JSON Patch that edits a work item: only the fields the patch changes.
+fn update_operations(patch: &TaskPatch, work_item_type: &str) -> Value {
+    let mut ops = Vec::new();
+    if let Some(title) = patch.title.as_deref() {
+        ops.push(json!({ "op": "add", "path": "/fields/System.Title", "value": title.trim() }));
+    }
+    if let Some(body) = patch.description.as_deref() {
+        let path = format!("/fields/{}", body_field(work_item_type));
+        ops.push(json!({ "op": "add", "path": path, "value": html::from_text(body) }));
+    }
+    Value::Array(ops)
+}
+
 /// The JSON Patch that creates a work item.
 fn create_operations(
     draft: &TaskDraft,
@@ -467,14 +496,8 @@ fn create_operations(
         .as_deref()
         .filter(|d| !d.trim().is_empty())
     {
-        let body = html::from_text(body);
-        // A bug's form shows Repro Steps, not Description.
-        let field = if work_item_type == "Bug" {
-            "Microsoft.VSTS.TCM.ReproSteps"
-        } else {
-            "System.Description"
-        };
-        ops.push(json!({ "op": "add", "path": format!("/fields/{field}"), "value": body }));
+        let path = format!("/fields/{}", body_field(work_item_type));
+        ops.push(json!({ "op": "add", "path": path, "value": html::from_text(body) }));
     }
     if let Some(parent) = parent {
         ops.push(json!({
@@ -724,6 +747,17 @@ impl AzureDevOpsProvider {
         )
     }
 
+    /// One string field of a work item, fetched alone. Empty when absent.
+    fn item_field(&self, id: u64, field: &str) -> Result<String, TaskError> {
+        let item = self.get_item(id, &format!("fields={field}"))?;
+        Ok(item
+            .get("fields")
+            .and_then(|f| f.get(field))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string())
+    }
+
     /// Every process in the organization, with the projects that use it.
     fn processes(&self) -> Result<Vec<Value>, TaskError> {
         let data = self.call(
@@ -951,6 +985,55 @@ impl TaskProvider for AzureDevOpsProvider {
             Payload::JsonPatch(json!([
                 { "op": "add", "path": "/fields/System.State", "value": chosen },
             ])),
+        )?;
+        Ok(())
+    }
+
+    fn get_task(&self, id: &TaskId) -> Result<Task, TaskError> {
+        let item_id = Self::check_provider(id)?;
+        let item = self.get_item(item_id, "$expand=fields")?;
+        self.to_task(&item)?.ok_or_else(|| {
+            protocol(format!(
+                "work item {item_id} came back in a shape okena could not read"
+            ))
+        })
+    }
+
+    fn update_task(&self, id: &TaskId, patch: &TaskPatch) -> Result<Task, TaskError> {
+        let item_id = Self::check_provider(id)?;
+        // Which field holds the body depends on the type, so the type is only
+        // worth asking for when the body is what changes.
+        let work_item_type = if patch.description.is_some() {
+            self.item_field(item_id, "System.WorkItemType")?
+        } else {
+            String::new()
+        };
+        let updated = self.call(
+            "azure_devops.update",
+            Method::Patch,
+            &format!("/_apis/wit/workitems/{item_id}"),
+            Payload::JsonPatch(update_operations(patch, &work_item_type)),
+        )?;
+        self.to_task(&updated)?.ok_or_else(|| {
+            protocol("the edited work item came back in a shape okena could not read")
+        })
+    }
+
+    fn add_comment(&self, id: &TaskId, body: &str) -> Result<(), TaskError> {
+        let item_id = Self::check_provider(id)?;
+        // Comments are addressed under the project, which the id does not say.
+        let project = self.item_field(item_id, "System.TeamProject")?;
+        if project.is_empty() {
+            return Err(protocol("could not read the work item's project"));
+        }
+        self.call(
+            "azure_devops.comment",
+            Method::Post,
+            &format!(
+                "/{}/_apis/wit/workItems/{item_id}/comments?api-version=7.1-preview.4",
+                encode_segment(&project)
+            ),
+            Payload::Json(json!({ "text": html::from_text(body) })),
         )?;
         Ok(())
     }
@@ -1470,5 +1553,108 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("<div>Two cards</div>"), "{body}");
+    }
+
+    #[test]
+    fn a_display_key_reads_its_work_item() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let _mock = http::testing::mock(|req| {
+            let url = req.url();
+            if url.contains("/_apis/wit/workitems/7?") && url.contains("expand=fields") {
+                return ok(json!({ "id": 7, "fields": {
+                    "System.TeamProject": "Shop", "System.WorkItemType": "User Story",
+                    "System.State": "Active", "System.Title": "Checkout",
+                    "System.Description": "<div>Pay</div>",
+                }}));
+            }
+            if url.contains("/states") {
+                return ok(story_states());
+            }
+            panic!("unexpected request {url}");
+        });
+
+        let task = AzureDevOpsProvider::new(Some(pat()))
+            .get_task(&TaskId::new(PROVIDER_ID, "#7"))
+            .expect("reads");
+        assert_eq!(task.display_key, "#7");
+        assert_eq!(task.state, TaskState::InProgress);
+        assert_eq!(task.description.as_deref(), Some("Pay"));
+    }
+
+    #[test]
+    fn editing_a_bugs_description_patches_its_repro_steps() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = sent.clone();
+        let _mock = http::testing::mock(move |req| {
+            let url = req.url();
+            if url.contains("/_apis/wit/workitems/3?fields=System.WorkItemType") {
+                return ok(json!({ "id": 3, "fields": { "System.WorkItemType": "Bug" } }));
+            }
+            if req.method() == Method::Patch {
+                let (_, body) = req.raw_body().expect("a JSON Patch body");
+                if let Ok(mut log) = log.lock() {
+                    log.push(body.to_string());
+                }
+                return ok(json!({ "id": 3, "fields": {
+                    "System.TeamProject": "Shop", "System.WorkItemType": "Bug",
+                    "System.State": "New", "System.Title": "Totals wrong",
+                    "Microsoft.VSTS.TCM.ReproSteps": "<div>Add two items</div>",
+                }}));
+            }
+            if url.contains("/states") {
+                return ok(json!({ "value": [{ "name": "New", "category": "Proposed" }] }));
+            }
+            panic!("unexpected request {url}");
+        });
+
+        let task = AzureDevOpsProvider::new(Some(pat()))
+            .update_task(
+                &TaskId::new(PROVIDER_ID, "3"),
+                &TaskPatch {
+                    title: None,
+                    description: Some("Add two items".into()),
+                },
+            )
+            .expect("edits");
+        assert_eq!(task.description.as_deref(), Some("Add two items"));
+        let body = sent.lock().map(|s| s.join("")).unwrap_or_default();
+        assert!(
+            body.contains("/fields/Microsoft.VSTS.TCM.ReproSteps"),
+            "{body}"
+        );
+        assert!(!body.contains("System.Title"), "{body}");
+    }
+
+    #[test]
+    fn a_comment_is_posted_under_the_items_project() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let posted = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let log = posted.clone();
+        let _mock = http::testing::mock(move |req| {
+            let url = req.url();
+            if url.contains("/_apis/wit/workitems/5?fields=System.TeamProject") {
+                return ok(json!({ "id": 5, "fields": { "System.TeamProject": "Web Shop" } }));
+            }
+            if req.method() == Method::Post && url.contains("/comments") {
+                if let Ok(mut log) = log.lock() {
+                    log.push(url.to_string());
+                }
+                return ok(json!({ "id": 1 }));
+            }
+            panic!("unexpected request {url}");
+        });
+
+        AzureDevOpsProvider::new(Some(pat()))
+            .add_comment(&TaskId::new(PROVIDER_ID, "#5"), "Picked up")
+            .expect("comments");
+        let urls = posted.lock().map(|u| u.clone()).unwrap_or_default();
+        assert_eq!(urls.len(), 1, "{urls:?}");
+        assert!(
+            urls[0]
+                .contains("/Web%20Shop/_apis/wit/workItems/5/comments?api-version=7.1-preview.4"),
+            "{}",
+            urls[0]
+        );
     }
 }
