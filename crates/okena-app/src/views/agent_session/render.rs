@@ -172,8 +172,8 @@ impl AgentSessionPanel {
 
         v_flex()
             .id(SharedString::from(format!(
-                "agent-task-{}",
-                self.project_id
+                "agent-task-{}-{}",
+                self.project_id, task.id.external_id
             )))
             .cursor_pointer()
             .w_full()
@@ -385,10 +385,16 @@ impl AgentSessionPanel {
         }
 
         // ── What it is working on ────────────────────────────────────────────
-        if let AgentSessionKind::Task(task) = &info.kind {
-            body = body
-                .child(self.section_heading("TASK", None, cx))
-                .child(self.task_card(task, cx));
+        if !info.tasks.is_empty() {
+            // Every task it was started on, the one it is named after first: a
+            // session on several picked tasks is not a session on the first.
+            body = body.child(match info.tasks.len() {
+                1 => self.section_heading("TASK", None, cx),
+                n => self.section_heading("TASKS", Some(n), cx),
+            });
+            for task in &info.tasks {
+                body = body.child(self.task_card(task, cx));
+            }
         } else if let Some(subject) = info.kind.subject() {
             let heading = match info.kind {
                 AgentSessionKind::Spec { .. } => "CHANGE",

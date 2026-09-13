@@ -990,6 +990,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn one_agent_on_picked_tasks_is_told_every_other_one() {
+        // The session is named after the first task; the brief is where the
+        // agent learns it was handed the rest too.
+        let task: okena_core::tasks::Task = serde_json::from_value(serde_json::json!({
+            "id": { "provider": "linear", "external_id": "u1" },
+            "display_key": "QBL-1", "title": "t", "state": "todo", "state_name": "Todo",
+            "url": "http://x", "branch_name": "feat/qbl-1", "updated_at": "",
+        }))
+        .unwrap();
+        let also = ["QBL-2".to_string(), "QBL-3".to_string()];
+        let note = compose_note(None, &also, &[], true, &task, &None).expect("a note");
+        assert!(note.contains("QBL-2, QBL-3"), "got: {note}");
+    }
+
     // These run with no profile initialized, so the credential store resolves
     // to "nothing stored" — which is exactly the state a fresh install is in.
 

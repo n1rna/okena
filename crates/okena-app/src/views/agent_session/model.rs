@@ -85,6 +85,9 @@ pub struct AgentSessionInfo {
     pub project_id: String,
     pub name: String,
     pub kind: AgentSessionKind,
+    /// Every task the session covers: the one it is named after, then the
+    /// others picked with it. Empty unless it is a task session.
+    pub tasks: Vec<TaskRef>,
     /// Working directory the session runs in.
     pub root: String,
     /// Agent command okena launched, when it recognizes one.
@@ -240,6 +243,28 @@ pub fn session_kind(project: &crate::workspace::state::ProjectData) -> Option<Ag
     None
 }
 
+/// Every task a task session covers, its own first.
+///
+/// One agent can be started on several picked tasks. The kind names only the
+/// first, which the branch and the session are named after, so a panel reading
+/// the kind alone looked as if the rest had been dropped.
+pub(super) fn session_tasks(project: &crate::workspace::state::ProjectData) -> Vec<TaskRef> {
+    match session_kind(project) {
+        Some(AgentSessionKind::Task(_)) => project.linked_tasks().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A session's task keys for a narrow row: the first, and how many more.
+pub(super) fn tasks_key(project: &crate::workspace::state::ProjectData) -> Option<String> {
+    let mut tasks = project.linked_tasks();
+    let first = tasks.next()?.display_key.clone();
+    Some(match tasks.count() {
+        0 => first,
+        more => format!("{first} +{more}"),
+    })
+}
+
 impl AgentSessionInfo {
     /// Collect everything shown about `project_id`, or `None` if it is gone.
     ///
@@ -341,6 +366,7 @@ impl AgentSessionInfo {
         Some(Self {
             project_id: project.id.clone(),
             name: project.name.clone(),
+            tasks: session_tasks(project),
             kind,
             root: project.path.clone(),
             running: agent.is_some(),
@@ -386,7 +412,7 @@ impl AgentSessionInfo {
         RelatedAgent {
             project_id: project.id.clone(),
             name: project.name.clone(),
-            key: project.task_ref.as_ref().map(|t| t.display_key.clone()),
+            key: tasks_key(project),
             activity: activity_of(
                 agent.is_some(),
                 waiting,
@@ -489,7 +515,7 @@ pub fn short_path(path: &str, keep: usize) -> String {
 mod tests {
     use super::{
         AgentSessionInfo, AgentSessionKind, SessionActivity, activity_of, is_related, session_kind,
-        short_path,
+        session_tasks, short_path, tasks_key,
     };
     use okena_core::harness::AgentState;
     use okena_core::tasks::{TaskId, TaskRef};
@@ -499,6 +525,7 @@ mod tests {
             project_id: "s1".into(),
             name: "s".into(),
             kind: AgentSessionKind::Plain,
+            tasks: Vec::new(),
             root: "/p".into(),
             agent: None,
             mcp: false,
@@ -642,6 +669,46 @@ mod tests {
             },
         }));
         assert!(matches!(session_kind(&p), Some(AgentSessionKind::Task(_))));
+    }
+
+    fn task_session(also: &[(&str, &str)]) -> crate::workspace::state::ProjectData {
+        let mut p = project(serde_json::json!({
+            "id": "s1", "name": "QBL-1", "path": "/p",
+        }));
+        p.task_ref = Some(task("u1", "QBL-1"));
+        p.also_tasks = also.iter().map(|(id, key)| task(id, key)).collect();
+        p
+    }
+
+    #[test]
+    fn a_session_on_several_picked_tasks_shows_every_one_first_task_first() {
+        let p = task_session(&[("u2", "QBL-2"), ("u3", "QBL-3")]);
+        let keys: Vec<String> = session_tasks(&p)
+            .into_iter()
+            .map(|t| t.display_key)
+            .collect();
+        assert_eq!(keys, ["QBL-1", "QBL-2", "QBL-3"]);
+        assert_eq!(tasks_key(&p).as_deref(), Some("QBL-1 +2"));
+    }
+
+    #[test]
+    fn a_session_on_one_task_shows_exactly_that_one() {
+        let p = task_session(&[]);
+        let keys: Vec<String> = session_tasks(&p)
+            .into_iter()
+            .map(|t| t.display_key)
+            .collect();
+        assert_eq!(keys, ["QBL-1"]);
+        assert_eq!(tasks_key(&p).as_deref(), Some("QBL-1"));
+    }
+
+    #[test]
+    fn a_session_that_is_not_on_a_task_shows_no_tasks() {
+        let p = project(serde_json::json!({
+            "id": "s1", "name": "add-login (spec)", "path": "/specs",
+            "spec_change": "add-login",
+        }));
+        assert!(session_tasks(&p).is_empty());
     }
 
     #[test]
