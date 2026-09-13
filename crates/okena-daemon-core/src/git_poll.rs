@@ -21,7 +21,8 @@
 //!
 //! Two exceptions widen it, both feeding an agent session's PRODUCED list: a
 //! worktree linked to the session's task has its PR and checks polled while
-//! hidden, on the same per-project schedule (its PR slowly once merged or closed);
+//! hidden, on the same per-project schedule (once merged or closed, its PR
+//! slowly and its checks not at all);
 //! and an open PR whose worktree was removed is handed to that session and
 //! polled PR-only, by repo and number, on the settled PR cadence until it is
 //! merged or closed.
@@ -34,8 +35,9 @@
 //! What that costs: each linked worktree adds one PR request per PR cadence
 //! (~60s), plus its checks on their own cadence — none while its pushed commit
 //! holds — until it is removed, whether or not its session is still running —
-//! the poller cannot see that — dropping to one every ~10 minutes once its PR
-//! is merged or closed, in case another PR replaces it. Each open tracked PR
+//! the poller cannot see that. Once its PR is merged or closed that drops to
+//! one PR request every ~10 minutes, in case another PR replaces it, and no
+//! checks requests until one does. Each open tracked PR
 //! adds one request per cadence until it closes, or until GitHub has said
 //! often enough that it does not exist; no answer at all never drops it. A
 //! worktree removed before its PR was seen costs one lookup by branch, retried
@@ -385,7 +387,9 @@ fn update_head_snapshots<T: PartialEq>(
 /// checks stay on their own schedule, skipped while the pushed commit holds.
 /// Once its PR is merged or closed the PR is only watched in case another
 /// replaces it, so that slot comes round every
-/// `FINISHED_LINKED_PR_EVERY_N_CYCLES`.
+/// `FINISHED_LINKED_PR_EVERY_N_CYCLES` and asks for no checks at all. The CI
+/// summary last fetched is kept, not cleared: nothing shows it for a finished
+/// PR, and checks resume once the PR poll finds an open or draft PR.
 ///
 /// A PR-only force (`force_pr`) asks for the PR on the next pass without
 /// making a hidden project count as shown, so it never costs a CI request.
@@ -409,12 +413,15 @@ fn select_github_polls(
         .filter(|(id, _)| !urgent_only || forced(id))
         .filter_map(|(id, path)| {
             let shown = visible_ids.contains(id) || schedule.is_urgent(id);
-            let want_pr = if !shown && pr_finished(pr_infos, id) {
+            let finished_hidden = !shown && pr_finished(pr_infos, id);
+            let want_pr = if finished_hidden {
                 schedule.pr_due_every(id, cycle, cadence_due, FINISHED_LINKED_PR_EVERY_N_CYCLES)
             } else {
                 schedule.pr_due(id, cycle, cadence_due)
             };
-            let want_ci = schedule.ci_due(id, cycle, cadence_due);
+            // A finished PR's checks show nowhere. Left undispatched, they come
+            // due the moment the slow PR poll finds an open PR again.
+            let want_ci = !finished_hidden && schedule.ci_due(id, cycle, cadence_due);
             (want_pr || want_ci).then(|| ProjectPoll {
                 id: id.clone(),
                 path: path.clone(),
@@ -3156,13 +3163,56 @@ mod tests {
         );
         let polls = select(&HashSet::new(), 1 + FINISHED_LINKED_PR_EVERY_N_CYCLES);
         assert_eq!(polls.len(), 1);
-        // Its checks follow their own schedule, skipped while the commit holds.
         assert!(polls[0].want_pr);
         assert_eq!(
             select(&ids(&["hidden"]), 13).len(),
             1,
             "on screen it is polled like any project"
         );
+    }
+
+    #[test]
+    fn a_hidden_linked_worktree_whose_pr_finished_requests_no_checks() {
+        let mut schedule = GithubPollSchedule::default();
+        schedule.record_pr("hidden", 1);
+        schedule.record_ci("hidden", 1, false, None);
+        let select = |pr_infos: &HashMap<String, Option<git::PrInfo>>,
+                      visible: &HashSet<String>,
+                      cycle: u64| {
+            select_github_polls(
+                &projects(),
+                visible,
+                &ids(&["hidden"]),
+                &schedule,
+                pr_infos,
+                cycle,
+                true,
+                &HashSet::new(),
+                false,
+            )
+        };
+        let slow_cycle = 1 + FINISHED_LINKED_PR_EVERY_N_CYCLES;
+
+        for state in [git::PrState::Merged, git::PrState::Closed] {
+            let finished = HashMap::from([("hidden".to_string(), Some(pr(9, state)))]);
+            assert!(
+                select(&finished, &HashSet::new(), 13).is_empty(),
+                "checks are due, but not for a finished PR"
+            );
+            let polls = select(&finished, &HashSet::new(), slow_cycle);
+            assert_eq!(polls.len(), 1);
+            assert!(polls[0].want_pr && !polls[0].want_ci, "only the slow PR poll");
+            assert!(
+                select(&finished, &ids(&["hidden"]), 13)[0].want_ci,
+                "on screen its checks are polled as before"
+            );
+        }
+
+        // The slow PR poll finds a new open PR: checks resume on the next pass.
+        let reopened = HashMap::from([("hidden".to_string(), Some(pr(10, git::PrState::Open)))]);
+        let polls = select(&reopened, &HashSet::new(), slow_cycle + 1);
+        assert_eq!(polls.len(), 1);
+        assert!(polls[0].want_ci);
     }
 
     #[test]
