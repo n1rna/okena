@@ -349,6 +349,9 @@ fn is_graphql_rate_limit(error: &Value) -> bool {
 pub(crate) struct GithubClient {
     host: String,
     token: String,
+    /// Messages of the errors the last GraphQL call reported, so a caller can
+    /// tell a query this host rejects from any other failure.
+    last_errors: Vec<String>,
 }
 
 impl GithubClient {
@@ -358,6 +361,7 @@ impl GithubClient {
         Some(Self {
             host: host.to_string(),
             token,
+            last_errors: Vec::new(),
         })
     }
 
@@ -366,7 +370,13 @@ impl GithubClient {
         Self {
             host: host.to_string(),
             token: token.to_string(),
+            last_errors: Vec::new(),
         }
+    }
+
+    /// The error messages the last [`graphql`](Self::graphql) call reported.
+    pub(crate) fn last_errors(&self) -> &[String] {
+        &self.last_errors
     }
 
     /// Send, retrying once with a fresh token on 401, and turn a rate-limit
@@ -433,6 +443,7 @@ impl GithubClient {
     /// POST a GraphQL query and return its `data`. Any reported error fails the
     /// call the way it failed `gh`, except a rate-limit error.
     pub(crate) fn graphql(&mut self, query: &str, variables: Value) -> Result<Value, ApiError> {
+        self.last_errors.clear();
         let url = graphql_endpoint(&self.host);
         let body = serde_json::json!({ "query": query, "variables": variables });
         let resp = self.send(|| {
@@ -447,6 +458,11 @@ impl GithubClient {
         if let Some(errors) = payload.get("errors").and_then(Value::as_array)
             && !errors.is_empty()
         {
+            self.last_errors = errors
+                .iter()
+                .filter_map(|error| error.get("message").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect();
             return Err(if errors.iter().any(is_graphql_rate_limit) {
                 ApiError::RateLimited
             } else if errors.iter().all(is_graphql_not_found) {

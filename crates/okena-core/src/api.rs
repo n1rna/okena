@@ -211,6 +211,57 @@ pub struct PrInfo {
     /// repo default. `None` when unknown (older hosts, or `gh` didn't report it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// Whether it can merge: conflicts, reviews, open threads. Read with the
+    /// PR itself, and only while it is open or a draft — a merged or closed PR
+    /// has nothing left in its way. `None` otherwise, and on a host that cannot
+    /// report it. Draft is `state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<PrReadiness>,
+}
+
+/// What stands between a pull request and merging it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrReadiness {
+    pub merge_state: MergeState,
+    /// `None` when the repo requires no review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<ReviewDecision>,
+    /// Review threads nobody has resolved yet, among those read.
+    #[serde(default)]
+    pub unresolved_threads: usize,
+    /// There were more threads than one request reads, so
+    /// `unresolved_threads` is a floor, not a count.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub threads_truncated: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Whether a pull request merges cleanly into its base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeState {
+    Clean,
+    Conflicting,
+    /// Mergeable, but the base has moved on and the branch must catch up.
+    Behind,
+    /// GitHub has not worked it out yet. Never read as clean.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecision {
+    Approved,
+    ChangesRequested,
+    ReviewRequired,
+    /// A decision a newer build reports that this one doesn't model. Decoded
+    /// rather than failing the whole PR, and shown as nothing.
+    #[serde(other)]
+    Other,
 }
 
 /// Open pull request offered as a worktree source.
@@ -2133,6 +2184,7 @@ mod tests {
                 state: PrState::Open,
                 number: 7,
                 base: Some("main".into()),
+                readiness: None,
             }),
             ci_checks: Some(CiCheckSummary {
                 status: CiStatus::Failure,

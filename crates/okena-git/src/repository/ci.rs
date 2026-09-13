@@ -121,10 +121,76 @@ query PullRequestList($owner: String!, $repo: String!, $headBranch: String!) {
       first: 1,
       orderBy: {field: CREATED_AT, direction: DESC}
     ) {
-      nodes { url state isDraft number baseRefName headRefOid }
+      nodes { url state isDraft number baseRefName headRefOid __READINESS__ }
     }
   }
 }"#;
+
+/// The mergeability and review fields the PR lookups ask for. They ride on
+/// the PR request, which runs on the settled PR cadence whatever the commit,
+/// so they cost no request of their own.
+const READINESS_FIELDS: &str = "mergeable mergeStateStatus reviewDecision \
+     reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved } }";
+
+/// Where [`READINESS_FIELDS`] go in a PR lookup query.
+const READINESS_SLOT: &str = "__READINESS__";
+
+/// Field names an error has to mention to be blamed on [`READINESS_FIELDS`].
+const READINESS_FIELD_NAMES: [&str; 4] = [
+    "mergeable",
+    "mergeStateStatus",
+    "reviewDecision",
+    "reviewThreads",
+];
+
+/// Hosts that rejected [`READINESS_FIELDS`] — an older GitHub Enterprise, or a
+/// token not allowed to read them. Asked without them from then on, so the PR
+/// badge never goes missing over fields the host cannot give.
+static READINESS_UNSUPPORTED: parking_lot::Mutex<Option<HashSet<String>>> =
+    parking_lot::Mutex::new(None);
+
+/// A PR lookup query with or without [`READINESS_FIELDS`].
+fn render_query(query: &str, with_readiness: bool) -> String {
+    query.replace(
+        READINESS_SLOT,
+        if with_readiness { READINESS_FIELDS } else { "" },
+    )
+}
+
+/// Whether a GraphQL rejection is about [`READINESS_FIELDS`].
+fn errors_name_readiness(errors: &[String]) -> bool {
+    errors.iter().any(|message| {
+        READINESS_FIELD_NAMES
+            .iter()
+            .any(|field| message.contains(field))
+    })
+}
+
+/// Run a PR lookup with the readiness fields, unless `host` is known to
+/// reject them. A rejection that names them is retried once without them, and
+/// remembered.
+fn pr_graphql(
+    client: &mut GithubClient,
+    host: &str,
+    query: &str,
+    variables: Value,
+) -> Result<Value, ApiError> {
+    let supported = !READINESS_UNSUPPORTED
+        .lock()
+        .as_ref()
+        .is_some_and(|hosts| hosts.contains(host));
+    match client.graphql(&render_query(query, supported), variables.clone()) {
+        Err(ApiError::Failed) if supported && errors_name_readiness(client.last_errors()) => {
+            log::warn!("{host} rejects PR mergeability and review fields; asking without them");
+            READINESS_UNSUPPORTED
+                .lock()
+                .get_or_insert_with(HashSet::new)
+                .insert(host.to_string());
+            client.graphql(&render_query(query, false), variables)
+        }
+        other => other,
+    }
+}
 
 /// The `pullRequests.nodes[]` entry of [`PR_LOOKUP_QUERY`].
 #[derive(Debug, Default, serde::Deserialize)]
@@ -138,6 +204,9 @@ struct PrNode {
     head_ref_oid: Option<String>,
     /// Only asked for by number, where the branch is not already known.
     head_ref_name: Option<String>,
+    /// Mergeability and reviews, when the query asked for them.
+    #[serde(flatten)]
+    readiness: ReadinessNode,
 }
 
 /// Get PR info for the current branch (if any PR exists).
@@ -159,7 +228,7 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
     };
 
     let variables = json!({ "owner": repo.owner, "repo": repo.name, "headBranch": branch });
-    match client.graphql(PR_LOOKUP_QUERY, variables) {
+    match pr_graphql(&mut client, &repo.host, PR_LOOKUP_QUERY, variables) {
         Err(ApiError::RateLimited) => PrFetch::RateLimited,
         Err(ApiError::Failed) => PrFetch::Failed,
         // The repository is gone, or this token can no longer see it.
@@ -180,7 +249,9 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
 const PR_BY_NUMBER_QUERY: &str = r#"
 query PullRequestByNumber($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) { url state isDraft number baseRefName headRefOid headRefName }
+    pullRequest(number: $number) {
+      url state isDraft number baseRefName headRefOid headRefName __READINESS__
+    }
   }
 }"#;
 
@@ -205,7 +276,7 @@ pub fn fetch_pr_by_number_with_head(repo_path: &Path, number: u32) -> (PrFetch, 
         return (PrFetch::Failed, None);
     };
     let variables = json!({ "owner": repo.owner, "repo": repo.name, "number": number });
-    match client.graphql(PR_BY_NUMBER_QUERY, variables) {
+    match pr_graphql(&mut client, &repo.host, PR_BY_NUMBER_QUERY, variables) {
         Err(ApiError::RateLimited) => (PrFetch::RateLimited, None),
         Err(ApiError::Failed) => (PrFetch::Failed, None),
         // GitHub's answer for a deleted PR or repository, or one this token
@@ -455,11 +526,17 @@ fn pr_info_of(node: PrNode) -> Option<crate::PrInfo> {
         .base_ref_name
         .map(|base| base.trim().to_string())
         .filter(|base| !base.is_empty());
+    // Only an open PR has anything left in its way. GitHub keeps answering
+    // UNKNOWN mergeability for a merged one, which would read as stuck.
+    let readiness = (matches!(state, crate::PrState::Open | crate::PrState::Draft)
+        && node.readiness.is_reported())
+    .then(|| readiness_of(node.readiness));
     Some(crate::PrInfo {
         url: node.url,
         state,
         number: node.number,
         base,
+        readiness,
     })
 }
 
@@ -699,8 +776,14 @@ struct Workflow {
 /// number is used rather than current-branch resolution, which (like `gh pr
 /// view`) misfires on fork/upstream-split repos.
 fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch {
+    // No commit on a failure: a settled result is what arms the skip, and an
+    // answer that never came must not stop the next poll from asking again.
+    let failed = || CiFetch::Fetched {
+        sha: None,
+        summary: None,
+    };
     let Some((mut client, repo)) = github_client(path) else {
-        return CiFetch::Fetched { sha, summary: None };
+        return failed();
     };
 
     let mut contexts: Vec<RollupContext> = Vec::new();
@@ -715,9 +798,7 @@ fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch 
         let data = match client.graphql(PR_CHECKS_QUERY, variables) {
             Ok(data) => data,
             Err(ApiError::RateLimited) => return CiFetch::RateLimited,
-            Err(ApiError::Failed | ApiError::NotFound) => {
-                return CiFetch::Fetched { sha, summary: None };
-            }
+            Err(ApiError::Failed | ApiError::NotFound) => return failed(),
         };
         // A commit with no checks has a null rollup — nothing to read.
         let Some(page) = data
@@ -731,7 +812,7 @@ fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch 
             .map(serde_json::from_value::<Vec<RollupContext>>)
         {
             Some(Ok(nodes)) => contexts.extend(nodes),
-            Some(Err(_)) => return CiFetch::Fetched { sha, summary: None },
+            Some(Err(_)) => return failed(),
             None => {}
         }
         let has_next = page
@@ -750,6 +831,84 @@ fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch 
     CiFetch::Fetched {
         summary: summarize_checks(aggregate_checks(contexts)),
         sha,
+    }
+}
+
+/// The [`READINESS_FIELDS`] of a PR node.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ReadinessNode {
+    mergeable: Option<String>,
+    merge_state_status: Option<String>,
+    review_decision: Option<String>,
+    review_threads: Option<ReviewThreads>,
+}
+
+impl ReadinessNode {
+    /// Whether the host said anything about readiness at all. A host asked
+    /// without the fields reports none, which is no readiness — not a PR whose
+    /// mergeability is unknown.
+    fn is_reported(&self) -> bool {
+        self.mergeable.is_some()
+            || self.merge_state_status.is_some()
+            || self.review_decision.is_some()
+            || self.review_threads.is_some()
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ReviewThreads {
+    page_info: Option<ThreadsPage>,
+    nodes: Vec<ReviewThread>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ThreadsPage {
+    has_next_page: bool,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ReviewThread {
+    is_resolved: bool,
+}
+
+/// Map GitHub's mergeability and review fields.
+///
+/// A conflict wins over everything. GitHub answers `UNKNOWN` while it is still
+/// computing mergeability — right after a push, typically — and that stays
+/// unknown: reading it as clean would clear a conflict indicator that is about
+/// to come back.
+fn readiness_of(node: ReadinessNode) -> crate::PrReadiness {
+    let mergeable = node.mergeable.as_deref();
+    let status = node.merge_state_status.as_deref();
+    let merge_state = if mergeable == Some("CONFLICTING") || status == Some("DIRTY") {
+        crate::MergeState::Conflicting
+    } else if mergeable != Some("MERGEABLE") || status == Some("UNKNOWN") {
+        crate::MergeState::Unknown
+    } else if status == Some("BEHIND") {
+        crate::MergeState::Behind
+    } else {
+        crate::MergeState::Clean
+    };
+    crate::PrReadiness {
+        merge_state,
+        review_decision: match node.review_decision.as_deref() {
+            Some("APPROVED") => Some(crate::ReviewDecision::Approved),
+            Some("CHANGES_REQUESTED") => Some(crate::ReviewDecision::ChangesRequested),
+            Some("REVIEW_REQUIRED") => Some(crate::ReviewDecision::ReviewRequired),
+            _ => None,
+        },
+        unresolved_threads: node.review_threads.as_ref().map_or(0, |t| {
+            t.nodes.iter().filter(|thread| !thread.is_resolved).count()
+        }),
+        threads_truncated: node
+            .review_threads
+            .as_ref()
+            .and_then(|t| t.page_info.as_ref())
+            .is_some_and(|page| page.has_next_page),
     }
 }
 
@@ -1516,7 +1675,7 @@ mod tests {
             super::fetch_ci_checks(&repo, None, None),
             super::CiFetch::Fetched {
                 sha: None,
-                summary: None
+                summary: None,
             }
         );
     }
@@ -1633,5 +1792,143 @@ mod tests {
             super::origin_as_github_sees_it(&serde_json::json!({ "origin": null }), origin()),
             origin()
         );
+    }
+
+    /// An open PR node carrying `extra` fields.
+    fn open_node(extra: serde_json::Value) -> serde_json::Value {
+        let mut node = serde_json::json!({
+            "url": "https://github.com/me/okena/pull/7",
+            "state": "OPEN",
+            "isDraft": false,
+            "number": 7,
+        });
+        if let (Some(node), Some(extra)) = (node.as_object_mut(), extra.as_object()) {
+            node.extend(extra.clone());
+        }
+        node
+    }
+
+    fn readiness(node: serde_json::Value) -> Option<crate::PrReadiness> {
+        let node: super::PrNode = serde_json::from_value(node).expect("pr node");
+        super::pr_info_of(node).and_then(|pr| pr.readiness)
+    }
+
+    #[test]
+    fn a_conflict_wins_over_everything() {
+        let r = readiness(open_node(serde_json::json!({
+            "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY",
+            "reviewDecision": "APPROVED",
+        })))
+        .expect("readiness");
+        assert_eq!(r.merge_state, crate::MergeState::Conflicting);
+        assert_eq!(r.review_decision, Some(crate::ReviewDecision::Approved));
+    }
+
+    #[test]
+    fn dirty_is_a_conflict_even_when_github_says_mergeable() {
+        let r = readiness(open_node(serde_json::json!({
+            "mergeable": "MERGEABLE", "mergeStateStatus": "DIRTY",
+        })))
+        .expect("readiness");
+        assert_eq!(r.merge_state, crate::MergeState::Conflicting);
+    }
+
+    #[test]
+    fn mergeability_github_is_still_computing_is_unknown_not_clean() {
+        for extra in [
+            serde_json::json!({ "mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN" }),
+            serde_json::json!({ "mergeable": "MERGEABLE", "mergeStateStatus": "UNKNOWN" }),
+            serde_json::json!({ "reviewDecision": "APPROVED" }),
+        ] {
+            let r = readiness(open_node(extra)).expect("readiness");
+            assert_eq!(r.merge_state, crate::MergeState::Unknown);
+        }
+    }
+
+    #[test]
+    fn a_mergeable_pr_is_behind_or_clean() {
+        let behind = readiness(open_node(serde_json::json!({
+            "mergeable": "MERGEABLE", "mergeStateStatus": "BEHIND",
+        })))
+        .expect("readiness");
+        assert_eq!(behind.merge_state, crate::MergeState::Behind);
+        // Blocked on reviews or checks still merges cleanly; those have their
+        // own indicators.
+        let blocked = readiness(open_node(serde_json::json!({
+            "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED",
+        })))
+        .expect("readiness");
+        assert_eq!(blocked.merge_state, crate::MergeState::Clean);
+    }
+
+    #[test]
+    fn only_unresolved_threads_are_counted() {
+        let r = readiness(open_node(serde_json::json!({
+            "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+            "reviewThreads": {
+                "pageInfo": { "hasNextPage": false },
+                "nodes": [
+                    { "isResolved": false }, { "isResolved": true }, { "isResolved": false },
+                ],
+            },
+        })))
+        .expect("readiness");
+        assert_eq!(r.unresolved_threads, 2);
+        assert!(!r.threads_truncated);
+        assert_eq!(r.review_decision, None);
+    }
+
+    #[test]
+    fn more_threads_than_a_page_make_the_count_a_floor() {
+        let nodes: Vec<_> = (0..100)
+            .map(|_| serde_json::json!({ "isResolved": false }))
+            .collect();
+        let r = readiness(open_node(serde_json::json!({
+            "mergeable": "MERGEABLE",
+            "reviewThreads": { "pageInfo": { "hasNextPage": true }, "nodes": nodes },
+        })))
+        .expect("readiness");
+        assert_eq!(r.unresolved_threads, 100);
+        assert!(r.threads_truncated);
+    }
+
+    #[test]
+    fn a_merged_or_closed_pr_carries_no_readiness() {
+        // GitHub keeps reporting UNKNOWN mergeability for a merged PR.
+        for state in ["MERGED", "CLOSED"] {
+            let mut node = open_node(serde_json::json!({
+                "mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN",
+                "reviewThreads": { "nodes": [ { "isResolved": false } ] },
+            }));
+            node["state"] = serde_json::json!(state);
+            assert_eq!(readiness(node), None, "{state}");
+        }
+    }
+
+    #[test]
+    fn a_host_that_reports_none_of_it_gives_no_readiness() {
+        assert_eq!(readiness(open_node(serde_json::json!({}))), None);
+    }
+
+    #[test]
+    fn readiness_fields_are_left_out_for_a_host_that_rejects_them() {
+        for query in [super::PR_LOOKUP_QUERY, super::PR_BY_NUMBER_QUERY] {
+            let with = super::render_query(query, true);
+            assert!(with.contains("reviewThreads") && with.contains("hasNextPage"));
+            let without = super::render_query(query, false);
+            assert!(!without.contains("reviewThreads"));
+            assert!(!without.contains(super::READINESS_SLOT));
+        }
+    }
+
+    #[test]
+    fn only_a_rejection_naming_the_readiness_fields_drops_them() {
+        assert!(super::errors_name_readiness(&[
+            "Field 'reviewThreads' doesn't exist on type 'PullRequest'".to_string()
+        ]));
+        assert!(!super::errors_name_readiness(&[
+            "Could not resolve to a Repository with the name 'me/okena'.".to_string()
+        ]));
+        assert!(!super::errors_name_readiness(&[]));
     }
 }

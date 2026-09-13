@@ -14,12 +14,15 @@
 //! kept as a tombstone, never listed, so the registration that named it goes
 //! too instead of lingering as a row with no state.
 
-use crate::api::{ApiGitStatus, PrState};
+use crate::api::{ApiGitStatus, CiCheckSummary, PrInfo, PrState};
 use crate::harness::{AgentAsset, AgentAssetKind, TrackedPullRequest};
 use crate::tasks::TaskRef;
 
 /// One row of a session's PRODUCED list.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `Default` so a caller building one names only the fields it sets, and a new
+/// field does not break every literal.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionAsset {
     pub kind: AgentAssetKind,
     /// The agent's title when it registered this asset, otherwise the branch.
@@ -34,6 +37,11 @@ pub struct SessionAsset {
     pub state: Option<DetectedState>,
     /// Uncommitted changes in the worktree behind this row.
     pub uncommitted: Option<LineChanges>,
+    /// The pull request behind a PR row, with what okena knows of its
+    /// mergeability and reviews.
+    pub pr: Option<PrInfo>,
+    /// The CI rollup of the checkout behind this row.
+    pub ci: Option<CiCheckSummary>,
     /// The task a registered asset is about, carried through for its caption.
     /// Nothing sets it yet; registered tasks arrive with the agent's asset.
     pub task: Option<TaskRef>,
@@ -109,6 +117,16 @@ pub fn derive_session_assets(
                 state: pr.state.clone(),
             }),
             uncommitted: None,
+            // The worktree is gone, so there are no checks to read — only the
+            // PR itself, with the mergeability read alongside it.
+            pr: Some(PrInfo {
+                url: pr.url.clone(),
+                state: pr.state.clone(),
+                number: pr.number,
+                base: None,
+                readiness: pr.readiness.clone(),
+            }),
+            ci: None,
             task: None,
             registered: false,
         });
@@ -147,6 +165,8 @@ pub fn derive_session_assets(
             branch: asset.branch.clone(),
             state: None,
             uncommitted: None,
+            pr: None,
+            ci: None,
             task: None,
             registered: true,
         });
@@ -193,6 +213,8 @@ fn checkout_row(c: &LinkedCheckout<'_>) -> Option<SessionAsset> {
         branch: Some(branch),
         state,
         uncommitted,
+        pr: pr.cloned(),
+        ci: c.git.and_then(|g| g.ci_checks.clone()),
         task: None,
         registered: false,
     })
@@ -286,6 +308,7 @@ mod tests {
                 state,
                 number,
                 base: None,
+                readiness: None,
             }),
             ..ApiGitStatus::default()
         }
@@ -351,6 +374,68 @@ mod tests {
                 state: PrState::Draft
             })
         );
+    }
+
+    #[test]
+    fn a_pr_row_carries_its_readiness_and_checks() {
+        let mut g = git(Some(0), Some((7, PrState::Open)));
+        if let Some(pr) = g.pr_info.as_mut() {
+            pr.readiness = Some(crate::api::PrReadiness {
+                merge_state: crate::api::MergeState::Conflicting,
+                review_decision: None,
+                unresolved_threads: 2,
+                threads_truncated: false,
+            });
+        }
+        g.ci_checks = Some(CiCheckSummary {
+            status: crate::api::CiStatus::Failure,
+            passed: 1,
+            failed: 1,
+            pending: 0,
+            total: 2,
+            checks: Vec::new(),
+        });
+        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[]);
+        let readiness = rows[0].pr.as_ref().and_then(|p| p.readiness.as_ref());
+        assert_eq!(readiness.map(|r| r.unresolved_threads), Some(2));
+        assert_eq!(
+            rows[0].ci.as_ref().map(|c| c.failed),
+            Some(1),
+            "the row shows the checkout's CI"
+        );
+    }
+
+    #[test]
+    fn a_removed_worktrees_pr_keeps_the_readiness_read_with_it() {
+        let mut open = tracked(9, PrState::Open);
+        open.readiness = Some(crate::api::PrReadiness {
+            merge_state: crate::api::MergeState::Behind,
+            review_decision: None,
+            unresolved_threads: 1,
+            threads_truncated: false,
+        });
+        let rows = derive_session_assets(&[], &[], &[open]);
+        let readiness = rows[0].pr.as_ref().and_then(|p| p.readiness.as_ref());
+        assert_eq!(
+            readiness.map(|r| r.merge_state),
+            Some(crate::api::MergeState::Behind)
+        );
+    }
+
+    #[test]
+    fn a_session_asset_can_be_built_from_its_default() {
+        let row = SessionAsset {
+            title: "Design notes".into(),
+            ..SessionAsset::default()
+        };
+        assert!(row.pr.is_none() && row.state.is_none() && !row.registered);
+    }
+
+    #[test]
+    fn a_removed_worktrees_pr_has_no_checks_to_show() {
+        let rows = derive_session_assets(&[], &[], &[tracked(9, PrState::Open)]);
+        assert_eq!(rows[0].pr.as_ref().map(|p| p.number), Some(9));
+        assert!(rows[0].ci.is_none());
     }
 
     #[test]
@@ -526,6 +611,7 @@ mod tests {
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
             state,
+            readiness: None,
         }
     }
 

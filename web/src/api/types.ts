@@ -52,6 +52,20 @@ export interface PrInfo {
   number: number;
   /** The PR's base (target) branch, e.g. "main" or "develop". Omitted when unknown. */
   base?: string | null;
+  /** Mergeability and reviews, read with the PR while it is open or a draft. Omitted otherwise. */
+  readiness?: PrReadiness | null;
+}
+
+export type MergeState = "clean" | "conflicting" | "behind" | "unknown";
+
+export type ReviewDecision = "approved" | "changes_requested" | "review_required" | "other";
+
+export interface PrReadiness {
+  merge_state: MergeState;
+  review_decision?: ReviewDecision | null;
+  unresolved_threads: number;
+  /** More threads than one request reads: `unresolved_threads` is a floor. */
+  threads_truncated?: boolean;
 }
 
 export type CiStatus = "Success" | "Failure" | "Pending";

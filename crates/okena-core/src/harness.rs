@@ -168,6 +168,9 @@ pub struct TrackedPullRequest {
     pub number: u32,
     pub url: String,
     pub state: crate::api::PrState,
+    /// Mergeability and reviews as last read with the PR, while it is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<crate::api::PrReadiness>,
 }
 
 impl TrackedPullRequest {
