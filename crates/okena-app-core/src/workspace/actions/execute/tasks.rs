@@ -1326,6 +1326,58 @@ pub(super) mod agent_shell_tests {
     }
 
     #[test]
+    fn a_started_task_is_told_to_plan_and_verify_its_work() {
+        // With no per-project configuration: the built-in carries it.
+        let s = AppSettings::default();
+        let brief = super::task_brief(&s, &task(), "b1", &[], None, None, None).expect("a brief");
+        for needle in [
+            "okena_test_plan",
+            "okena_test_step_start",
+            "okena_test_step_result",
+            "okena_test_run_finish",
+        ] {
+            assert!(
+                brief.contains(needle),
+                "brief is missing {needle}:\n{brief}"
+            );
+        }
+        // Once, from the host brief, not again from the embedded one.
+        assert_eq!(brief.matches("okena_report_status").count(), 1, "{brief}");
+        assert!(!brief.contains("{verify}"), "{brief}");
+    }
+
+    #[test]
+    fn a_stores_verify_template_replaces_only_the_verify_instruction() {
+        let dir = std::env::temp_dir().join(format!("okena-task-verify-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("templates")).expect("mkdir");
+        std::fs::write(
+            dir.join("templates/task-verify.md"),
+            "---\nfor: task-verify\n---\nVerify {key} on staging.\n",
+        )
+        .expect("write");
+        let root = Some(("acme".to_string(), dir.clone()));
+        let brief = super::task_brief(
+            &AppSettings::default(),
+            &task(),
+            "b1",
+            &[],
+            None,
+            None,
+            root,
+        )
+        .expect("a brief");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(brief.contains("Verify LIN-42 on staging."), "{brief}");
+        assert!(!brief.contains("okena_test_plan"), "{brief}");
+        // The store did not override task-start, so the rest is okena's.
+        assert!(
+            brief.contains("The worktrees are already created"),
+            "{brief}"
+        );
+        assert!(brief.contains("okena_report_status"), "{brief}");
+    }
+
+    #[test]
     fn configured_args_still_win_over_the_template() {
         // They are an explicit instruction about how to launch this agent, and
         // more specific than any template. Somebody who set them must keep
@@ -1376,6 +1428,8 @@ pub(super) mod agent_shell_tests {
                 }
                 // Not the sub-task brief: these share no parent.
                 assert!(!brief.contains("sub-tasks"), "{brief}");
+                // Verifying is the work agents' job, not the coordinator's.
+                assert!(!brief.contains("okena_test_plan"), "{brief}");
             }
             other => panic!("expected a custom shell, got {other:?}"),
         }
@@ -1925,7 +1979,13 @@ fn task_brief(
             vars.insert("tasks", listed.clone());
             Flow::TasksCoordinate
         }
-        None => Flow::TaskStart,
+        // Only the agent doing the work plans and verifies it; a coordinator
+        // hands that on to the agents it starts.
+        None => {
+            let verify = briefs::build(Flow::TaskVerify, prompts.as_ref(), &vars);
+            vars.insert("verify", briefs::block(&verify.rendered.text));
+            Flow::TaskStart
+        }
     };
     Some(briefs::build(flow, prompts.as_ref(), &vars).rendered.text)
 }

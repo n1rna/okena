@@ -256,7 +256,8 @@ putting a file at `templates/<flow>.md`; its frontmatter should say
 
 | Flow | When | Variables |
 |---|---|---|
-| `task-start` | Starting work on a task, in its worktrees | `key`, `title`, `url`, `branch`, `description`, `projects`, `note` |
+| `task-start` | Starting work on a task, in its worktrees | `key`, `title`, `url`, `branch`, `description`, `projects`, `note`, `verify` |
+| `task-verify` | How the agent on a task plans its steps and proves each one through the `okena_test_*` tools. Never sent alone: rendered into `task-start` as `verify`, so either can be overridden without the other | `key`, `title` |
 | `task-coordinate` | Splitting a task among sub-agents and starting them, from a `coordinate/…` branch of its own | `key`, `title`, `description`, `branch`, `children`, `projects`, `note` |
 | `tasks-coordinate` | Splitting several hand-picked tasks among agents and starting them, from a `coordinate/…` branch of its own | `key`, `title`, `branch`, `tasks`, `projects`, `note` |
 | `break-down` | Splitting a task into sub-tasks over MCP | `key`, `parent_id`, `title`, `kind`, `url`, `description`, `child_kind` |
@@ -293,7 +294,7 @@ the partial it picks.
 
 | Partial | Used for |
 |---|---|
-| `reporting` | Every flow: report `state` and `suggestions` through `okena_report_status` when stopping to wait |
+| `reporting` | Every flow sent on its own: report `state` and `suggestions` through `okena_report_status` when stopping to wait |
 | `no-description`, `no-description-yet` | A breakdown or draft brief when there is no description |
 | `given-projects`, `given-worktrees` | Heading over the `projects` list (`{list}`) |
 | `spec-store-note`, `spec-folder-note` | How to use the `openspec` CLI (`{store_id}`, `{change}`) |
@@ -308,7 +309,7 @@ the partial it picks.
 
 Some variables are still assembled by okena, because they are lists or
 optional blocks: `store_note`, `references`, `projects`, `note`, `children`,
-`tasks`, `start`.
+`tasks`, `start`, `verify`.
 Each is either empty or arrives with its own blank line in front, so a template
 can place it on its own line without leaving a hole when it is absent. Their
 words come from the partials above.
