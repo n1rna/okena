@@ -332,8 +332,9 @@ impl StartStrategy {
                  Pick this when they can be built and tested apart."
             ),
             StartStrategy::Coordinated => {
-                "One session on this task, told to read the sub-tasks and start \
-                 sub-agents for whatever groups can be tested independently."
+                "One coordinating session on a branch of its own, told to read the \
+                 sub-tasks and start sub-agents for whatever groups can be tested \
+                 independently."
                     .to_string()
             }
         }
@@ -367,6 +368,141 @@ impl StartStrategy {
             ]
         }
     }
+}
+
+/// How to put agents on several tasks ticked to start together.
+///
+/// The same three answers as for a parent's sub-tasks, asked of a set the user
+/// put together instead: it may be one piece of work, several, or something
+/// only reading the tasks will tell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SelectionStrategy {
+    /// One agent on all of them, on the first task's branch.
+    #[default]
+    Single,
+    /// One agent per task, each on its own branch.
+    PerTask,
+    /// One agent on a coordinating branch of its own, briefed to group the
+    /// tasks and start an agent per group. It changes nothing itself, so every
+    /// task's branch stays free for those agents.
+    Coordinated,
+}
+
+impl SelectionStrategy {
+    /// Always all three: a set of two or more always has something to split.
+    pub(super) const ALL: [SelectionStrategy; 3] = [
+        SelectionStrategy::Single,
+        SelectionStrategy::PerTask,
+        SelectionStrategy::Coordinated,
+    ];
+
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            SelectionStrategy::Single => "One agent",
+            SelectionStrategy::PerTask => "One per task",
+            SelectionStrategy::Coordinated => "Let a coordinator split it",
+        }
+    }
+
+    /// What choosing it will do with `count` tasks, the first being `first`.
+    pub(super) fn hint(self, count: usize, first: &str) -> String {
+        match self {
+            SelectionStrategy::Single => {
+                format!("One session on {first}'s branch, working on all {count} tasks.")
+            }
+            SelectionStrategy::PerTask => format!(
+                "{count} sessions, one per task, each on its own branch. \
+                 Pick this when they can be built and tested apart."
+            ),
+            SelectionStrategy::Coordinated => format!(
+                "One coordinating session on a branch of its own, told to read the \
+                 {count} tasks and start an agent for each group that can be tested \
+                 independently."
+            ),
+        }
+    }
+
+    /// Read a strategy back from the label a launcher mode carries.
+    pub(super) fn from_label(label: &str) -> Option<SelectionStrategy> {
+        Self::ALL.into_iter().find(|s| s.label() == label)
+    }
+
+    /// The template that briefs the agent this starts.
+    pub(super) const fn template(self) -> &'static str {
+        match self {
+            SelectionStrategy::Coordinated => "tasks-coordinate",
+            SelectionStrategy::Single | SelectionStrategy::PerTask => "task-start",
+        }
+    }
+}
+
+/// How a task stands to one already ticked, when the two cannot go together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Relation {
+    /// The ticked task is its parent, at any depth.
+    Parent,
+    /// The ticked task is its sub-task, at any depth.
+    SubTask,
+}
+
+/// The ticked task `task_id` cannot be ticked alongside, and how they relate.
+///
+/// A task and its own parent or sub-task would put the same work in front of
+/// two agents, or one agent's work inside another's. `parent_of` is the
+/// hierarchy okena knows; a cycle in it ends the walk rather than looping.
+pub(super) fn blocking_relative<'a>(
+    task_id: &str,
+    ticked: impl IntoIterator<Item = &'a str>,
+    parent_of: impl Fn(&str) -> Option<String>,
+) -> Option<(&'a str, Relation)> {
+    let ancestors = |from: &str| {
+        let mut out: Vec<String> = Vec::new();
+        let mut next = parent_of(from);
+        while let Some(parent) = next {
+            if parent == from || out.contains(&parent) {
+                break;
+            }
+            next = parent_of(&parent);
+            out.push(parent);
+        }
+        out
+    };
+    let mine = ancestors(task_id);
+    ticked
+        .into_iter()
+        .filter(|t| *t != task_id)
+        .find_map(|other| {
+            if mine.iter().any(|a| a == other) {
+                Some((other, Relation::Parent))
+            } else if ancestors(other).iter().any(|a| a == task_id) {
+                Some((other, Relation::SubTask))
+            } else {
+                None
+            }
+        })
+}
+
+/// Ticked ids in the order `list` shows them, so "the first" is the one on top.
+///
+/// Any the list does not show — filtered out since — follow, in a stable order
+/// rather than the set's arbitrary one.
+pub(super) fn in_list_order(
+    list: &[String],
+    ticked: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = list
+        .iter()
+        .filter(|id| ticked.contains(*id))
+        .cloned()
+        .collect();
+    let mut unseen: Vec<String> = ticked
+        .iter()
+        .filter(|id| !list.contains(*id))
+        .cloned()
+        .collect();
+    unseen.sort();
+    out.extend(unseen);
+    out
 }
 
 /// How the list is ordered within each section.
@@ -437,6 +573,7 @@ impl HarnessPane {
         self.tasks.children.clear();
         self.tasks.children_loading = None;
         self.tasks.selected = None;
+        self.tasks.checked.clear();
         self.tasks.filter = super::task_filter::TaskFilter::default();
         self.tasks.new_task = None;
         self.tasks.start_form = None;
@@ -535,6 +672,12 @@ impl HarnessPane {
                             {
                                 this.tasks.selected = None;
                             }
+                            // And ticks: a task that left the list cannot be
+                            // started from it.
+                            let tasks = &this.tasks.tasks;
+                            this.tasks
+                                .checked
+                                .retain(|id| tasks.iter().any(|t| &t.id.external_id == id));
                             // Same for the filter: a sprint that closed takes
                             // its tasks with it, and a selection nothing can
                             // satisfy reads as "you have no work" rather than
@@ -632,11 +775,9 @@ impl HarnessPane {
         flow: super::LaunchFlow,
         cx: &mut Context<Self>,
     ) {
-        // A second run cannot reuse the first's branch: git refuses two
-        // worktrees on one branch, so the task's name is only free the first
-        // time.
-        let taken = self.links_for(task, cx).signals.linked;
-        let branch = next_branch(&task.branch_name, taken);
+        let coordinated = flow == super::LaunchFlow::Work
+            && self.strategy_for(&task.id.external_id) == StartStrategy::Coordinated;
+        let branch = self.launch_branch(task, coordinated, cx);
         let branch_input = cx.new(|cx| {
             SimpleInputState::new(cx)
                 .placeholder("Branch / worktree name")
@@ -650,16 +791,20 @@ impl HarnessPane {
             project_ids,
             branch_input,
             brief_source: None,
+            selection: Vec::new(),
         });
         cx.notify();
         self.load_brief_source(task, cx);
     }
 
     /// The template id that will brief the agent the dialog is configuring.
-    fn launch_template(&self, flow: super::LaunchFlow, task_id: &str) -> &'static str {
-        match flow {
+    fn launch_template(&self, form: &super::StartWorkForm) -> &'static str {
+        match form.flow {
             super::LaunchFlow::BreakDown => "break-down",
-            super::LaunchFlow::Work => match self.strategy_for(task_id) {
+            super::LaunchFlow::Work if !form.selection.is_empty() => {
+                self.tasks.selection_strategy.template()
+            }
+            super::LaunchFlow::Work => match self.strategy_for(&form.task.id.external_id) {
                 StartStrategy::Coordinated => "task-coordinate",
                 StartStrategy::Single | StartStrategy::PerSubtask => "task-start",
             },
@@ -674,7 +819,7 @@ impl HarnessPane {
         let Some(form) = self.tasks.start_form.as_ref() else {
             return;
         };
-        let flow = self.launch_template(form.flow, &task.id.external_id);
+        let flow = self.launch_template(form);
         let client = self.client.clone();
         let wanted = task.id.external_id.clone();
         cx.spawn(async move |this, cx| {
@@ -819,8 +964,8 @@ impl HarnessPane {
                 None,
                 agent_command.clone(),
                 super::StartExtras {
-                    coordinate: false,
                     siblings,
+                    ..Default::default()
                 },
                 cx,
             );
@@ -849,10 +994,246 @@ impl HarnessPane {
             agent_command,
             super::StartExtras {
                 coordinate: true,
-                siblings: Vec::new(),
+                ..Default::default()
             },
             cx,
         );
+    }
+
+    // ─── Starting ticked tasks together ──────────────────────────────────────
+
+    /// Ticked tasks in list order, leaving out any that can no longer start
+    /// together — gone from the list, or picked up by an agent since.
+    fn checked_tasks(&self, cx: &Context<Self>) -> Vec<Task> {
+        if self.tasks.checked.is_empty() {
+            return Vec::new();
+        }
+        // Active tasks cannot be ticked, so the order that matters is the
+        // Tasks section's, as the list draws it.
+        let (_, rest) = self.board(cx);
+        let order: Vec<String> = order_by_hierarchy(rest, &Default::default())
+            .into_iter()
+            .map(|row| row.task.id.external_id)
+            .collect();
+        in_list_order(&order, &self.tasks.checked)
+            .into_iter()
+            .filter_map(|id| {
+                self.tasks
+                    .tasks
+                    .iter()
+                    .find(|t| t.id.external_id == id)
+                    .cloned()
+            })
+            .filter(|t| !is_active(self.links_for(t, cx).agents_running))
+            .collect()
+    }
+
+    /// Tick or untick a task. Never opens it: that is what clicking the row is.
+    fn toggle_checked(&mut self, external_id: String, cx: &mut Context<Self>) {
+        if !self.tasks.checked.remove(&external_id) {
+            self.tasks.checked.insert(external_id);
+        }
+        cx.notify();
+    }
+
+    fn clear_checked(&mut self, cx: &mut Context<Self>) {
+        self.tasks.checked.clear();
+        cx.notify();
+    }
+
+    /// Why `task` cannot be ticked right now, worded for its checkbox, or
+    /// `None` when it can.
+    fn check_block(&self, task: &Task, active: bool) -> Option<String> {
+        if active {
+            return Some("An agent is already working on this task".to_string());
+        }
+        let parents: std::collections::HashMap<&str, &str> = self
+            .tasks
+            .tasks
+            .iter()
+            .chain(self.tasks.children.values().flatten())
+            .filter_map(|t| Some((t.id.external_id.as_str(), t.parent_id.as_deref()?)))
+            .collect();
+        let (other, relation) = blocking_relative(
+            &task.id.external_id,
+            self.tasks.checked.iter().map(String::as_str),
+            |id| parents.get(id).map(|p| p.to_string()),
+        )?;
+        let key = self
+            .known_task(other)
+            .map(|t| t.display_key)
+            .unwrap_or_else(|| other.to_string());
+        Some(match relation {
+            Relation::Parent => format!("Its parent {key} is ticked; they can't start together"),
+            Relation::SubTask => {
+                format!("Its sub-task {key} is ticked; they can't start together")
+            }
+        })
+    }
+
+    /// The selection's split, as modes on its launcher.
+    fn selection_modes(&self) -> Vec<okena_ui::agent_launcher::LaunchMode> {
+        let current = self.tasks.selection_strategy;
+        SelectionStrategy::ALL
+            .iter()
+            .map(|strategy| okena_ui::agent_launcher::LaunchMode {
+                id: strategy.label().into(),
+                label: strategy.label().into(),
+                selected: *strategy == current,
+            })
+            .collect()
+    }
+
+    /// Start the ticked tasks with `agent_command` right away, or ask where
+    /// when that cannot be told.
+    fn quick_start_selection(&mut self, agent_command: String, cx: &mut Context<Self>) {
+        let picked = self.checked_tasks(cx);
+        let Some(first) = picked.first() else {
+            return;
+        };
+        // One branch from the first task, unless each task gets its own: if
+        // an earlier run took it, only the dialog can give this one a name.
+        let first_taken = self.tasks.selection_strategy != SelectionStrategy::PerTask
+            && self.links_for(first, cx).signals.linked;
+        match self.quick_start_projects(cx) {
+            Some(project_ids) if !first_taken => {
+                self.start_selection(&picked, project_ids, None, agent_command, cx)
+            }
+            _ => self.open_selection_form(picked, cx),
+        }
+    }
+
+    /// Open the launch dialog for the ticked tasks.
+    fn open_selection_form(&mut self, picked: Vec<Task>, cx: &mut Context<Self>) {
+        let Some(first) = picked.first().cloned() else {
+            return;
+        };
+        let coordinated = self.tasks.selection_strategy == SelectionStrategy::Coordinated;
+        let branch = self.launch_branch(&first, coordinated, cx);
+        let branch_input = cx.new(|cx| {
+            SimpleInputState::new(cx)
+                .placeholder("Branch / worktree name")
+                .default_value(branch)
+        });
+        let project_ids = self.quick_start_projects(cx).unwrap_or_default();
+        self.tasks.start_form = Some(super::StartWorkForm {
+            task: first.clone(),
+            flow: super::LaunchFlow::Work,
+            project_ids,
+            branch_input,
+            brief_source: None,
+            selection: picked,
+        });
+        cx.notify();
+        self.load_brief_source(&first, cx);
+    }
+
+    /// The branch the dialog offers for starting `task`.
+    ///
+    /// A coordinator's is a branch of its own, so that none of the branches
+    /// the agents it starts will need is taken. A second run cannot reuse the
+    /// first's branch: git refuses two worktrees on one branch, so a name is
+    /// only free the first time.
+    fn launch_branch(&self, task: &Task, coordinated: bool, cx: &Context<Self>) -> String {
+        let own = if coordinated {
+            okena_core::tasks::coordinator_branch(&task.branch_name)
+        } else {
+            task.branch_name.clone()
+        };
+        next_branch(&own, self.links_for(task, cx).signals.linked)
+    }
+
+    /// Whether the open dialog would start a coordinator.
+    fn form_coordinates(&self) -> bool {
+        match self.tasks.start_form.as_ref() {
+            Some(form) if form.flow != super::LaunchFlow::Work => false,
+            Some(form) if !form.selection.is_empty() => {
+                self.tasks.selection_strategy == SelectionStrategy::Coordinated
+            }
+            Some(form) => {
+                self.strategy_for(&form.task.id.external_id) == StartStrategy::Coordinated
+            }
+            None => false,
+        }
+    }
+
+    /// Put agents on tasks picked together, split as the selection says.
+    ///
+    /// Every agent works in `project_ids`: where is chosen once for the run.
+    /// `branch` names the first task's branch; one per task ignores it, since
+    /// each task keeps its own. The ticks clear once the starts are asked for,
+    /// and the tasks move to Active as their agents come up.
+    fn start_selection(
+        &mut self,
+        picked: &[Task],
+        project_ids: Vec<String>,
+        branch: Option<String>,
+        agent_command: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(first) = picked.first() else {
+            return;
+        };
+        let keys: Vec<String> = picked.iter().map(|t| t.display_key.clone()).collect();
+        let rest = keys[1..].to_vec();
+        match self.tasks.selection_strategy {
+            SelectionStrategy::Single => self.start_work(
+                first,
+                project_ids,
+                branch,
+                agent_command,
+                super::StartExtras {
+                    also: rest,
+                    hand_picked: true,
+                    ..Default::default()
+                },
+                cx,
+            ),
+            SelectionStrategy::PerTask => {
+                for task in picked {
+                    let siblings = keys
+                        .iter()
+                        .filter(|k| **k != task.display_key)
+                        .cloned()
+                        .collect();
+                    // A task an earlier run already took the branch of gets
+                    // the next name, as a second start on it would.
+                    let taken = self.links_for(task, cx).signals.linked;
+                    let branch = taken.then(|| next_branch(&task.branch_name, true));
+                    // Queued behind each other by `start_work`: git's index
+                    // lock is the reason they go one at a time.
+                    self.start_work(
+                        task,
+                        project_ids.clone(),
+                        branch,
+                        agent_command.clone(),
+                        super::StartExtras {
+                            siblings,
+                            hand_picked: true,
+                            ..Default::default()
+                        },
+                        cx,
+                    );
+                }
+            }
+            // The daemon reads every picked task and briefs the coordinator
+            // with them; the words are knowledge's `tasks-coordinate`.
+            SelectionStrategy::Coordinated => self.start_work(
+                first,
+                project_ids,
+                branch,
+                agent_command,
+                super::StartExtras {
+                    coordinate: true,
+                    also: rest,
+                    hand_picked: true,
+                    ..Default::default()
+                },
+                cx,
+            ),
+        }
+        self.tasks.checked.clear();
+        cx.notify();
     }
 
     /// Focus an existing session for a task and leave the harness view.
@@ -919,7 +1300,18 @@ impl HarnessPane {
                     return;
                 }
                 let branch = form.branch_input.read(cx).value().trim().to_string();
+                let selection = form.selection.clone();
                 self.tasks.start_form = None;
+                if !selection.is_empty() {
+                    // The field names the first task's branch; one per task
+                    // has no field, each keeping its own.
+                    let branch = (self.tasks.selection_strategy != SelectionStrategy::PerTask
+                        && !branch.is_empty())
+                    .then_some(branch);
+                    self.start_selection(&selection, project_ids, branch, agent_command, cx);
+                    cx.notify();
+                    return;
+                }
                 // The dialog honours the split exactly as the one-click start
                 // does; configuring first must not quietly mean "one agent".
                 match self.strategy_for(&task.id.external_id) {
@@ -1001,8 +1393,9 @@ impl HarnessPane {
                         agent_command: Some(agent_command),
                         note: None,
                         coordinate: extras.coordinate,
-                        also: Vec::new(),
+                        also: extras.also,
                         siblings: extras.siblings,
+                        hand_picked: extras.hand_picked,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing start-work result".to_string()))
             })
@@ -1075,13 +1468,16 @@ impl HarnessPane {
         let mut links = TaskLinks::default();
 
         for project in ws.projects() {
-            let linked = project
+            // Linked as its own task or as one of the others it covers: a
+            // session started on several tasks is work on each of them.
+            if !project.works_on(&task.id.external_id) {
+                continue;
+            }
+            // Only a project started on this very task holds its branch.
+            let own = project
                 .task_ref
                 .as_ref()
                 .is_some_and(|t| t.id.external_id == task.id.external_id);
-            if !linked {
-                continue;
-            }
             // A free-form session carries a task link so the task can list it,
             // but it is not work on the task: no worktrees, and it must not
             // move the task out of Todo.
@@ -1092,7 +1488,7 @@ impl HarnessPane {
                 continue;
             }
 
-            links.signals.linked = true;
+            links.signals.linked |= own;
 
             // The agent session spans every repo, so it is the better landing
             // place than an arbitrary one of the task's worktrees.
@@ -2172,6 +2568,281 @@ impl HarnessPane {
             .into_any_element()
     }
 
+    /// The ticked tasks, and how to start them together.
+    ///
+    /// Stands where one task's detail stands once two are ticked: the set is
+    /// what is being decided about now, and the launcher at its foot starts it.
+    fn render_selection_pane(
+        &self,
+        picked: Vec<Task>,
+        share: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let mut body = v_flex()
+            .id("task-selection-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap(px(10.0))
+            .px(px(16.0))
+            .py(px(14.0))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(ui_text(15.0, cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(format!("{} tasks selected", picked.len())),
+                    )
+                    .child(self.small_button(
+                        "task-selection-clear",
+                        "Clear selection",
+                        cx.listener(|this, _, _window, cx| this.clear_checked(cx)),
+                        cx,
+                    )),
+            )
+            .child(self.detail_label("SELECTED", cx));
+        for task in &picked {
+            body = body.child(self.render_picked_task(task, cx));
+        }
+
+        v_flex()
+            .w(relative(share))
+            .min_w_0()
+            .h_full()
+            .border_l_1()
+            .border_color(rgb(t.border))
+            .child(body)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px(px(16.0))
+                    .py(px(12.0))
+                    .border_t_1()
+                    .border_color(rgb(t.border))
+                    .child(self.render_selection_launcher(&picked, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// One ticked task in the selection pane, with a way to untick it.
+    fn render_picked_task(&self, task: &Task, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let id = task.id.external_id.clone();
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(4.0))
+            .bg(rgb(t.bg_secondary))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(3.0))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .flex_wrap()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(ui_text_ms(cx))
+                                    .text_color(rgb(t.text_secondary))
+                                    .child(task.display_key.clone()),
+                            )
+                            .child(self.chip(
+                                task.kind.label().to_string(),
+                                kind_color(task.kind, &t),
+                                cx,
+                            ))
+                            .child(self.chip(
+                                status_name(task).to_string(),
+                                state_color(task.state, &t),
+                                cx,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(task.title.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("task-unpick-{id}")))
+                    .cursor_pointer()
+                    .flex_shrink_0()
+                    .px(px(4.0))
+                    .rounded(px(3.0))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
+                    .child("✕")
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Remove from the selection")
+                            .build(window, cx)
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.toggle_checked(id.clone(), cx);
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Starting the ticked tasks: the same launcher as one task's, with the
+    /// split always offered.
+    fn render_selection_launcher(&self, picked: &[Task], cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let Some(first) = picked.first() else {
+            return div().into_any_element();
+        };
+        let count = picked.len();
+        let strategy = self.tasks.selection_strategy;
+        let place = match self.quick_start_projects(cx) {
+            Some(ids) => {
+                let ws = self.workspace.read(cx);
+                let names: Vec<String> = ids
+                    .iter()
+                    .filter_map(|id| ws.project(id).map(|p| p.name.clone()))
+                    .collect();
+                format!("in {}", names.join(", "))
+            }
+            None => "pick where to work".to_string(),
+        };
+        let subtitle = match strategy {
+            SelectionStrategy::PerTask => format!("{count} branches · {place}"),
+            SelectionStrategy::Single => format!("{} · {place}", first.branch_name),
+            SelectionStrategy::Coordinated => format!(
+                "{} · {place}",
+                okena_core::tasks::coordinator_branch(&first.branch_name)
+            ),
+        };
+
+        let mut options =
+            crate::views::agent_session::launch_options(self.tasks.default_agent.as_deref(), &t);
+        options.push(crate::views::agent_session::no_agent_option(
+            "Worktrees only",
+            &t,
+        ));
+        // Starts queue behind one another, so the launcher is busy until the
+        // last of a run has gone.
+        let busy = self.tasks.starting.is_some() || !self.tasks.queued_starts.is_empty();
+        let for_configure = picked.to_vec();
+
+        okena_ui::agent_launcher::AgentLauncher::new(
+            "task-selection-work",
+            format!("Start work on {count} tasks"),
+        )
+        .subtitle(subtitle)
+        .options(options)
+        .preferred(self.tasks.default_agent.clone())
+        .modes(self.selection_modes())
+        .mode_hint(strategy.hint(count, &first.display_key))
+        .on_mode(cx.listener(|this, id: &SharedString, _window, cx| {
+            if let Some(choice) = SelectionStrategy::from_label(id) {
+                this.tasks.selection_strategy = choice;
+                cx.notify();
+            }
+        }))
+        .busy(busy.then_some("Creating worktrees…"))
+        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
+            this.quick_start_selection(command.to_string(), cx);
+        }))
+        .on_configure(
+            "Choose projects and branch…",
+            cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                this.open_selection_form(for_configure.clone(), cx);
+            }),
+        )
+        .into_any_element()
+    }
+
+    /// A task row's checkbox: tick it to start it together with others.
+    ///
+    /// `block` says why it cannot be ticked, shown as its tooltip; a blocked
+    /// box stays visible, so the reason is there to find.
+    fn render_checkbox(
+        &self,
+        task_id: &str,
+        checked: bool,
+        block: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let disabled = block.is_some();
+        let tooltip: SharedString = block
+            .unwrap_or_else(|| {
+                if checked {
+                    "Untick".to_string()
+                } else {
+                    "Tick to start together with other tasks".to_string()
+                }
+            })
+            .into();
+        let id = task_id.to_string();
+        div()
+            .id(SharedString::from(format!("task-check-{task_id}")))
+            .flex_shrink_0()
+            .size(px(13.0))
+            .rounded(px(3.0))
+            .border_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .map(|el| {
+                if checked {
+                    el.cursor_pointer()
+                        .bg(rgb(t.button_primary_bg))
+                        .border_color(rgb(t.button_primary_bg))
+                } else if disabled {
+                    el.border_color(with_alpha(t.text_muted, 0.35))
+                } else {
+                    el.cursor_pointer()
+                        .border_color(rgb(t.text_muted))
+                        .hover(|s| s.border_color(rgb(t.border_active)))
+                }
+            })
+            .when(checked, |el| {
+                el.child(
+                    div()
+                        .text_size(ui_text_sm(cx))
+                        .text_color(rgb(t.button_primary_fg))
+                        .child("✓"),
+                )
+            })
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    // Ticking a task is not opening it.
+                    cx.stop_propagation();
+                    if !disabled {
+                        this.toggle_checked(id.clone(), cx);
+                    }
+                }),
+            )
+            .into_any_element()
+    }
+
     /// Sessions in `project_ids`, as a launcher lists them. A project that has
     /// gone since is skipped rather than shown blank.
     fn launcher_sessions(
@@ -2223,10 +2894,16 @@ impl HarnessPane {
                 }
                 None => "pick where to work".to_string(),
             };
-            (
-                "Start work".to_string(),
-                format!("{} · {place}", task.branch_name),
-            )
+            // A coordinator starts on a branch of its own; say which.
+            let branch = if !StartStrategy::offered(self.children_of(&external_id, cx).len())
+                .is_empty()
+                && self.strategy_for(&external_id) == StartStrategy::Coordinated
+            {
+                okena_core::tasks::coordinator_branch(&task.branch_name)
+            } else {
+                task.branch_name.clone()
+            };
+            ("Start work".to_string(), format!("{branch} · {place}"))
         } else {
             ("Work session".to_string(), task.branch_name.clone())
         };
@@ -2614,6 +3291,15 @@ impl HarnessPane {
         let accent = okena_ui::identity_color::identity_color(&row.family, 0.75);
         let selected = self.tasks.selected.as_deref() == Some(task.id.external_id.as_str());
         let select_id = task.id.external_id.clone();
+        let active = is_active(links.agents_running);
+        let checked = !active && self.tasks.checked.contains(&task.id.external_id);
+        // A ticked box can always be unticked; only an unticked one is refused.
+        let block = if checked {
+            None
+        } else {
+            self.check_block(task, active)
+        };
+        let checkbox = self.render_checkbox(&task.id.external_id, checked, block, cx);
         h_flex()
             .id(SharedString::from(format!(
                 "task-row-{}",
@@ -2661,6 +3347,7 @@ impl HarnessPane {
                             .gap(px(8.0))
                             .items_center()
                             .flex_shrink_0()
+                            .child(checkbox)
                             .child(if row.has_children {
                                 let id = task.id.external_id.clone();
                                 div()
@@ -2799,6 +3486,11 @@ impl HarnessPane {
         let work = flow == super::LaunchFlow::Work;
         let selected = form.project_ids.clone();
         let external_id = form.task.id.external_id.clone();
+        // Several ticked tasks rather than one: the same dialog, asking the
+        // selection's split instead of the task's.
+        let picked: Vec<Task> = form.selection.clone();
+        let selecting = !picked.is_empty();
+        let selection_strategy = self.tasks.selection_strategy;
 
         // Worktree children can't parent another worktree, and an agent
         // session is not a repo, so only repos are offered.
@@ -2873,7 +3565,11 @@ impl HarnessPane {
 
         let (heading, launch_title) = match flow {
             super::LaunchFlow::Work => (
-                format!("Start work on {}", form.task.display_key),
+                if selecting {
+                    format!("Start work on {} tasks", picked.len())
+                } else {
+                    format!("Start work on {}", form.task.display_key)
+                },
                 match count {
                     0 => "Pick a project to start".to_string(),
                     1 => "Start in 1 worktree".to_string(),
@@ -2900,14 +3596,45 @@ impl HarnessPane {
 
         // The split, inside the launcher exactly as on the task's own card.
         let children = self.children_of(&external_id, cx).len();
-        let modes = if work {
+        let modes = if selecting {
+            self.selection_modes()
+        } else if work {
             self.strategy_modes(&form.task, children)
         } else {
             Vec::new()
         };
-        let mode_hint = (!modes.is_empty()).then(|| self.strategy_for(&external_id).hint(children));
+        let mode_hint = if selecting {
+            Some(selection_strategy.hint(picked.len(), &form.task.display_key))
+        } else {
+            (!modes.is_empty()).then(|| self.strategy_for(&external_id).hint(children))
+        };
         let for_mode = external_id.clone();
         let task_for_mode = form.task.clone();
+        let subtitle = if selecting {
+            picked
+                .iter()
+                .map(|t| t.display_key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else {
+            form.task.title.clone()
+        };
+        let branch_hint = if self.form_coordinates() {
+            "The coordinator's own branch, used for every selected project. It \
+             makes no changes there, so every task's branch stays free for the \
+             agents it starts."
+                .to_string()
+        } else if selecting {
+            format!(
+                "The branch of {}, the first task, where the agent works. Used for \
+                 every selected project.",
+                form.task.display_key,
+            )
+        } else {
+            "Used for every selected project. The provider's own name keeps its \
+             branch-to-issue link working."
+                .to_string()
+        };
 
         let start_launcher =
             okena_ui::agent_launcher::AgentLauncher::new("sw-launcher", launch_title)
@@ -2917,12 +3644,37 @@ impl HarnessPane {
                 .modes(modes)
                 .when_some(mode_hint, |l, hint| l.mode_hint(hint))
                 .on_mode(cx.listener(move |this, id: &SharedString, _window, cx| {
-                    if let Some(choice) = StartStrategy::from_label(id) {
+                    let was_coordinating = this.form_coordinates();
+                    if selecting {
+                        let Some(choice) = SelectionStrategy::from_label(id) else {
+                            return;
+                        };
+                        this.tasks.selection_strategy = choice;
+                    } else {
+                        let Some(choice) = StartStrategy::from_label(id) else {
+                            return;
+                        };
                         this.tasks.strategy.insert(for_mode.clone(), choice);
-                        // A different split is briefed by a different template.
-                        this.load_brief_source(&task_for_mode, cx);
-                        cx.notify();
                     }
+                    // A coordinator starts on a branch of its own, so the name
+                    // offered follows the mode — unless it was typed over.
+                    let coordinating = this.form_coordinates();
+                    if coordinating != was_coordinating
+                        && let Some(input) = this
+                            .tasks
+                            .start_form
+                            .as_ref()
+                            .map(|f| f.branch_input.clone())
+                    {
+                        let offered = this.launch_branch(&task_for_mode, was_coordinating, cx);
+                        if input.read(cx).value() == offered {
+                            let next = this.launch_branch(&task_for_mode, coordinating, cx);
+                            input.update(cx, |input, cx| input.set_value(next, cx));
+                        }
+                    }
+                    // A different split is briefed by a different template.
+                    this.load_brief_source(&task_for_mode, cx);
+                    cx.notify();
                 }))
                 .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
                     this.confirm_start(command.to_string(), cx);
@@ -2972,7 +3724,7 @@ impl HarnessPane {
                             .child(project_hint),
                     ),
             );
-        if work {
+        if work && !(selecting && selection_strategy == SelectionStrategy::PerTask) {
             body = body.child(
                 v_flex()
                     .gap(px(5.0))
@@ -2993,10 +3745,19 @@ impl HarnessPane {
                         div()
                             .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
-                            .child(
-                                "Used for every selected project. The provider's own \
-                                 name keeps its branch-to-issue link working.",
-                            ),
+                            .child(branch_hint),
+                    ),
+            );
+        } else if selecting {
+            body = body.child(
+                v_flex()
+                    .gap(px(5.0))
+                    .child(self.form_label("Branches", cx))
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("Each task gets its own branch, named after it."),
                     ),
             );
         }
@@ -3046,7 +3807,7 @@ impl HarnessPane {
                                                 .text_ellipsis()
                                                 .text_size(ui_text_ms(cx))
                                                 .text_color(rgb(t.text_muted))
-                                                .child(form.task.title.clone()),
+                                                .child(subtitle),
                                         ),
                                 )
                                 // With the heading, matching the harness forms:
@@ -3106,6 +3867,13 @@ impl HarnessPane {
         // which is exactly when someone reaches for "New task".
         let show_board = has_rows || composing || !self.task_draft_ids(cx).is_empty();
         let loading = self.tasks.loading;
+        // Two or more ticked turns the detail pane into the selection; one
+        // ticked is still just a task you may open.
+        let picked = if show_board {
+            self.checked_tasks(cx)
+        } else {
+            Vec::new()
+        };
 
         let account_label = match &account {
             Some(name) => format!("{} · {name}", self.tasks.provider_display_name),
@@ -3182,6 +3950,8 @@ impl HarnessPane {
                     })
                     .child(if composing {
                         self.render_new_task_form(1.0 - fraction, cx)
+                    } else if picked.len() >= 2 {
+                        self.render_selection_pane(picked, 1.0 - fraction, cx)
                     } else {
                         self.render_task_detail(1.0 - fraction, cx)
                     })
@@ -3409,6 +4179,105 @@ mod section_tests {
     fn the_sort_toggle_returns_to_where_it_started() {
         assert_eq!(TaskSort::Updated.next(), TaskSort::Status);
         assert_eq!(TaskSort::Updated.next().next(), TaskSort::Updated);
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    // Explicit imports: the `gpui::*` glob shadows `#[test]` with `gpui::test`.
+    use super::{Relation, SelectionStrategy, blocking_relative, in_list_order};
+    use std::collections::{HashMap, HashSet};
+
+    fn hierarchy<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        let parents: HashMap<&str, &str> = pairs.iter().copied().collect();
+        move |id| parents.get(id).map(|p| p.to_string())
+    }
+
+    #[test]
+    fn unrelated_tasks_can_be_ticked_together() {
+        let parent_of = hierarchy(&[("a1", "a")]);
+        assert_eq!(blocking_relative("b", ["a", "a1"], parent_of), None);
+    }
+
+    #[test]
+    fn a_ticked_parent_blocks_its_sub_tasks_at_any_depth() {
+        let parent_of = hierarchy(&[("feat", "epic"), ("story", "feat")]);
+        assert_eq!(
+            blocking_relative("story", ["epic"], &parent_of),
+            Some(("epic", Relation::Parent))
+        );
+        assert_eq!(
+            blocking_relative("feat", ["epic"], &parent_of),
+            Some(("epic", Relation::Parent))
+        );
+    }
+
+    #[test]
+    fn a_ticked_sub_task_blocks_its_parent() {
+        let parent_of = hierarchy(&[("feat", "epic"), ("story", "feat")]);
+        assert_eq!(
+            blocking_relative("epic", ["other", "story"], parent_of),
+            Some(("story", Relation::SubTask))
+        );
+    }
+
+    #[test]
+    fn a_task_does_not_block_itself() {
+        // It is in the ticked set when its own box is drawn.
+        let parent_of = hierarchy(&[]);
+        assert_eq!(blocking_relative("a", ["a"], parent_of), None);
+    }
+
+    #[test]
+    fn a_parent_cycle_ends_the_walk() {
+        let parent_of = hierarchy(&[("a", "b"), ("b", "a")]);
+        assert_eq!(
+            blocking_relative("a", ["b"], parent_of),
+            Some(("b", Relation::Parent))
+        );
+        let parent_of = hierarchy(&[("a", "b"), ("b", "a")]);
+        assert_eq!(blocking_relative("c", ["a"], parent_of), None);
+    }
+
+    #[test]
+    fn the_first_ticked_task_is_the_one_highest_in_the_list() {
+        let list: Vec<String> = ["c", "a", "b"].iter().map(|s| s.to_string()).collect();
+        let ticked: HashSet<String> = ["b", "c"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(in_list_order(&list, &ticked), ["c", "b"]);
+    }
+
+    #[test]
+    fn ticked_tasks_the_list_no_longer_shows_follow_in_a_stable_order() {
+        let list: Vec<String> = vec!["a".into()];
+        let ticked: HashSet<String> = ["z", "a", "m"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(in_list_order(&list, &ticked), ["a", "m", "z"]);
+    }
+
+    #[test]
+    fn a_selection_mode_label_reads_back_as_its_strategy() {
+        for strategy in SelectionStrategy::ALL {
+            assert_eq!(
+                SelectionStrategy::from_label(strategy.label()),
+                Some(strategy)
+            );
+        }
+        assert_eq!(SelectionStrategy::from_label("One per sub-task"), None);
+    }
+
+    #[test]
+    fn only_the_coordinator_is_briefed_from_the_selection_template() {
+        assert_eq!(
+            SelectionStrategy::Coordinated.template(),
+            "tasks-coordinate"
+        );
+        assert_eq!(SelectionStrategy::Single.template(), "task-start");
+        assert_eq!(SelectionStrategy::PerTask.template(), "task-start");
+    }
+
+    #[test]
+    fn the_one_per_task_hint_says_how_many_sessions_it_will_make() {
+        let hint = SelectionStrategy::PerTask.hint(3, "QBL-1");
+        assert!(hint.starts_with("3 sessions"), "{hint}");
     }
 }
 

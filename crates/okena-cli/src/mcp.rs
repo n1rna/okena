@@ -529,6 +529,7 @@ fn whoami() -> Result<Value, String> {
         "project_path": session.project.path,
         "branch": session.project.git_status.as_ref().and_then(|g| g.branch.clone()),
         "task": session.project.task_ref,
+        "also_tasks": session.project.also_tasks,
         "agent": session.project.agent,
     }))
 }
@@ -548,6 +549,7 @@ fn list_projects() -> Result<Value, String> {
                 "is_worktree": p.worktree_info.is_some(),
                 "worktree_ids": p.worktree_ids,
                 "task": p.task_ref,
+                "also_tasks": p.also_tasks,
             })
         })
         .collect();
@@ -668,8 +670,8 @@ fn list_subtasks(args: &Value) -> Result<Value, String> {
 /// The group is the point: a coordinating agent decides that two sub-tasks
 /// cannot be tested apart and hands both to one agent. okena starts the
 /// session on the first of them — that is where the branch and worktrees come
-/// from — and the rest reach the agent through the note, because a session
-/// belongs to one task even when the work does not.
+/// from — and links the rest to it too, telling the agent about them in its
+/// note.
 fn start_work(args: &Value) -> Result<Value, String> {
     let tasks: Vec<String> = args
         .get("tasks")

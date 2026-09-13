@@ -257,7 +257,8 @@ putting a file at `templates/<flow>.md`; its frontmatter should say
 | Flow | When | Variables |
 |---|---|---|
 | `task-start` | Starting work on a task, in its worktrees | `key`, `title`, `url`, `branch`, `description`, `projects`, `note` |
-| `task-coordinate` | Splitting a task among sub-agents and starting them | `key`, `title`, `description`, `children`, `projects`, `note` |
+| `task-coordinate` | Splitting a task among sub-agents and starting them, from a `coordinate/…` branch of its own | `key`, `title`, `description`, `branch`, `children`, `projects`, `note` |
+| `tasks-coordinate` | Splitting several hand-picked tasks among agents and starting them, from a `coordinate/…` branch of its own | `key`, `title`, `branch`, `tasks`, `projects`, `note` |
 | `break-down` | Splitting a task into sub-tasks over MCP | `key`, `parent_id`, `title`, `kind`, `url`, `description`, `child_kind` |
 | `task-create` | Drafting a new task | `title`, `kind`, `container`, `parent`, `description` |
 | `spec-draft` | Filling in a scaffolded OpenSpec change | `idea`, `change`, `change_dir`, `root_path`, `store_note`, `references` |
@@ -298,12 +299,14 @@ the partial it picks.
 | `knowledge-commit-store`, `knowledge-commit-project` | Who commits knowledge |
 | `fan-out-note` | Each agent of a fan-out (`{parent}`, `{siblings}`) |
 | `group-note` | An agent given several sub-tasks by a coordinator (`{also}`) |
-| `coordinate-child` | One sub-task in a coordinator's list (`{key}`, `{kind}`, `{title}`, `{summary}`) |
+| `picked-fan-out-note` | Each agent when hand-picked tasks start one per agent (`{siblings}`) |
+| `picked-group-note` | One agent given several hand-picked tasks (`{also}`) |
+| `coordinate-child` | One task in a coordinator's list (`{key}`, `{kind}`, `{title}`, `{summary}`) |
 | `scan-update`, `scan-repair`, `scan-from-docs`, `scan-from-code` | A project scan's starting point (`{manifest}`; `{list}` of problems or docs) |
 
 Some variables are still assembled by okena, because they are lists or
 optional blocks: `store_note`, `references`, `projects`, `note`, `children`,
-`start`.
+`tasks`, `start`.
 Each is either empty or arrives with its own blank line in front, so a template
 can place it on its own line without leaving a hole when it is absent. Their
 words come from the partials above.

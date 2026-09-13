@@ -446,7 +446,7 @@ fn agent_shell(
     branch: &str,
     context: &[(String, String)],
     note: Option<&str>,
-    children: Option<&str>,
+    coordination: Option<&Coordination>,
     prompts: PromptRoot,
 ) -> Option<okena_terminal::shell_config::ShellType> {
     // An explicit override wins, including an explicit empty string, which is
@@ -466,7 +466,7 @@ fn agent_shell(
     // launch this agent, and more specific than any template. Without them the
     // agent used to start on a task having been told nothing at all.
     let mut args: Vec<String> =
-        match task_brief(settings, task, branch, context, note, children, prompts) {
+        match task_brief(settings, task, branch, context, note, coordination, prompts) {
             Some(brief) => super::specs::prompt_args(&command, &brief),
             None => settings
                 .harness
@@ -549,6 +549,7 @@ pub(super) fn start_work(
     coordinate: bool,
     also: Vec<String>,
     siblings: Vec<String>,
+    hand_picked: bool,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -574,35 +575,13 @@ pub(super) fn start_work(
     // client's list may be minutes old, and the branch name is what every
     // worktree — and the provider's branch-to-issue linking — is keyed on.
     //
-    // The one task, by id or display key, rather than the assigned queue: a
-    // sub-task a coordinator just filed has no assignee, and the queue poll is
-    // rate-floored, so two starts back to back would be refused.
-    //
     // Trade-off: unlike the other task actions this read still runs under the
     // workspace lock, because the rest of this function creates worktrees.
     // Moving it onto the blocking pool means splitting start_work into a fetch
     // and an apply step; it is one round trip, so that waits until it shows.
-    let id = okena_core::tasks::TaskId::new(provider.clone(), task_external_id.clone());
-    let task = match p.get_task(&id) {
+    let task = match fetch_task(&*p, &provider, &task_external_id) {
         Ok(task) => task,
-        Err(TaskError::Unsupported { .. }) => {
-            let tasks = match p.list_assigned() {
-                Ok(t) => t,
-                Err(e) => return ActionResult::Err(describe(e)),
-            };
-            match tasks.into_iter().find(|t| {
-                t.id.external_id == task_external_id
-                    || t.display_key.eq_ignore_ascii_case(&task_external_id)
-            }) {
-                Some(t) => t,
-                None => {
-                    return ActionResult::Err(format!(
-                        "task `{task_external_id}` is not in your assigned list"
-                    ));
-                }
-            }
-        }
-        Err(e) => return ActionResult::Err(describe(e)),
+        Err(e) => return ActionResult::Err(e),
     };
 
     // okena's `<kind>/<key>-<title>` name is the default; the user can still
@@ -610,7 +589,17 @@ pub(super) fn start_work(
     let branch = branch_override
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty())
-        .unwrap_or_else(|| p.branch_name(&task));
+        .unwrap_or_else(|| {
+            let own = p.branch_name(&task);
+            // A coordinator makes no changes, so it takes a branch of its own
+            // and leaves every task's — its own task's too — to the agents it
+            // starts. Otherwise the group holding its task could not start.
+            if coordinate {
+                okena_core::tasks::coordinator_branch(&own)
+            } else {
+                own
+            }
+        });
     if branch.is_empty() {
         return ActionResult::Err(format!(
             "could not derive a branch name for {}",
@@ -626,15 +615,53 @@ pub(super) fn start_work(
     // Everything the agent is told beyond its task. The agent-written note
     // arrives as-is — an agent wrote those words. okena's own notes are
     // partials, so how it describes a group or a fan-out is editable.
-    let note = compose_note(note, &also, &siblings, &task, &prompts);
+    //
+    // Every task the session covers beyond its own, read so each is linked
+    // too: a session belongs to every task it works on, not only the one its
+    // branch is named after.
+    let mut also_tasks = Vec::new();
+    for key in &also {
+        match fetch_task(&*p, &provider, key) {
+            Ok(t) => also_tasks.push(t),
+            Err(e) => return ActionResult::Err(e),
+        }
+    }
+    let also_refs: Vec<okena_core::tasks::TaskRef> = also_tasks
+        .iter()
+        .map(okena_core::tasks::TaskRef::from)
+        .collect();
 
-    // A coordinator is told its children. Fetched here rather than handed in
-    // by the client: the provider's list is the authority, and the client's
-    // may be a refresh behind a breakdown that just landed.
-    let children_listed = if coordinate {
+    // A coordinator over picked tasks has them listed in its brief instead:
+    // they are what it splits, not a group it was handed to do.
+    let grouped: &[String] = if coordinate && hand_picked {
+        &[]
+    } else {
+        &also
+    };
+    let note = compose_note(note, grouped, &siblings, hand_picked, &task, &prompts);
+
+    // A coordinator is told what it is splitting: the task's children, or the
+    // tasks picked with it. Fetched here rather than handed in by the client:
+    // the provider is the authority, and the client's list may be a refresh
+    // behind a breakdown that just landed.
+    let coordination = if !coordinate {
+        None
+    } else if hand_picked {
+        if also.is_empty() {
+            return ActionResult::Err(
+                "pick at least two tasks for a coordinator to split".to_string(),
+            );
+        }
+        let picked: Vec<okena_core::tasks::Task> = std::iter::once(task.clone())
+            .chain(also_tasks.iter().cloned())
+            .collect();
+        Some(Coordination::Picked(list_children(&picked, &prompts)))
+    } else {
         let id = okena_core::tasks::TaskId::new(provider.clone(), task.id.external_id.clone());
         match p.list_children(&id) {
-            Ok(children) if !children.is_empty() => Some(list_children(&children, &prompts)),
+            Ok(children) if !children.is_empty() => {
+                Some(Coordination::Children(list_children(&children, &prompts)))
+            }
             Ok(_) => {
                 return ActionResult::Err(format!(
                     "{} has no sub-tasks to split",
@@ -643,8 +670,6 @@ pub(super) fn start_work(
             }
             Err(e) => return ActionResult::Err(describe(e)),
         }
-    } else {
-        None
     };
     let first_project_path = ws
         .project(&project_ids[0])
@@ -689,7 +714,7 @@ pub(super) fn start_work(
                     .map(str::to_string);
                 match new_id {
                     Some(new_id) => {
-                        link_task(ws, &new_id, &task_ref);
+                        link_task(ws, &new_id, &task_ref, &also_refs);
                         created.push(serde_json::json!({
                             "project": project_name,
                             "project_id": new_id,
@@ -750,7 +775,7 @@ pub(super) fn start_work(
         &branch,
         &worktrees,
         note.as_deref(),
-        children_listed.as_deref(),
+        coordination.as_ref(),
         prompts.clone(),
     );
     let mut agent_session: Option<serde_json::Value> = None;
@@ -777,7 +802,7 @@ pub(super) fn start_work(
             cx,
         ) {
             Ok(session_id) => {
-                link_task(ws, &session_id, &task_ref);
+                link_task(ws, &session_id, &task_ref, &also_refs);
                 // Set before spawning: the terminal reads the project's default
                 // shell as it starts.
                 if let Some(shell) = shell
@@ -816,6 +841,7 @@ pub(super) fn start_work(
 
     ActionResult::Ok(Some(serde_json::json!({
         "task": task_ref,
+        "also_tasks": also_refs,
         "branch": branch,
         "created": created,
         "failed": failed,
@@ -823,11 +849,50 @@ pub(super) fn start_work(
     })))
 }
 
+/// Read one task by provider id or display key.
+///
+/// The one task rather than the assigned queue: a sub-task a coordinator just
+/// filed has no assignee, and the queue poll is rate-floored, so two starts
+/// back to back would be refused. The queue is only the fallback for a
+/// provider that cannot read a single task.
+fn fetch_task(
+    p: &dyn TaskProvider,
+    provider: &str,
+    id_or_key: &str,
+) -> Result<okena_core::tasks::Task, String> {
+    let id = okena_core::tasks::TaskId::new(provider, id_or_key);
+    match p.get_task(&id) {
+        Ok(task) => Ok(task),
+        Err(TaskError::Unsupported { .. }) => p
+            .list_assigned()
+            .map_err(describe)?
+            .into_iter()
+            .find(|t| {
+                t.id.external_id == id_or_key || t.display_key.eq_ignore_ascii_case(id_or_key)
+            })
+            .ok_or_else(|| format!("task `{id_or_key}` is not in your assigned list")),
+        Err(e) => Err(describe(e)),
+    }
+}
+
+/// What a coordinating agent is splitting, already listed for its brief.
+enum Coordination {
+    /// A task's sub-tasks.
+    Children(String),
+    /// Tasks the user picked together, the one it starts on first.
+    Picked(String),
+}
+
 /// The note an agent starts with: what an agent wrote, then what okena adds.
+///
+/// `hand_picked` says the user put these tasks together rather than a
+/// coordinator or a parent, which is a different thing to tell an agent: they
+/// share no parent, and nobody decided they cannot be verified apart.
 fn compose_note(
     written: Option<String>,
     also: &[String],
     siblings: &[String],
+    hand_picked: bool,
     task: &okena_core::tasks::Task,
     prompts: &PromptRoot,
 ) -> Option<String> {
@@ -838,21 +903,33 @@ fn compose_note(
         .collect();
     if !also.is_empty() {
         parts.push(briefs::fragment(
-            "group-note",
+            if hand_picked {
+                "picked-group-note"
+            } else {
+                "group-note"
+            },
             prompts.as_ref(),
             &Vars::from([("also", also.join(", "))]),
         ));
     }
     if !siblings.is_empty() {
-        let parent = task
-            .parent_key
-            .clone()
-            .unwrap_or_else(|| "the parent task".to_string());
-        parts.push(briefs::fragment(
-            "fan-out-note",
-            prompts.as_ref(),
-            &Vars::from([("parent", parent), ("siblings", siblings.join(", "))]),
-        ));
+        if hand_picked {
+            parts.push(briefs::fragment(
+                "picked-fan-out-note",
+                prompts.as_ref(),
+                &Vars::from([("siblings", siblings.join(", "))]),
+            ));
+        } else {
+            let parent = task
+                .parent_key
+                .clone()
+                .unwrap_or_else(|| "the parent task".to_string());
+            parts.push(briefs::fragment(
+                "fan-out-note",
+                prompts.as_ref(),
+                &Vars::from([("parent", parent), ("siblings", siblings.join(", "))]),
+            ));
+        }
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
@@ -887,10 +964,17 @@ fn list_children(children: &[okena_core::tasks::Task], prompts: &PromptRoot) -> 
         .join("\n")
 }
 
-/// Point a project at the task it was created for.
-fn link_task(ws: &mut Workspace, project_id: &str, task_ref: &okena_core::tasks::TaskRef) {
+/// Point a project at the task it was created for, and at any others it
+/// covers too.
+fn link_task(
+    ws: &mut Workspace,
+    project_id: &str,
+    task_ref: &okena_core::tasks::TaskRef,
+    also: &[okena_core::tasks::TaskRef],
+) {
     if let Some(project) = ws.data.projects.iter_mut().find(|p| p.id == project_id) {
         project.task_ref = Some(task_ref.clone());
+        project.also_tasks = also.to_vec();
     }
 }
 
@@ -953,6 +1037,7 @@ mod tests {
             coordinate: false,
             also: Vec::new(),
             siblings: Vec::new(),
+            hand_picked: false,
         };
         assert!(execute_task_provider_action(&start).is_none());
         assert!(
@@ -1250,6 +1335,51 @@ pub(super) mod agent_shell_tests {
             }
             other => panic!("expected a custom shell, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_coordinator_over_picked_tasks_is_briefed_with_every_one() {
+        let mut s = AppSettings::default();
+        s.harness.agent_command = Some("codex".into());
+        let picked = super::Coordination::Picked(
+            "- LIN-42 (Task): Ship the harness\n- LIN-7 (Defect): Fix the login".into(),
+        );
+        match agent_shell(&s, None, &task(), "b1", &[], None, Some(&picked), None)
+            .expect("configured")
+        {
+            ShellType::Custom { args, .. } => {
+                let brief = args.first().expect("a brief was passed");
+                for needle in ["LIN-42", "LIN-7", "Fix the login", "b1", "okena_start_work"] {
+                    assert!(
+                        brief.contains(needle),
+                        "brief is missing {needle}:\n{brief}"
+                    );
+                }
+                // Not the sub-task brief: these share no parent.
+                assert!(!brief.contains("sub-tasks"), "{brief}");
+            }
+            other => panic!("expected a custom shell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn picked_tasks_are_not_told_they_share_a_parent() {
+        let fanned = super::compose_note(None, &[], &["LIN-7".into()], true, &task(), &None)
+            .expect("a note");
+        assert!(fanned.contains("LIN-7"), "{fanned}");
+        assert!(!fanned.contains("parent"), "{fanned}");
+
+        let grouped = super::compose_note(None, &["LIN-7".into()], &[], true, &task(), &None)
+            .expect("a note");
+        assert!(grouped.contains("LIN-7"), "{grouped}");
+        assert!(!grouped.contains("verified apart"), "{grouped}");
+    }
+
+    #[test]
+    fn a_coordinators_group_keeps_the_sub_task_wording() {
+        let grouped = super::compose_note(None, &["LIN-7".into()], &[], false, &task(), &None)
+            .expect("a note");
+        assert!(grouped.contains("verified apart"), "{grouped}");
     }
 }
 
@@ -1741,7 +1871,7 @@ fn task_brief(
     branch: &str,
     context: &[(String, String)],
     note: Option<&str>,
-    children: Option<&str>,
+    coordination: Option<&Coordination>,
     prompts: PromptRoot,
 ) -> Option<String> {
     if !settings.harness.agent_args.is_empty() {
@@ -1763,10 +1893,14 @@ fn task_brief(
     vars.insert("note", briefs::block(note.unwrap_or_default()));
     // A coordinator is briefed to split the work rather than do it, so it gets
     // that flow's template — not the work brief with the split tucked in.
-    let flow = match children {
-        Some(listed) => {
-            vars.insert("children", listed.to_string());
+    let flow = match coordination {
+        Some(Coordination::Children(listed)) => {
+            vars.insert("children", listed.clone());
             Flow::TaskCoordinate
+        }
+        Some(Coordination::Picked(listed)) => {
+            vars.insert("tasks", listed.clone());
+            Flow::TasksCoordinate
         }
         None => Flow::TaskStart,
     };

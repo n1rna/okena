@@ -101,6 +101,14 @@ pub(crate) struct TasksState {
     /// Projects the last start worked in, so the next one-click start on
     /// another task lands in the same repos.
     pub(crate) last_projects: Vec<String>,
+    /// Tasks ticked to start together, by provider id.
+    ///
+    /// Beside `selected` rather than replacing it: clicking a row still opens
+    /// one task, and ticking a box is a different question — what to start.
+    pub(crate) checked: std::collections::HashSet<String>,
+    /// How a set of ticked tasks is split among agents. One for the view
+    /// rather than per task: the set is the thing being decided about.
+    pub(crate) selection_strategy: tasks_view::SelectionStrategy,
 }
 
 /// Specs-view state.
@@ -193,6 +201,11 @@ pub(crate) struct StartExtras {
     pub(crate) coordinate: bool,
     /// Other sub-tasks being worked in parallel, for a fan-out.
     pub(crate) siblings: Vec<String>,
+    /// Other tasks this one agent covers too, by key.
+    pub(crate) also: Vec<String>,
+    /// The user picked these tasks together, rather than a parent having them
+    /// as sub-tasks.
+    pub(crate) hand_picked: bool,
 }
 
 /// State of the "Start work" dialog.
@@ -214,6 +227,9 @@ pub(crate) struct StartWorkForm {
     /// Shown instead of an editable goal: the instructions live in knowledge,
     /// and a text box here would be a second, unversioned place to keep them.
     pub(crate) brief_source: Option<String>,
+    /// Every task being started, in list order, when the dialog starts several
+    /// ticked together. `task` is then the first of them. Empty for one task.
+    pub(crate) selection: Vec<Task>,
 }
 
 /// The agents a task's launch dialog can configure.
@@ -375,6 +391,8 @@ impl HarnessPane {
                 sort: tasks_view::TaskSort::default(),
                 default_agent: None,
                 last_projects: Vec::new(),
+                checked: std::collections::HashSet::new(),
+                selection_strategy: tasks_view::SelectionStrategy::default(),
             },
             specs: SpecsState {
                 stores: None,

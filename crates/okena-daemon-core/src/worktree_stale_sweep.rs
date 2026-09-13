@@ -128,6 +128,7 @@ mod tests {
     fn plain_project(id: &str, path: &str) -> ProjectData {
         ProjectData {
             task_ref: None,
+            also_tasks: Vec::new(),
             agent: None,
             spec_change: None,
             knowledge_root: None,

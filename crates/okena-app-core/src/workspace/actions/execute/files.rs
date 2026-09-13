@@ -962,6 +962,7 @@ mod entry_mutation_tests {
     fn workspace_with_project(path: &Path) -> Workspace {
         let project = ProjectData {
             task_ref: None,
+            also_tasks: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,

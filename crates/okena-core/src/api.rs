@@ -391,6 +391,10 @@ pub struct ApiProject {
     /// drifting — it holds no okena-side identifiers to translate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_ref: Option<crate::tasks::TaskRef>,
+    /// Other tasks this project was started for, beside `task_ref`. Crosses
+    /// unchanged, like it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_tasks: Vec<crate::tasks::TaskRef>,
     /// Agent-reported status and produced assets for this session. Like
     /// `task_ref`, it holds no okena-side ids, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1318,7 +1322,8 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
         /// Brief the agent to split the task among sub-agents instead of
-        /// doing it. The daemon fetches the sub-tasks itself.
+        /// doing it. The daemon fetches the sub-tasks itself — or, with
+        /// `hand_picked`, the task and every task in `also`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         coordinate: bool,
         /// Other sub-tasks this agent's group covers, when a coordinator gave
@@ -1329,6 +1334,15 @@ pub enum ActionRequest {
         /// was fanned out. okena words that in the `fan-out-note` partial.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         siblings: Vec<String>,
+        /// The user picked this task, `also` and `siblings` together, rather
+        /// than a coordinator grouping a parent's sub-tasks.
+        ///
+        /// Changes what the agent is told, not what is created: a hand-picked
+        /// group shares no parent and was not grouped because it cannot be
+        /// verified apart, so the `picked-*` partials word it instead, and
+        /// `coordinate` splits the picked tasks rather than sub-tasks.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        hand_picked: bool,
     },
     /// Tear down everything created for a task: the agent session, every
     /// worktree created for it, their terminals and the agent processes inside
@@ -2127,6 +2141,7 @@ mod tests {
                 worktree_info: None,
                 worktree_ids: vec![],
                 task_ref: None,
+                also_tasks: Vec::new(),
                 agent: None,
                 spec_change: None,
                 knowledge_root: None,

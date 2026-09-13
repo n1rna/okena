@@ -193,6 +193,7 @@ pub fn apply_remote_snapshot(
                     // reaches an already-materialized remote project. No id
                     // translation — see the push path below.
                     existing.task_ref = api_project.task_ref.clone();
+                    existing.also_tasks = api_project.also_tasks.clone();
                     existing.spec_change = api_project.spec_change.clone();
                     existing.knowledge_root = api_project.knowledge_root.clone();
                     existing.project_scan = api_project.project_scan.clone();
@@ -266,6 +267,7 @@ pub fn apply_remote_snapshot(
                         // that provider's own issue id, which are the same on
                         // every instance.
                         task_ref: api_project.task_ref.clone(),
+                        also_tasks: api_project.also_tasks.clone(),
                         spec_change: api_project.spec_change.clone(),
                         knowledge_root: api_project.knowledge_root.clone(),
                         project_scan: api_project.project_scan.clone(),
@@ -567,6 +569,7 @@ mod tests {
             worktree_info: None,
             worktree_ids: Vec::new(),
             task_ref: None,
+            also_tasks: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,

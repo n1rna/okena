@@ -23,6 +23,11 @@ pub enum Flow {
     /// them. Distinct from breaking down: the children already exist, and what
     /// is being decided is how many agents the work is worth.
     TaskCoordinate,
+    /// Deciding how a set of tasks the user picked by hand splits among
+    /// agents, and starting them. Apart from [`Flow::TaskCoordinate`] because
+    /// the tasks share no parent, and the coordinator holds the first one's
+    /// branch rather than a parent's.
+    TasksCoordinate,
     /// Drafting a new task from a title and a kind.
     TaskCreate,
     /// Drafting an OpenSpec change into a scaffolded directory.
@@ -48,6 +53,7 @@ impl Flow {
             Flow::TaskStart => "task-start",
             Flow::TaskBreakDown => "break-down",
             Flow::TaskCoordinate => "task-coordinate",
+            Flow::TasksCoordinate => "tasks-coordinate",
             Flow::TaskCreate => "task-create",
             Flow::SpecDraft => "spec-draft",
             Flow::KnowledgeDraft => "knowledge-draft",
@@ -63,6 +69,7 @@ impl Flow {
             Flow::TaskStart => "Start work on a task",
             Flow::TaskBreakDown => "Break a task down",
             Flow::TaskCoordinate => "Split a task among agents",
+            Flow::TasksCoordinate => "Split picked tasks among agents",
             Flow::TaskCreate => "Draft a new task",
             Flow::SpecDraft => "Draft a spec change",
             Flow::KnowledgeDraft => "Write knowledge",
@@ -110,12 +117,17 @@ impl Flow {
                 "key",
                 "title",
                 "description",
+                // The coordinator's own branch, never one of its tasks'.
+                "branch",
                 "children",
                 // Where it and its sub-agents work, and anything okena was
                 // told to pass on.
                 "projects",
                 "note",
             ],
+            // `key` and `title` are the first picked task's; `branch` is the
+            // coordinator's own; `tasks` lists every picked task.
+            Flow::TasksCoordinate => &["key", "title", "branch", "tasks", "projects", "note"],
             Flow::TaskBreakDown => &[
                 "key",
                 // The provider's own id, which is what `okena_create_task`
@@ -158,6 +170,7 @@ impl Flow {
             Flow::TaskStart,
             Flow::TaskBreakDown,
             Flow::TaskCoordinate,
+            Flow::TasksCoordinate,
             Flow::TaskCreate,
             Flow::SpecDraft,
             Flow::KnowledgeDraft,

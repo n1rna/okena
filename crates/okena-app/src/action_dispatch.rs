@@ -926,6 +926,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             coordinate,
             also,
             siblings,
+            hand_picked,
         } => ActionRequest::TaskStartWork {
             provider,
             task_external_id,
@@ -940,6 +941,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             coordinate,
             also,
             siblings,
+            hand_picked,
         },
         ActionRequest::AgentRegisterAsset {
             project_id,
