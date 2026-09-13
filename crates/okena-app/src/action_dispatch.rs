@@ -1085,6 +1085,14 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::ProjectMapRead { project_id } => ActionRequest::ProjectMapRead {
             project_id: s(&project_id),
         },
+        ActionRequest::ProjectsScan {
+            project_ids,
+            agent_command,
+        } => ActionRequest::ProjectsScan {
+            project_ids: project_ids.iter().map(|id| s(id)).collect(),
+            agent_command,
+        },
+        ActionRequest::ProjectLinks => ActionRequest::ProjectLinks,
         // Task actions carry provider ids, not okena ids, so they cross
         // unchanged.
         ActionRequest::TaskContainers { provider } => ActionRequest::TaskContainers { provider },

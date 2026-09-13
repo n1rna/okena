@@ -73,6 +73,9 @@ impl ProjectData {
         if self.knowledge_root.is_some() {
             return Some(AgentRole::Knowledge);
         }
+        if self.project_scan.is_some() {
+            return Some(AgentRole::Scan);
+        }
         // Drafting a ticket, or reshaping one that exists — both are agents
         // working *on* the ticket rather than on the work it describes.
         if self.task_draft.is_some() {
@@ -121,6 +124,8 @@ pub enum AgentRole {
     Spec,
     /// Writing into a knowledge root.
     Knowledge,
+    /// Mapping a repository, or finding the links between several.
+    Scan,
     /// A free-form session against a goal the user typed.
     Custom,
 }
@@ -134,6 +139,7 @@ impl AgentRole {
             AgentRole::Task => "task",
             AgentRole::Spec => "spec",
             AgentRole::Knowledge => "docs",
+            AgentRole::Scan => "scan",
             AgentRole::Custom => "agent",
         }
     }
@@ -148,7 +154,7 @@ impl AgentRole {
         match self {
             AgentRole::Spec => Some(" (spec)"),
             AgentRole::Implement | AgentRole::Task | AgentRole::Custom => Some(" (agent)"),
-            AgentRole::Knowledge => None,
+            AgentRole::Knowledge | AgentRole::Scan => None,
         }
     }
 }
@@ -374,6 +380,13 @@ pub struct ProjectData {
     /// of the Knowledge view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge_root: Option<String>,
+    /// What a scanning session maps, if it is one: the repository's name
+    /// for a map scan, the repositories' names for a links scan.
+    ///
+    /// Stored for the same reason `knowledge_root` is: the goal text of a
+    /// session is not something to recognize it by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_scan: Option<String>,
     /// What a free-form agent session was started to do.
     ///
     /// The third kind of session, alongside task work and spec writing: one the
@@ -521,6 +534,7 @@ mod tests {
             agent: None,
             spec_change: None,
             knowledge_root: None,
+            project_scan: None,
             task_draft: None,
             custom_session: None,
             folder_color: Default::default(),
@@ -2187,6 +2201,7 @@ mod agent_session_tests {
             task_ref: None,
             spec_change: None,
             knowledge_root: None,
+            project_scan: None,
             task_draft: None,
             custom_session: None,
             agent: None,
@@ -2330,12 +2345,26 @@ mod agent_role_tests {
     }
 
     #[test]
+    fn a_scan_session_is_a_scan_agent_not_a_free_form_one() {
+        // It is started as a custom session too; the scan marker is the
+        // narrower one and has to win.
+        let p = project(serde_json::json!({
+            "project_scan": "acme-api",
+            "custom_session": "Map acme-api",
+        }));
+        assert_eq!(p.agent_role(), Some(AgentRole::Scan));
+        assert!(p.is_any_agent_session());
+        assert_eq!(AgentRole::Scan.badge(), "scan");
+    }
+
+    #[test]
     fn every_role_has_a_distinct_badge() {
         let roles = [
             AgentRole::Implement,
             AgentRole::Task,
             AgentRole::Spec,
             AgentRole::Knowledge,
+            AgentRole::Scan,
             AgentRole::Custom,
         ];
         let mut badges: Vec<&str> = roles.iter().map(|r| r.badge()).collect();

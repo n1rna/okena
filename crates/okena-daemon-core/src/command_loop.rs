@@ -3098,6 +3098,30 @@ pub async fn daemon_command_loop(
                 });
                 continue;
             }
+            // ── Project links: every map read off the workspace lock ──
+            RemoteCommand::Action(ActionRequest::ProjectLinks) => {
+                let sources = okena_app_core::workspace::actions::execute::map_sources(
+                    &workspace.lock().data.projects,
+                );
+                let worker_runtime = runtime.clone();
+                let _task = runtime.spawn(async move {
+                    let result = worker_runtime
+                        .spawn_blocking(move || {
+                            okena_app_core::workspace::actions::execute::read_project_links(
+                                &sources,
+                            )
+                            .into_command_result()
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            CommandResult::Err(format!("project links worker failed: {e}"))
+                        });
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
+                    }
+                });
+                continue;
+            }
             // The path-scoped twin runs the same executor and is the one the
             // remote file search fires per keystroke, so it needs the same
             // concurrency cap and drop-cancellation, not a bare offload.
@@ -6735,6 +6759,7 @@ mod tests {
             task_ref: None,
             spec_change: None,
             knowledge_root: None,
+            project_scan: None,
             task_draft: None,
             custom_session: None,
             agent: None,
@@ -7458,6 +7483,7 @@ mod tests {
             task_ref: None,
             spec_change: None,
             knowledge_root: None,
+            project_scan: None,
             task_draft: None,
             custom_session: None,
             agent: None,
@@ -8212,6 +8238,7 @@ mod tests {
             task_ref: None,
             spec_change: None,
             knowledge_root: None,
+            project_scan: None,
             task_draft: None,
             custom_session: None,
             agent: None,
@@ -8460,6 +8487,7 @@ mod tests {
                 task_ref: None,
                 spec_change: None,
                 knowledge_root: None,
+                project_scan: None,
                 task_draft: None,
                 custom_session: None,
                 agent: None,
@@ -10095,6 +10123,7 @@ mod tests {
             task_ref: None,
             spec_change: None,
             knowledge_root: None,
+            project_scan: None,
             task_draft: None,
             custom_session: None,
             agent: None,

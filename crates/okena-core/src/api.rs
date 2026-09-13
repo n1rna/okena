@@ -353,6 +353,10 @@ pub struct ApiProject {
     /// it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge_root: Option<String>,
+    /// What a scanning session maps, if it is one. Mirrors
+    /// `ProjectData::project_scan`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_scan: Option<String>,
     /// The title a task-drafting session is working towards — the user's own
     /// words, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1648,6 +1652,22 @@ pub enum ActionRequest {
     ProjectMapRead {
         project_id: String,
     },
+    /// Open one agent session over several repositories, briefed to find the
+    /// links between them and write each into both projects' maps (ADR-0006).
+    ///
+    /// Refused with fewer than two, or with a worktree or agent session among
+    /// them. The session runs at `settings.harness.agent_root`, else the
+    /// parent folder of the first repository. Nothing is committed.
+    ProjectsScan {
+        project_ids: Vec<String>,
+        /// Override the agent to launch. `None` uses
+        /// `settings.harness.agent_command`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_command: Option<String>,
+    },
+    /// Match links across every repository with a map. Replies with a
+    /// [`crate::project_map::ProjectLinks`].
+    ProjectLinks,
     // ─── Agent reporting (written by agents through okena's MCP server) ───
     /// Record something an agent produced against its session project.
     ///
@@ -2013,6 +2033,7 @@ mod tests {
                 agent: None,
                 spec_change: None,
                 knowledge_root: None,
+                project_scan: None,
                 task_draft: None,
                 custom_session: None,
                 pinned: true,

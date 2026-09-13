@@ -25,6 +25,7 @@ fn make_project(id: &str) -> ProjectData {
         task_ref: None,
         spec_change: None,
         knowledge_root: None,
+        project_scan: None,
         task_draft: None,
         custom_session: None,
         agent: None,

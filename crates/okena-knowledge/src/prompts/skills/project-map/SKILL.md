@@ -114,6 +114,11 @@ infrastructure:
     kind: database
     description: Primary database, owned by this project.
     files: [docker-compose.yml]
+links:
+  - project: accounts
+    direction: uses
+    type: grpc
+    name: acme.accounts.v1.AccountService
 ```
 
 | Field | Required | What to write |
@@ -144,6 +149,10 @@ infrastructure:
 | `infrastructure[].kind` | no | e.g. `database`, `cache`, `bucket`, `cluster` |
 | `infrastructure[].description` | no | One line |
 | `infrastructure[].files` | no | The files that define or configure it |
+| `links[].project` | yes | The other project, by the `project.name` of its map |
+| `links[].direction` | yes | `uses` when this project uses the other, `used_by` when the other uses this one |
+| `links[].type`, `links[].name` | yes | The interface the link runs through, named as under `exposes` and `consumes` |
+| `links[].description` | no | One line |
 
 Every `doc` is a path relative to the knowledge root, to a `.md` file under `docs/`. Every other path is relative to the repository root and never uses `..`.
 
@@ -164,11 +173,18 @@ A link is found only when both projects write the same `type` and `name`. Use th
 
 List each interface once in a list, with every area that uses it in its `areas`.
 
+### Links
+
+`links` records this project's connections to other projects, and every link is written in both projects' maps: `direction: uses` in the map of the project that uses the other, `direction: used_by` in the other's, with the same `type` and `name` in both. `project` names the other project by the `project.name` of its map.
+
+Only add a link when you have seen both ends: the call, dependency or subscription in one repository, and what serves it in the other. When you are mapping a single repository you usually cannot, so leave `links` alone: okena already connects projects whose `consumes` and `exposes` match. A scan over several repositories is where links get written.
+
 ## Before you finish
 
 - Every area and concept id is kebab-case and unique in its list, and every `areas` entry names an area.
 - Every path is relative, and every `doc` points at a doc you wrote under `docs/`.
 - `scanned.commit` is the commit you mapped.
+- Every link you wrote is in both projects' maps, with matching `type` and `name`.
 - The docs and the manifest say the same things.
 
 Then summarise what you mapped, which starting case applied, and anything you were unsure of.

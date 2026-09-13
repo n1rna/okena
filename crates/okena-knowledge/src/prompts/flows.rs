@@ -33,6 +33,9 @@ pub enum Flow {
     AgentSession,
     /// Writing or updating a repository's project map (ADR-0005).
     ProjectScan,
+    /// Finding the links between several repositories and writing each into
+    /// both of their maps (ADR-0006).
+    ProjectsScan,
 }
 
 impl Flow {
@@ -50,6 +53,7 @@ impl Flow {
             Flow::KnowledgeDraft => "knowledge-draft",
             Flow::AgentSession => "agent-session",
             Flow::ProjectScan => "project-scan",
+            Flow::ProjectsScan => "projects-scan",
         }
     }
 
@@ -64,6 +68,7 @@ impl Flow {
             Flow::KnowledgeDraft => "Write knowledge",
             Flow::AgentSession => "Free-form session",
             Flow::ProjectScan => "Map a project",
+            Flow::ProjectsScan => "Link projects",
         }
     }
 
@@ -134,12 +139,16 @@ impl Flow {
             Flow::KnowledgeDraft => &["request", "path", "what", "commit_note"],
             Flow::AgentSession => &["goal", "projects"],
             Flow::ProjectScan => &[
-                "project", "path", // The knowledge root the map goes into.
+                "project", "path",     // The knowledge root the map goes into.
                 "map_root", // Absolute path of the `project-map` SKILL.md to follow.
                 "skill",
                 // The starting point — update, repair, from docs, from code —
                 // worded by the `scan-*` partial okena picked.
                 "start",
+            ],
+            Flow::ProjectsScan => &[
+                // Each repository with its path and where its map is.
+                "projects", "skill",
             ],
         }
     }
@@ -154,6 +163,7 @@ impl Flow {
             Flow::KnowledgeDraft,
             Flow::AgentSession,
             Flow::ProjectScan,
+            Flow::ProjectsScan,
         ]
     }
 

@@ -17,7 +17,7 @@ use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowId, Workspace};
 use gpui::*;
 use okena_core::api::ActionRequest;
-use okena_core::project_map::ProjectMapReport;
+use okena_core::project_map::{ProjectLinks, ProjectMapReport};
 use okena_terminal::TerminalsRegistry;
 use std::time::Duration;
 
@@ -49,6 +49,13 @@ pub struct ProjectInfoPanel {
     scan_error: Option<String>,
     /// What the last scan start did.
     scan_notice: Option<String>,
+    /// Links across every scanned project, as the daemon last matched them.
+    links: Option<ProjectLinks>,
+    links_reading: bool,
+    /// A links scan on its way.
+    links_starting: bool,
+    links_error: Option<String>,
+    links_notice: Option<String>,
 }
 
 impl ProjectInfoPanel {
@@ -67,13 +74,23 @@ impl ProjectInfoPanel {
             scan_starting: false,
             scan_error: None,
             scan_notice: None,
+            links: None,
+            links_reading: false,
+            links_starting: false,
+            links_error: None,
+            links_notice: None,
         };
         panel.refresh_map(cx);
+        panel.refresh_links(cx);
         panel.refresh_default_agent(cx);
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
             loop {
                 smol::Timer::after(MAP_POLL).await;
-                if this.update(cx, |this, cx| this.refresh_map(cx)).is_err() {
+                let polled = this.update(cx, |this, cx| {
+                    this.refresh_map(cx);
+                    this.refresh_links(cx);
+                });
+                if polled.is_err() {
                     break; // The panel was dropped.
                 }
             }
@@ -118,6 +135,89 @@ impl ProjectInfoPanel {
                         Ok(_) => {}
                         Err(e) => log::warn!("[project-info] could not read the project map: {e}"),
                     }
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Read the links across every scanned project. One project's panel shows
+    /// its own side, but a link needs both maps to be matched.
+    fn refresh_links(&mut self, cx: &mut Context<Self>) {
+        if self.links_reading {
+            return;
+        }
+        self.links_reading = true;
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client
+                    .post_action(ActionRequest::ProjectLinks)
+                    .and_then(|v| v.ok_or_else(|| "Missing project links".to_string()))
+                    .and_then(|v| {
+                        serde_json::from_value::<ProjectLinks>(v).map_err(|e| e.to_string())
+                    })
+            })
+            .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.links_reading = false;
+                    match result {
+                        Ok(links) if this.links.as_ref() != Some(&links) => {
+                            this.links = Some(links);
+                            cx.notify();
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::warn!("[project-info] could not read project links: {e}"),
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Start one agent looking for links between `project_ids`, which are the
+    /// daemon's own ids.
+    fn start_links_scan(
+        &mut self,
+        agent: String,
+        project_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.links_starting {
+            return;
+        }
+        self.links_starting = true;
+        self.links_error = None;
+        self.links_notice = None;
+        cx.notify();
+
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client
+                    .post_action(ActionRequest::ProjectsScan {
+                        project_ids,
+                        agent_command: Some(agent),
+                    })
+                    .and_then(|v| v.ok_or_else(|| "Missing links scan result".to_string()))
+            })
+            .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.links_starting = false;
+                    match result {
+                        Ok(v) => {
+                            let name = v
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("the session");
+                            this.links_notice =
+                                Some(format!("Started {name} — it is in the sidebar."));
+                        }
+                        Err(e) => this.links_error = Some(e),
+                    }
+                    cx.notify();
                 });
             });
         })

@@ -264,6 +264,7 @@ putting a file at `templates/<flow>.md`; its frontmatter should say
 | `knowledge-draft` | Adding to or updating a knowledge root | `request`, `path`, `what`, `commit_note` |
 | `agent-session` | A free-form session against a goal you typed | `goal`, `projects` |
 | `project-scan` | Writing or updating a repository's [project map](project-map.md#scanning) | `project`, `path`, `map_root`, `skill`, `start` |
+| `projects-scan` | Finding [links](project-map.md#scanning-links) between repositories | `projects`, `skill` |
 
 ### Template syntax
 

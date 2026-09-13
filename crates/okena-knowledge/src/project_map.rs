@@ -291,6 +291,39 @@ pub fn validate(map: &ProjectMap) -> Vec<KnowledgeError> {
         }
     }
 
+    let mut seen = BTreeSet::new();
+    for (i, link) in map.links.iter().enumerate() {
+        let at = format!("links[{i}]");
+        check.required(&format!("{at}.project"), &link.project);
+        check.required(&format!("{at}.name"), &link.name);
+        let project = link.project.trim();
+        let name = link.name.trim();
+        if project.is_empty() || name.is_empty() {
+            continue;
+        }
+        if project == map.project.name.trim() {
+            check.push(
+                KnowledgeError::new(
+                    "project_map_self_link",
+                    format!("`{at}` links {project} to itself."),
+                )
+                .with_fix("Name the other project in `project`, by the `project.name` of its map."),
+            );
+        }
+        if !seen.insert((project, link.direction, link.kind, name)) {
+            check.push(
+                KnowledgeError::new(
+                    "project_map_duplicate_link",
+                    format!(
+                        "`links` lists the link to {project} through {} `{name}` more than once.",
+                        link.kind.id()
+                    ),
+                )
+                .with_fix("List each link once."),
+            );
+        }
+    }
+
     check.problems
 }
 
@@ -842,6 +875,50 @@ infrastructure:
         assert_eq!(
             load_for_repo(repo).problem().map(|d| d.code.as_str()),
             Some("project_config_invalid")
+        );
+    }
+
+    #[test]
+    fn links() {
+        let map = parsed(
+            "links:
+  - project: acme-billing
+    direction: uses
+    type: topic
+    name: billing.invoice-issued
+    description: Emails each issued invoice.
+  - project: web
+    direction: used_by
+    type: http
+    name: api.acme.com/v1
+",
+        );
+        assert_eq!(map.links.len(), 2);
+        assert_eq!(map.links[0].project, "acme-billing");
+        assert_eq!(
+            map.links[0].direction,
+            okena_core::project_map::LinkDirection::Uses
+        );
+        assert_eq!(map.links[1].kind, InterfaceKind::Http);
+
+        assert_eq!(
+            codes(&manifest(
+                "links:\n  - project: web\n    direction: sideways\n    type: http\n    name: x\n"
+            )),
+            ["project_map_invalid"],
+            "an unknown direction"
+        );
+        assert_eq!(
+            codes(&manifest(
+                "links:\n  - project: api\n    direction: uses\n    type: http\n    name: x\n"
+            )),
+            ["project_map_self_link"]
+        );
+        assert_eq!(
+            codes(&manifest(
+                "links:\n  - project: web\n    direction: uses\n    type: http\n    name: x\n  - project: web\n    direction: uses\n    type: http\n    name: x\n"
+            )),
+            ["project_map_duplicate_link"]
         );
     }
 

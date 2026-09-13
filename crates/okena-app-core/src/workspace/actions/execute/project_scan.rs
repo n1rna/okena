@@ -87,6 +87,7 @@ pub(super) fn scan(
     // out of project and knowledge discovery from the first snapshot.
     if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id) {
         p.custom_session = Some(format!("Map {name}"));
+        p.project_scan = Some(name.clone());
         p.default_shell = Some(shell);
     }
     if let ActionResult::Err(e) = super::spawn_uninitialized_terminals(
@@ -111,7 +112,7 @@ pub(super) fn scan(
 
 /// Only a repository is mapped: a worktree is a checkout of one, and the map
 /// is committed in the repository.
-fn scannable(project: &ProjectData) -> Result<(), String> {
+pub(super) fn scannable(project: &ProjectData) -> Result<(), String> {
     if project.worktree_info.is_some() {
         return Err(format!(
             "`{}` is a worktree — scan the repository it was created from, where the map is committed",
@@ -132,7 +133,7 @@ fn scannable(project: &ProjectData) -> Result<(), String> {
 ///
 /// A path rather than the text inlined, so the agent reads the skill as the
 /// file it is, and a team can open the exact file its scans follow.
-fn skill_file(prompts: &PromptRoot, defaults_dir: &Path) -> Result<PathBuf, String> {
+pub(super) fn skill_file(prompts: &PromptRoot, defaults_dir: &Path) -> Result<PathBuf, String> {
     let root = prompts
         .as_ref()
         .map(|(key, path)| (key.as_str(), path.as_path()));

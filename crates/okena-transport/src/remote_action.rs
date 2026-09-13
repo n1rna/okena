@@ -91,7 +91,11 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // Same again: a scan creates a session project, runs its hooks, and
         // launches an agent. Reading a map stays in the fast bucket — one
         // small file.
-        ActionRequest::ProjectScan { .. } => ActionClientKind::LongMutation,
+        ActionRequest::ProjectScan { .. } | ActionRequest::ProjectsScan { .. } => {
+            ActionClientKind::LongMutation
+        }
+        // Reads the map of every repository okena has open.
+        ActionRequest::ProjectLinks => ActionClientKind::Search,
         // A listing runs `git status` in every store, and a tree reads the
         // head of every entry: more than the fast bucket allows on a large
         // store.

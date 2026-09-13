@@ -42,4 +42,6 @@ Architecture and build rules live next to the code, not here:
   exposes and consumes, as docs plus a validated `project-map.yaml` written by
   an agent ([ADR-0005](decisions/0005-project-maps.md),
   [reference](reference/project-map.md)), scanned from and shown in a
-  repository's project info panel. Next: links between projects.
+  repository's project info panel, and linked to each other on both sides
+  ([ADR-0006](decisions/0006-project-links-on-both-sides.md)). Next: the
+  cross-project view.

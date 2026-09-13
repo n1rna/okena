@@ -15,6 +15,7 @@ mod files;
 mod git;
 mod knowledge;
 mod project;
+mod project_links;
 mod project_scan;
 // Public so the Agents view can tell whether a session was handed okena's
 // MCP config, rather than guessing from the agent's name.
@@ -46,6 +47,7 @@ pub use knowledge::{execute_knowledge_action, knowledge_project_sources};
 pub use project::{
     MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
 };
+pub use project_links::{MapSource, map_sources, read_project_links};
 pub use project_scan::read_project_map;
 pub use specs::{execute_spec_git_action, spec_sources};
 
@@ -849,6 +851,23 @@ pub fn execute_action(
             let path = ws.project(&project_id).map(|p| p.path.clone());
             project_scan::read_project_map(path.as_deref(), &project_id)
         }
+        ActionRequest::ProjectsScan {
+            project_ids,
+            agent_command,
+        } => project_links::scan_links(
+            ws,
+            window_id,
+            project_ids,
+            agent_command,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        // Off the lock in the daemon, like the map read.
+        ActionRequest::ProjectLinks => {
+            project_links::read_project_links(&project_links::map_sources(&ws.data.projects))
+        }
         ActionRequest::TasksAuthStatus => tasks::auth_status(),
         ActionRequest::TasksConnectApiKey {
             provider,
@@ -1639,6 +1658,7 @@ mod reconnect_shell_tests {
             task_ref: None,
             spec_change: None,
             knowledge_root: None,
+            project_scan: None,
             task_draft: None,
             custom_session: None,
             agent: None,

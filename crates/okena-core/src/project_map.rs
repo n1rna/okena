@@ -42,6 +42,9 @@ pub struct ProjectMap {
     pub ci: Vec<Pipeline>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub infrastructure: Vec<InfraResource>,
+    /// Links to other projects, written on both sides of each (ADR-0006).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
 }
 
 impl ProjectMap {
@@ -215,6 +218,159 @@ pub struct InfraResource {
     pub files: Vec<String>,
 }
 
+/// Which way a link points, seen from the manifest it is written in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkDirection {
+    /// This project uses the other one.
+    Uses,
+    /// The other project uses this one.
+    UsedBy,
+}
+
+impl LinkDirection {
+    /// The `direction:` value in a manifest.
+    pub const fn id(self) -> &'static str {
+        match self {
+            LinkDirection::Uses => "uses",
+            LinkDirection::UsedBy => "used_by",
+        }
+    }
+}
+
+/// A link to another project, as one of its two manifests records it.
+///
+/// Written on both sides (ADR-0006): `uses` in the map of the project that
+/// uses the other, `used_by` in the other's, with the same `type` and `name`,
+/// so each project's map says on its own what it is connected to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Link {
+    /// The other project, by the `project.name` of its map.
+    pub project: String,
+    pub direction: LinkDirection,
+    #[serde(rename = "type")]
+    pub kind: InterfaceKind,
+    /// The interface the link runs through, named as its provider publishes it.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Where okena learned of a link between two projects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkSource {
+    /// One project's `consumes` matches another's `exposes`, and neither map
+    /// lists the link.
+    Matched,
+    /// Matched, and listed under `links`.
+    Confirmed,
+    /// Listed under `links` with no matching `exposes` and `consumes` —
+    /// typically written by a multi-project scan.
+    FoundByScan,
+}
+
+impl LinkSource {
+    pub const fn label(self) -> &'static str {
+        match self {
+            LinkSource::Matched => "matched",
+            LinkSource::Confirmed => "confirmed",
+            LinkSource::FoundByScan => "found by scan",
+        }
+    }
+}
+
+/// Whether a project has a map to read links from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MapStatus {
+    NotScanned,
+    Scanned,
+    Invalid,
+}
+
+impl From<&ProjectMapState> for MapStatus {
+    fn from(state: &ProjectMapState) -> Self {
+        match state {
+            ProjectMapState::NotScanned => MapStatus::NotScanned,
+            ProjectMapState::Scanned { .. } => MapStatus::Scanned,
+            ProjectMapState::Invalid { .. } => MapStatus::Invalid,
+        }
+    }
+}
+
+/// One okena project, as the link matcher saw it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedProject {
+    pub project_id: String,
+    /// The okena project's name.
+    pub name: String,
+    pub status: MapStatus,
+    /// Its map's `project.name`, which other maps' links name it by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_name: Option<String>,
+}
+
+/// `consumer` uses `provider` through one interface. Both are okena project
+/// ids.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectLink {
+    pub consumer: String,
+    pub provider: String,
+    #[serde(rename = "type")]
+    pub kind: InterfaceKind,
+    pub name: String,
+    pub source: LinkSource,
+    /// The one project whose map lists the link, when only one does. A link
+    /// belongs in both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed_only_by: Option<String>,
+}
+
+/// Something a project consumes that no scanned project exposes — often a
+/// project not scanned yet rather than a mistake.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnmatchedConsume {
+    pub project: String,
+    pub interface: Interface,
+}
+
+/// A `links` entry naming no scanned project.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnresolvedLink {
+    pub project: String,
+    pub link: Link,
+}
+
+/// The links between every scanned project okena knows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectLinks {
+    #[serde(default)]
+    pub projects: Vec<LinkedProject>,
+    #[serde(default)]
+    pub links: Vec<ProjectLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmatched: Vec<UnmatchedConsume>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<UnresolvedLink>,
+}
+
+impl ProjectLinks {
+    pub fn project(&self, id: &str) -> Option<&LinkedProject> {
+        self.projects.iter().find(|p| p.project_id == id)
+    }
+
+    /// Links on which project `id` uses another.
+    pub fn uses<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a ProjectLink> {
+        self.links.iter().filter(move |l| l.consumer == id)
+    }
+
+    /// Links on which another project uses project `id`.
+    pub fn used_by<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a ProjectLink> {
+        self.links.iter().filter(move |l| l.provider == id)
+    }
+}
+
 /// What reading a project's map found.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -314,7 +470,50 @@ mod tests {
                 description: None,
                 files: Vec::new(),
             }],
+            links: vec![Link {
+                project: "accounts".into(),
+                direction: LinkDirection::Uses,
+                kind: InterfaceKind::Grpc,
+                name: "acme.accounts.v1.AccountService".into(),
+                description: None,
+            }],
         }
+    }
+
+    #[test]
+    fn links_round_trip_and_answer_by_side() {
+        let links = ProjectLinks {
+            projects: vec![LinkedProject {
+                project_id: "p1".into(),
+                name: "api".into(),
+                status: MapStatus::Scanned,
+                map_name: Some("api".into()),
+            }],
+            links: vec![ProjectLink {
+                consumer: "p1".into(),
+                provider: "p2".into(),
+                kind: InterfaceKind::Topic,
+                name: "billing.invoice-issued".into(),
+                source: LinkSource::FoundByScan,
+                listed_only_by: Some("p1".into()),
+            }],
+            unmatched: Vec::new(),
+            unresolved: Vec::new(),
+        };
+        let json = serde_json::to_value(&links).expect("json");
+        assert_eq!(json["links"][0]["type"], "topic");
+        assert_eq!(json["links"][0]["source"], "found_by_scan");
+        assert_eq!(
+            serde_json::from_value::<ProjectLinks>(json).expect("decode"),
+            links
+        );
+        assert_eq!(links.uses("p1").count(), 1);
+        assert_eq!(links.used_by("p2").count(), 1);
+        assert_eq!(links.used_by("p1").count(), 0);
+        assert_eq!(
+            serde_json::to_value(LinkDirection::UsedBy).expect("json"),
+            "used_by"
+        );
     }
 
     #[test]
