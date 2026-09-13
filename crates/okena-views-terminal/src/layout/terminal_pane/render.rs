@@ -103,11 +103,21 @@ impl<D: ActionDispatch + Send + Sync> Render for TerminalPane<D> {
         self.was_focused = is_focused;
 
         let show_focused_border = terminal_view_settings(cx).show_focused_border;
+        // A terminal running an agent is waiting when the daemon says so; a
+        // plain shell when the idle loop does.
+        let agent_activity = self.terminal_id.as_ref().and_then(|tid| {
+            self.workspace
+                .read(cx)
+                .agent_activity(&self.project_id, tid)
+        });
         let is_waiting = !is_focused
-            && self
-                .terminal
-                .as_ref()
-                .is_some_and(|t| t.is_waiting_for_input());
+            && match agent_activity {
+                Some(activity) => activity.is_idle(),
+                None => self
+                    .terminal
+                    .as_ref()
+                    .is_some_and(|t| t.is_waiting_for_input()),
+            };
         let show_border =
             (is_focused && show_focused_border) || has_bell || has_notification || is_waiting;
         // OSC 9/777 notifications share the bell's attention color.

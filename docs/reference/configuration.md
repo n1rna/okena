@@ -97,7 +97,7 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `default_shell` | string | `"Default"` | Shell for new terminals. `"Default"` uses the system shell. On Linux/macOS you can also use `"Bash"`, `"Zsh"`, `"Fish"`, etc. |
 | `show_shell_selector` | bool | `false` | Show shell picker in the terminal header |
 | `auto_hide_single_terminal_header` | bool | `false` | Hide the 28px terminal header for standalone terminals. Its actions remain available from the owning project's focused-terminal menu. Multi-tab headers remain visible. |
-| `idle_timeout_secs` | int | `0` | Seconds before a terminal is considered idle (0 = disabled) |
+| `idle_timeout_secs` | int | `0` | Seconds before a terminal is considered idle (0 = disabled). Plain shells only: a terminal running an agent shows working, waiting or needs input from the agent's own signals, decided by the daemon. |
 | `terminal_option_as_meta` | bool | `false` | macOS only: Option+key sends the Meta escape prefix (`ESC` + character) instead of composing a character (Option+B is `∫`). No effect on Linux/Windows, where Alt already encodes Meta. |
 
 #### Session Backend

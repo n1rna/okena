@@ -270,6 +270,11 @@ pub struct AgentSessionState {
     /// What it suggests you tell it next.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<AgentSuggestion>,
+    /// Unix millis the daemon received the report. Input reaching the agent's
+    /// terminal after this outdates the report. `None` for a report stored
+    /// before reports were stamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_at: Option<u64>,
     /// What the agent registered over MCP. Branches and PRs okena detects are
     /// not stored here — see `crate::session_assets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

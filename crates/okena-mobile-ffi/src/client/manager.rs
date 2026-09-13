@@ -836,6 +836,7 @@ mod tests {
             custom_session: None,
             agent_purpose: None,
             agent: None,
+            agent_activity: Default::default(),
             pinned: false,
             last_activity_at: None,
             default_shell: None,

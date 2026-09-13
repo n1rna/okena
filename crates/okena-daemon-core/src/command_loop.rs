@@ -2857,6 +2857,7 @@ pub async fn daemon_command_loop(
     mut daemon_config: DaemonConfig,
     deadlines: SoftCloseDeadlines,
     git_poll_trigger_tx: tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
+    agent_activity: Arc<crate::agent_activity::AgentActivityTracker>,
 ) {
     // Single dormant "main" FocusManager. The loop is single-threaded, so it
     // owns the FM directly instead of resolving a per-window entity like the
@@ -3392,6 +3393,14 @@ pub async fn daemon_command_loop(
                     }
 
                     // ── Soft-close: undo (restore the ejected pane) ──────────────
+                    // ── Agent hook events ────────────────────────────────────────
+                    // Runtime state kept beside the PTYs rather than workspace
+                    // data; the activity poll publishes the result.
+                    ActionRequest::AgentHookEvent { terminal_id, event } => {
+                        agent_activity.record_hook_event(&terminal_id, event);
+                        CommandResult::Ok(None)
+                    }
+
                     ActionRequest::UndoSoftClose { terminal_id } => {
                         let mut cx =
                             DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
@@ -4537,6 +4546,7 @@ pub async fn daemon_command_loop(
                     &services_by_project,
                     hidden_project_ids,
                     &size_map,
+                    &agent_activity.activities(),
                     windows,
                     hooks,
                 );
@@ -5095,6 +5105,7 @@ mod tests {
         service_tick: watch::Sender<u64>,
         settings: Arc<Mutex<AppSettings>>,
         daemon_config: DaemonConfig,
+        agent_activity: Arc<crate::agent_activity::AgentActivityTracker>,
     }
 
     impl Harness {
@@ -5116,6 +5127,7 @@ mod tests {
                 self.daemon_config,
                 Arc::new(Mutex::new(HashMap::new())),
                 tokio::sync::mpsc::unbounded_channel().0,
+                self.agent_activity,
             ))
         }
     }
@@ -5145,6 +5157,7 @@ mod tests {
             service_tick,
             settings,
             daemon_config,
+            agent_activity: Default::default(),
         }
     }
 
@@ -6501,6 +6514,101 @@ mod tests {
                 assert!(resp.windows[0].active);
 
                 // Drop the sender so `recv` errors and the loop task joins.
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
+    /// Claude Code's hook events reach the daemon through the action surface
+    /// and show in the next snapshot, for an agent no pane has open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claude_hook_events_reach_the_snapshot() {
+        use okena_core::agent_activity::{AgentActivity, AgentHookEvent};
+
+        let h = harness();
+        let mut project: okena_workspace::state::ProjectData =
+            serde_json::from_value(serde_json::json!({
+                "id": "s1", "name": "session", "path": "/tmp", "custom_session": "go",
+            }))
+            .expect("project");
+        project.layout = Some(LayoutNode::Terminal {
+            terminal_id: Some("t1".into()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Custom {
+                path: "claude".into(),
+                args: Vec::new(),
+            },
+            zoom_level: 1.0,
+        });
+        {
+            let mut ws = h.workspace.lock();
+            ws.data.project_order.push("s1".into());
+            ws.data.projects.push(project);
+        }
+        h.terminals.lock().insert(
+            "t1".into(),
+            Arc::new(Terminal::new(
+                "t1".into(),
+                TerminalSize {
+                    cols: 80,
+                    rows: 24,
+                    cell_width: 8.0,
+                    cell_height: 16.0,
+                },
+                Arc::new(crate::test_support::StubTransport),
+                "/tmp".into(),
+            )),
+        );
+        let tracker = h.agent_activity.clone();
+        let workspace = h.workspace.clone();
+        let terminals = h.terminals.clone();
+        let workspace_tick = h.workspace_tick.clone();
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                for (event, expected) in [
+                    (AgentHookEvent::TurnStarted, AgentActivity::Working),
+                    (AgentHookEvent::NeedsInput, AgentActivity::NeedsInput),
+                    (AgentHookEvent::TurnEnded, AgentActivity::Waiting),
+                ] {
+                    let result = request(
+                        &bridge_tx,
+                        RemoteCommand::Action(ActionRequest::AgentHookEvent {
+                            terminal_id: "t1".into(),
+                            event,
+                        }),
+                        "AgentHookEvent",
+                    )
+                    .await;
+                    assert!(matches!(result, CommandResult::Ok(None)), "{result:?}");
+
+                    // What the activity poll does on its next tick.
+                    let mut cx = DaemonWorkspaceCx::new(&workspace_tick, &None, &None);
+                    tracker.refresh(&workspace, &terminals, &mut cx);
+
+                    let value = match request(&bridge_tx, RemoteCommand::GetState, "GetState").await
+                    {
+                        CommandResult::Ok(Some(v)) => v,
+                        other => panic!("expected Ok(Some), got {other:?}"),
+                    };
+                    let resp: StateResponse = serde_json::from_value(value).expect("state");
+                    let project = resp
+                        .projects
+                        .iter()
+                        .find(|p| p.id == "s1")
+                        .expect("session in snapshot");
+                    assert_eq!(
+                        project.agent_activity.get("t1"),
+                        Some(&expected),
+                        "after {event:?}"
+                    );
+                }
+
                 drop(bridge_tx);
                 handle.await.expect("loop task joins");
             })

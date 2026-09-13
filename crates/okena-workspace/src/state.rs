@@ -1923,6 +1923,20 @@ impl Workspace {
         self.remote_sync.snapshot(project_id)
     }
 
+    /// What the agent in `terminal_id` is doing, as the daemon decided it from
+    /// the agent's own signals. `None` when the terminal runs no agent, or its
+    /// daemon predates agent activity.
+    pub fn agent_activity(
+        &self,
+        project_id: &str,
+        terminal_id: &str,
+    ) -> Option<okena_core::agent_activity::AgentActivity> {
+        self.remote_snapshot(project_id)?
+            .agent_activity
+            .get(terminal_id)
+            .copied()
+    }
+
     /// Update the saved service terminal IDs for a project.
     /// Called by the ServiceManager observer to persist terminal IDs across restarts.
     pub fn sync_service_terminals(
@@ -4126,6 +4140,7 @@ mod gpui_tests {
                     task_ref: None,
                     also_tasks: Vec::new(),
                     agent: None,
+                    agent_activity: Default::default(),
                     spec_change: None,
                     knowledge_root: None,
                     project_scan: None,

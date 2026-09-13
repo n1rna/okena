@@ -399,6 +399,11 @@ pub struct ApiProject {
     /// `task_ref`, it holds no okena-side ids, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<crate::harness::AgentSessionState>,
+    /// What the agent in each of this project's terminals is doing, keyed by
+    /// terminal id. Decided by the daemon from the agent's own signals; only
+    /// terminals running an agent appear.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub agent_activity: std::collections::HashMap<String, crate::agent_activity::AgentActivity>,
     /// The OpenSpec change a spec session is drafting. A directory name, which
     /// means the same thing on either side, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1859,6 +1864,13 @@ pub enum ActionRequest {
         project_id: String,
         text: String,
     },
+    /// A lifecycle event an agent fired about itself through its native hooks
+    /// (`okena agent-event`). Keyed by terminal, which the hook reads from its
+    /// own `$OKENA_TERMINAL_ID`, so an agent can only speak for itself.
+    AgentHookEvent {
+        terminal_id: String,
+        event: crate::agent_activity::AgentHookEvent,
+    },
     /// Restart a session's agent and resume its conversation.
     ///
     /// Distinct from closing the terminal and creating a new one, which starts
@@ -2185,6 +2197,7 @@ mod tests {
                 task_ref: None,
                 also_tasks: Vec::new(),
                 agent: None,
+                agent_activity: Default::default(),
                 spec_change: None,
                 knowledge_root: None,
                 project_scan: None,

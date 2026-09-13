@@ -1334,7 +1334,8 @@ pub(super) mod agent_shell_tests {
         s.harness.agent_command = Some("codex".into());
         s.harness.agent_args = vec!["--task".into(), "{key}".into()];
         match agent_shell(&s, None, &task(), "b1", &[], None, None, None).expect("configured") {
-            ShellType::Custom { args, .. } => assert_eq!(args, ["--task", "LIN-42"]),
+            // Exactly them, ahead of the flags that wire okena in.
+            ShellType::Custom { args, .. } => assert_eq!(args[..2], ["--task", "LIN-42"]),
             other => panic!("expected a custom shell, got {other:?}"),
         }
     }
@@ -1479,6 +1480,7 @@ pub(super) fn report_status(
     };
     let agent = p.agent.get_or_insert_with(Default::default);
     apply_report(agent, &status, reported, question, suggestions);
+    agent.reported_at = Some(now_millis());
     ws.notify_data(cx);
     ActionResult::Ok(Some(serde_json::json!({ "project_id": project_id })))
 }

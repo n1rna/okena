@@ -176,10 +176,14 @@ impl Terminal {
         self.content_generation.load(Ordering::Relaxed)
     }
 
-    fn mark_user_input(&self, has_payload: bool) {
+    fn mark_user_input(&self, payload: &[u8]) {
         self.had_user_input.store(true, Ordering::Relaxed);
-        if !has_payload {
+        if payload.is_empty() {
             return;
+        }
+        if super::idle::is_deliberate_input(payload) {
+            self.last_input_at
+                .store(super::idle::unix_millis(), Ordering::Relaxed);
         }
 
         // Synchronize with remote enqueue so output already buffered before the
@@ -229,7 +233,7 @@ impl Terminal {
     }
 
     fn send_input_inner(&self, input: &str, viewer: Option<u64>) {
-        self.mark_user_input(!input.is_empty());
+        self.mark_user_input(input.as_bytes());
         self.scroll_to_bottom();
         if let Some(viewer) = viewer {
             okena_core::latency_probe::client_start(&self.terminal_id, viewer, input.as_bytes());
@@ -242,7 +246,7 @@ impl Terminal {
     /// terminal application has enabled bracketed paste mode (DECSET 2004).
     /// This prevents shells from executing each line of a multi-line paste individually.
     pub fn send_paste(&self, text: &str) {
-        self.mark_user_input(!text.is_empty());
+        self.mark_user_input(text.as_bytes());
         self.scroll_to_bottom();
 
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
@@ -267,7 +271,7 @@ impl Terminal {
     /// as literal text — annoying but recoverable, vs. multi-line content
     /// executing each line as a separate command.
     pub fn send_paste_force_bracketed(&self, text: &str) {
-        self.mark_user_input(!text.is_empty());
+        self.mark_user_input(text.as_bytes());
         self.scroll_to_bottom();
         self.write_bracketed_paste(text);
     }
@@ -301,7 +305,7 @@ impl Terminal {
     }
 
     fn send_bytes_inner(&self, data: &[u8], viewer: Option<u64>) {
-        self.mark_user_input(!data.is_empty());
+        self.mark_user_input(data);
         self.scroll_to_bottom();
         if let Some(viewer) = viewer {
             okena_core::latency_probe::client_start(&self.terminal_id, viewer, data);

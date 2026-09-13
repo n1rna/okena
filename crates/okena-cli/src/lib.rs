@@ -1,3 +1,4 @@
+pub mod agent_event;
 pub mod commands;
 pub mod mcp;
 pub mod parser;
@@ -92,6 +93,7 @@ fn dispatch(cli: Cli) -> i32 {
         Command::Health { json } => commands::cli_health(json),
         Command::State => commands::cli_state(),
         Command::Mcp => mcp::run(),
+        Command::AgentEvent { signal, payload } => agent_event::run(&signal, payload.as_deref()),
         Command::Action { json } => commands::cli_action(&json),
         Command::Services { project, json } => commands::cli_services(project.as_deref(), json),
         Command::Service { cmd } => match cmd {

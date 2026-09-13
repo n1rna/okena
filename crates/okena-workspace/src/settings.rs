@@ -94,11 +94,14 @@ pub struct HarnessConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_args: Vec<String>,
 
-    /// Point launched agents at okena's own MCP server automatically.
+    /// Point launched agents at okena's own MCP server automatically, and hand
+    /// them the hooks that report their turns (Claude Code's `--settings`
+    /// hooks, Codex's `notify`).
     ///
     /// On by default: the whole value of the harness is that an agent can ask
     /// okena what task it is on and report back, and requiring every user to
-    /// hand-edit an MCP config first would mean almost nobody does.
+    /// hand-edit an MCP config first would mean almost nobody does. Off, an
+    /// agent's state is read from its terminal alone.
     #[serde(default = "default_true")]
     pub agent_mcp_injection: bool,
 

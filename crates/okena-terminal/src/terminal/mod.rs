@@ -344,6 +344,12 @@ pub struct Terminal {
     /// terminals as idle before the user has interacted.
     pub(super) had_user_input: AtomicBool,
 
+    /// Unix millis of the last input someone deliberately sent — typing,
+    /// pasting, an instruction from the agent panel — or `0` if none has.
+    /// Focus and mouse reports don't count. Read by the daemon to outdate what
+    /// an agent said before it was answered.
+    pub(super) last_input_at: AtomicU64,
+
     /// The exact `TermConfig` handed to `Term::new`, kept so
     /// `set_scrollback_lines` can re-apply an otherwise-identical config with
     /// only `scrolling_history` changed. alacritty's `Term::set_options`
@@ -494,6 +500,7 @@ impl Terminal {
             shell_pid: Mutex::new(None),
             waiting_for_input: AtomicBool::new(false),
             had_user_input: AtomicBool::new(false),
+            last_input_at: AtomicU64::new(0),
             last_viewed_time: Arc::new(Mutex::new(Instant::now())),
             term_config: Mutex::new(config),
         }

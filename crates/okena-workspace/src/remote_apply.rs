@@ -294,6 +294,12 @@ pub fn apply_remote_snapshot(
                 snapshot.services = remote_services;
                 snapshot.host = remote_host;
                 snapshot.git_status = remote_git_status;
+                // Keyed by terminal, so prefixed like the layout's ids.
+                snapshot.agent_activity = api_project
+                    .agent_activity
+                    .iter()
+                    .map(|(tid, activity)| (format!("remote:{}:{}", conn_id, tid), *activity))
+                    .collect();
             }
 
             // Sync remote folders and project_order into workspace
@@ -579,6 +585,7 @@ mod tests {
             custom_session: None,
             agent_purpose: None,
             agent: None,
+            agent_activity: Default::default(),
             pinned: false,
             last_activity_at: None,
             default_shell: None,
