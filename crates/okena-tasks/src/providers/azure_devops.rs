@@ -1037,6 +1037,18 @@ impl TaskProvider for AzureDevOpsProvider {
         )?;
         Ok(())
     }
+
+    fn get_tasks(&self, ids: &[TaskId]) -> Result<Vec<Task>, TaskError> {
+        let ids = ids
+            .iter()
+            .map(Self::check_provider)
+            .collect::<Result<Vec<u64>, _>>()?;
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // `workitemsbatch`, which already leaves out an item deleted since.
+        self.fetch_items(&ids)
+    }
 }
 
 #[cfg(test)]

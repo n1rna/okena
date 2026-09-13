@@ -111,6 +111,9 @@ pub enum AgentAssetKind {
     PullRequest,
     Branch,
     Document,
+    /// A task filed through okena's MCP. The task itself is on
+    /// [`AgentAsset::task`].
+    Task,
     #[default]
     #[serde(other)]
     Other,
@@ -122,6 +125,7 @@ impl AgentAssetKind {
             AgentAssetKind::PullRequest => "PR",
             AgentAssetKind::Branch => "branch",
             AgentAssetKind::Document => "doc",
+            AgentAssetKind::Task => "task",
             AgentAssetKind::Other => "asset",
         }
     }
@@ -146,6 +150,11 @@ pub struct AgentAsset {
     /// clock agreement with the host, so their timestamps are not trusted.
     #[serde(default)]
     pub created_at: u64,
+    /// The task, when this asset is one. Identity only: a task's state moves
+    /// on the provider, so it is read from the harness's task data when shown
+    /// rather than frozen here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<crate::tasks::TaskRef>,
 }
 
 /// A pull request whose worktree has been removed.
@@ -321,6 +330,7 @@ mod agent_tests {
             AgentAssetKind::PullRequest,
             AgentAssetKind::Branch,
             AgentAssetKind::Document,
+            AgentAssetKind::Task,
         ] {
             let j = serde_json::to_string(&k).expect("encode");
             let back: AgentAssetKind = serde_json::from_str(&j).expect("decode");
@@ -345,6 +355,7 @@ mod agent_tests {
             project: Some("okena".into()),
             branch: None,
             created_at: 42,
+            task: None,
         };
         let back: AgentAsset =
             serde_json::from_str(&serde_json::to_string(&a).expect("encode")).expect("decode");

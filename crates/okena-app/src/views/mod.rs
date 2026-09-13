@@ -14,6 +14,7 @@ pub mod agent_session;
 pub mod chrome;
 pub mod components;
 pub mod harness;
+pub mod known_tasks;
 pub mod layout;
 pub mod overlay_manager;
 pub mod overlays;

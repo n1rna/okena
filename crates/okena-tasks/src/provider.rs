@@ -264,6 +264,30 @@ pub trait TaskProvider: Send + Sync {
         })
     }
 
+    /// Several tasks at once, by id, in no particular order. A task the
+    /// provider does not know is left out rather than failing the rest.
+    ///
+    /// For refreshing tasks okena already holds, such as the ones an agent
+    /// filed, where a request per task would be a round trip each. The default
+    /// asks one at a time; providers that can batch override it.
+    fn get_tasks(&self, ids: &[TaskId]) -> Result<Vec<Task>, TaskError> {
+        let mut tasks = Vec::with_capacity(ids.len());
+        for id in ids {
+            match self.get_task(id) {
+                Ok(task) => tasks.push(task),
+                // A credential or capability problem fails every id alike, so
+                // it is the answer; anything else is about this one task.
+                Err(
+                    e @ (TaskError::NotAuthenticated { .. }
+                    | TaskError::Unauthorized { .. }
+                    | TaskError::Unsupported { .. }),
+                ) => return Err(e),
+                Err(_) => {}
+            }
+        }
+        Ok(tasks)
+    }
+
     /// Branch name to use when starting a worktree for `task`.
     ///
     /// okena's own format for every provider, rebuilt from the task rather

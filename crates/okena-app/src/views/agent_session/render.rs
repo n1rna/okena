@@ -689,6 +689,7 @@ impl Render for AgentSessionPanel {
                 .bg(rgb(t.bg_primary))
                 .child(self.note("This session is gone.", cx));
         };
+        self.fetch_task_states(&info.assets, cx);
 
         // Bind the terminal here rather than only on the tab switch: a session
         // that has just restarted has no terminal in the snapshot yet, and its

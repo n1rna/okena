@@ -519,6 +519,7 @@ impl HarnessPane {
                     match result {
                         Ok(tasks) => {
                             this.tasks.tasks = tasks;
+                            crate::views::known_tasks::remember(&this.tasks.tasks, cx);
                             // Children may have been created since — by an
                             // agent through MCP, or by someone else entirely —
                             // so a refresh drops what was cached rather than
@@ -1279,7 +1280,9 @@ impl HarnessPane {
                     this.tasks.children_loading = None;
                     // Cache the empty answer too: a leaf task should not be
                     // asked about again every time it is selected.
-                    this.tasks.children.insert(key, result.unwrap_or_default());
+                    let children = result.unwrap_or_default();
+                    crate::views::known_tasks::remember(&children, cx);
+                    this.tasks.children.insert(key, children);
                     cx.notify();
                 });
             });

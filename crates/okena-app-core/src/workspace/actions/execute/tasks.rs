@@ -195,6 +195,47 @@ pub(super) fn create(
     task_result(p.create_task(&draft))
 }
 
+/// Record a task an agent just filed on the session that filed it.
+///
+/// `created` is the answer to the create. Best effort: the task exists on the
+/// provider whether or not the session is still here, so a session that went
+/// away — or an answer that is not a task, such as a choice the provider needs
+/// made — records nothing and fails nothing. A plain push; matching it against
+/// the session's other rows happens when the list is read. Returns whether it
+/// was recorded.
+pub(super) fn record_created_task(
+    ws: &mut Workspace,
+    project_id: &str,
+    created: &serde_json::Value,
+    cx: &mut impl WorkspaceCx,
+) -> bool {
+    let Ok(task) = serde_json::from_value::<okena_core::tasks::Task>(created.clone()) else {
+        return false;
+    };
+    let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id) else {
+        return false;
+    };
+    p.agent
+        .get_or_insert_with(Default::default)
+        .assets
+        .push(task_asset(&task, now_millis()));
+    ws.notify_data(cx);
+    true
+}
+
+/// A filed task as a session asset.
+fn task_asset(task: &okena_core::tasks::Task, created_at: u64) -> okena_core::harness::AgentAsset {
+    okena_core::harness::AgentAsset {
+        kind: okena_core::harness::AgentAssetKind::Task,
+        title: task.title.clone(),
+        url: (!task.url.trim().is_empty()).then(|| task.url.clone()),
+        project: None,
+        branch: None,
+        created_at,
+        task: Some(okena_core::tasks::TaskRef::from(task)),
+    }
+}
+
 /// Sub-tasks of a task, whoever they are assigned to.
 pub(super) fn children(provider: String, task_external_id: String) -> ActionResult {
     let p = match resolve(&provider) {
@@ -312,6 +353,38 @@ fn error_result(e: TaskError) -> ActionResult {
             ActionResult::Ok(Some(serde_json::json!({ "needs_choice": message })))
         }
         other => ActionResult::Err(describe(other)),
+    }
+}
+
+/// Several tasks at once, by provider id.
+///
+/// A failure is logged as well as returned: callers refresh in the background,
+/// where an error nobody reads would otherwise vanish.
+pub(super) fn get_many(provider: String, ids: Vec<String>) -> ActionResult {
+    let p = match resolve(&provider) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let ids: Vec<okena_core::tasks::TaskId> = ids
+        .into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| okena_core::tasks::TaskId::new(provider.clone(), id))
+        .collect();
+    if ids.is_empty() {
+        return ActionResult::Ok(Some(serde_json::json!({ "tasks": [] })));
+    }
+    match p.get_tasks(&ids) {
+        Ok(tasks) => match serde_json::to_value(&tasks) {
+            Ok(v) => ActionResult::Ok(Some(serde_json::json!({ "tasks": v }))),
+            Err(e) => ActionResult::Err(format!("could not serialize tasks: {e}")),
+        },
+        Err(e) => {
+            log::warn!(
+                "[tasks] refreshing {} task(s) on {provider} failed: {e}",
+                ids.len()
+            );
+            ActionResult::Err(describe(e))
+        }
     }
 }
 
@@ -1224,12 +1297,15 @@ pub(super) fn register_asset(
             .map(|b| b.trim().to_string())
             .filter(|b| !b.is_empty()),
         created_at: now_millis(),
+        task: None,
     };
 
     let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id) else {
         return ActionResult::Err(format!("project not found: {project_id}"));
     };
     let state = p.agent.get_or_insert_with(Default::default);
+    // Stored as reported. Two rows about the same thing are matched when the
+    // list is built, where the match can change later; merging here could not.
     state.assets.push(asset);
     let count = state.assets.len();
     ws.notify_data(cx);
@@ -2138,5 +2214,110 @@ mod kind_wire_tests {
         // refusing the whole creation over a label would be the wrong trade.
         assert_eq!(parse_kind("spike"), TaskKind::Task);
         assert_eq!(parse_kind(""), TaskKind::Task);
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::record_created_task;
+    use crate::workspace::state::Workspace;
+    use okena_core::harness::AgentAssetKind;
+    use okena_workspace::context::WorkspaceCx;
+    use serde_json::{Value, json};
+
+    struct TestCx;
+
+    impl WorkspaceCx for TestCx {
+        fn notify(&mut self) {}
+        fn refresh_views(&mut self) {}
+        fn hook_runner(&self) -> Option<okena_hooks::HookRunner> {
+            None
+        }
+        fn hook_monitor(&self) -> Option<okena_hooks::HookMonitor> {
+            None
+        }
+    }
+
+    fn workspace_with_session(id: &str) -> Workspace {
+        let mut ws = Workspace::new(crate::workspace::state::WorkspaceData::empty());
+        let session = serde_json::from_value(json!({
+            "id": id, "name": id, "path": "/tmp/session", "layout": null,
+        }))
+        .expect("a minimal project");
+        ws.data.projects.push(session);
+        ws
+    }
+
+    /// The provider's answer to a create, as the daemon hands it on.
+    fn created() -> Value {
+        json!({
+            "id": { "provider": "linear", "external_id": "uuid-9" },
+            "display_key": "QBL-9",
+            "title": "Split payments",
+            "description": null,
+            "state": "todo",
+            "state_name": "Todo",
+            "url": "https://linear.app/q/issue/QBL-9/split-payments",
+            "branch_name": "chore/qbl-9-split-payments",
+            "updated_at": "",
+            "kind": "task",
+            "parent_id": null,
+            "parent_key": null,
+            "labels": [],
+            "groups": [],
+        })
+    }
+
+    #[test]
+    fn a_task_filed_for_a_session_is_recorded_on_it() {
+        let mut ws = workspace_with_session("s1");
+        assert!(record_created_task(&mut ws, "s1", &created(), &mut TestCx));
+        let assets = &ws.data.projects[0]
+            .agent
+            .as_ref()
+            .expect("the session now has agent state")
+            .assets;
+        assert_eq!(assets.len(), 1);
+        let asset = &assets[0];
+        assert_eq!(asset.kind, AgentAssetKind::Task);
+        assert_eq!(asset.title, "Split payments");
+        assert_eq!(
+            asset.url.as_deref(),
+            Some("https://linear.app/q/issue/QBL-9/split-payments")
+        );
+        let task = asset.task.as_ref().expect("the task rides on the asset");
+        assert_eq!(task.display_key, "QBL-9");
+        assert_eq!(task.id.external_id, "uuid-9");
+    }
+
+    #[test]
+    fn a_session_that_is_gone_records_nothing_and_fails_nothing() {
+        let mut ws = workspace_with_session("s1");
+        assert!(!record_created_task(
+            &mut ws,
+            "gone",
+            &created(),
+            &mut TestCx
+        ));
+        assert!(ws.data.projects[0].agent.is_none());
+    }
+
+    #[test]
+    fn a_choice_the_provider_needs_is_not_a_task_to_record() {
+        let mut ws = workspace_with_session("s1");
+        let choice = json!({ "needs_choice": "choose a team for the new task" });
+        assert!(!record_created_task(&mut ws, "s1", &choice, &mut TestCx));
+        assert!(ws.data.projects[0].agent.is_none());
+    }
+
+    #[test]
+    fn every_filed_task_is_a_row_of_its_own_until_the_list_is_read() {
+        // Stored as reported; matching repeats is the list's job.
+        let mut ws = workspace_with_session("s1");
+        for _ in 0..2 {
+            record_created_task(&mut ws, "s1", &created(), &mut TestCx);
+        }
+        let assets = &ws.data.projects[0].agent.as_ref().expect("state").assets;
+        assert_eq!(assets.len(), 2);
     }
 }

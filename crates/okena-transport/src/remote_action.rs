@@ -119,7 +119,8 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         | ActionRequest::TaskGet { .. }
         | ActionRequest::TaskUpdate { .. }
         | ActionRequest::TaskSetState { .. }
-        | ActionRequest::TaskComment { .. } => ActionClientKind::Search,
+        | ActionRequest::TaskComment { .. }
+        | ActionRequest::TaskGetMany { .. } => ActionClientKind::Search,
         _ => ActionClientKind::Fast,
     }
 }

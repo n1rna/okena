@@ -2951,14 +2951,36 @@ pub async fn daemon_command_loop(
                 | ActionRequest::TaskGet { .. }
                 | ActionRequest::TaskUpdate { .. }
                 | ActionRequest::TaskSetState { .. }
-                | ActionRequest::TaskComment { .. }),
+                | ActionRequest::TaskComment { .. }
+                | ActionRequest::TaskGetMany { .. }),
             ) => {
+                let workspace = workspace.clone();
+                let workspace_tick = workspace_tick.clone();
+                let hook_runner = hook_runner.clone();
+                let hook_monitor = hook_monitor.clone();
                 spawn_blocking_command_with(reply, &runtime, move || {
-                    okena_app_core::workspace::actions::execute::execute_task_provider_action(
-                        &action,
-                    )
-                    .map(|r| r.into_command_result())
-                    .unwrap_or_else(|| CommandResult::Err("not a task provider action".into()))
+                    use okena_app_core::workspace::actions::execute::{
+                        ActionResult, execute_task_provider_action, record_created_task,
+                    };
+                    let result = execute_task_provider_action(&action)
+                        .unwrap_or_else(|| ActionResult::Err("not a task provider action".into()));
+                    // A task an agent filed is recorded on its session. The
+                    // provider call ran without the workspace; the lock is
+                    // taken only for the append.
+                    if let (
+                        ActionRequest::TaskCreate {
+                            project_id: Some(project_id),
+                            ..
+                        },
+                        ActionResult::Ok(Some(created)),
+                    ) = (&action, &result)
+                    {
+                        let mut ws = workspace.lock();
+                        let mut cx =
+                            DaemonWorkspaceCx::new(&workspace_tick, &hook_runner, &hook_monitor);
+                        record_created_task(&mut ws, project_id, created, &mut cx);
+                    }
+                    result.into_command_result()
                 });
                 continue;
             }

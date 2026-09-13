@@ -108,6 +108,11 @@ pub struct AgentSessionPanel {
     terminal_focus: FocusHandle,
     /// An instruction on its way, so a double click does not send it twice.
     sending: bool,
+    /// When this panel last asked for each filed task's state, answered or
+    /// still on the way. A task is asked about again only once that is older
+    /// than [`crate::views::known_tasks::STATE_STALE_AFTER`], however often the
+    /// panel renders.
+    task_states_requested: std::collections::HashMap<okena_core::tasks::TaskId, std::time::Instant>,
 }
 
 struct EmbeddedTerminal {
@@ -123,6 +128,10 @@ impl AgentSessionPanel {
         ctx: InfoPanelContext,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Tasks this agent filed show their current state, whoever loaded it:
+        // this panel's own fetch, or the Tasks view.
+        let known_tasks = crate::views::known_tasks::entity(cx);
+        cx.observe(&known_tasks, |_, _, cx| cx.notify()).detach();
         Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -138,6 +147,7 @@ impl AgentSessionPanel {
             remote_manager: None,
             terminal_focus: cx.focus_handle(),
             sending: false,
+            task_states_requested: Default::default(),
         }
     }
 
@@ -169,7 +179,80 @@ impl AgentSessionPanel {
         self.pending_delete = None;
         self.terminal = None;
         self.sending = false;
+        // Showing a session again reads its tasks' states afresh, starting
+        // now rather than at the next frame.
+        self.task_states_requested.clear();
+        if let Some(info) = self.info(cx) {
+            self.fetch_task_states(&info.assets, cx);
+        }
         cx.notify();
+    }
+
+    /// Ask the provider for the state of the tasks this agent filed.
+    ///
+    /// The panel asks for itself rather than relying on the Tasks view, which
+    /// may never have been opened. A task is asked about when it first shows,
+    /// and again once its answer is older than the staleness window, so a task
+    /// moved to Done while the panel stays open reads as done within a minute.
+    /// One batch per provider, through the session's own client, so a remote
+    /// session's tasks are read by the machine whose agent filed them.
+    ///
+    /// Called from render as well as `set_project`: render is where a new
+    /// asset first reaches the panel, and the request times make a call that
+    /// has nothing due free.
+    fn fetch_task_states(
+        &mut self,
+        assets: &[okena_core::session_assets::SessionAsset],
+        cx: &mut Context<Self>,
+    ) {
+        use crate::views::known_tasks::{STATE_STALE_AFTER, tasks_to_fetch};
+        let now = std::time::Instant::now();
+        let batches = tasks_to_fetch(assets, &self.task_states_requested, now, STATE_STALE_AFTER);
+        for (provider, ids) in batches {
+            for id in &ids {
+                self.task_states_requested.insert(
+                    okena_core::tasks::TaskId::new(provider.clone(), id.clone()),
+                    now,
+                );
+            }
+            let client = self.client.clone();
+            cx.spawn(async move |this, cx| {
+                let result = smol::unblock(move || {
+                    client
+                        .post_action(okena_core::api::ActionRequest::TaskGetMany {
+                            provider: provider.clone(),
+                            task_external_ids: ids,
+                        })
+                        .and_then(|v| v.ok_or_else(|| "the answer had no tasks".to_string()))
+                        .and_then(|v| {
+                            serde_json::from_value::<Vec<okena_core::tasks::Task>>(
+                                v["tasks"].clone(),
+                            )
+                            .map_err(|e| format!("unexpected tasks: {e}"))
+                        })
+                        .map_err(|e| (provider, e))
+                })
+                .await;
+                match result {
+                    Ok(tasks) => {
+                        cx.update(|cx| crate::views::known_tasks::remember(&tasks, cx));
+                    }
+                    // Asked again after the same window as a success: a row
+                    // without a state is better than a request every frame.
+                    Err((provider, e)) => {
+                        log::warn!(
+                            "[tasks] could not read the state of filed {provider} tasks: {e}"
+                        );
+                    }
+                }
+                // One wake-up when the answer goes stale, so a panel nobody is
+                // interacting with still re-renders and asks again. Not a
+                // loop: the next fetch schedules the next wake-up.
+                smol::Timer::after(STATE_STALE_AFTER).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
     }
 
     /// Type `text` into the agent and submit it.

@@ -1227,6 +1227,11 @@ pub enum ActionRequest {
         parent_external_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         container_id: Option<String>,
+        /// Session to record the new task against, as something it produced.
+        /// Set by okena's MCP for the agent that filed it; the harness's own
+        /// form leaves it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
     },
     /// Sub-tasks of a task, whoever they are assigned to.
     TaskChildren {
@@ -1263,6 +1268,13 @@ pub enum ActionRequest {
         provider: String,
         task_external_id: String,
         body: String,
+    },
+    /// Several tasks at once, by provider id: how a client refreshes the
+    /// state of tasks it already holds. Ids the provider does not know are
+    /// left out of the answer.
+    TaskGetMany {
+        provider: String,
+        task_external_ids: Vec<String>,
     },
     /// Start work on a task across one or more projects.
     ///

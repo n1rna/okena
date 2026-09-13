@@ -171,6 +171,8 @@ impl HarnessPane {
                         kind: kind.wire_name().to_string(),
                         parent_external_id: None,
                         container_id,
+                        // Filed by the user, not an agent: nothing to record.
+                        project_id: None,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing created task".to_string()))
                     .and_then(|v| {
