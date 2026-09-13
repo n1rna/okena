@@ -111,6 +111,9 @@ pub enum AgentAssetKind {
     PullRequest,
     Branch,
     Document,
+    /// A task filed through okena's MCP. The task itself is on
+    /// [`AgentAsset::task`].
+    Task,
     #[default]
     #[serde(other)]
     Other,
@@ -122,6 +125,7 @@ impl AgentAssetKind {
             AgentAssetKind::PullRequest => "PR",
             AgentAssetKind::Branch => "branch",
             AgentAssetKind::Document => "doc",
+            AgentAssetKind::Task => "task",
             AgentAssetKind::Other => "asset",
         }
     }
@@ -146,6 +150,11 @@ pub struct AgentAsset {
     /// clock agreement with the host, so their timestamps are not trusted.
     #[serde(default)]
     pub created_at: u64,
+    /// The task, when this asset is one. Identity only: a task's state moves
+    /// on the provider, so it is read from the harness's task data when shown
+    /// rather than frozen here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<crate::tasks::TaskRef>,
 }
 
 /// A pull request whose worktree has been removed.
@@ -271,6 +280,36 @@ pub struct AgentSessionState {
     pub tracked_prs: Vec<TrackedPullRequest>,
 }
 
+impl AgentSessionState {
+    /// Record an asset, unless one with the same URL is already here.
+    ///
+    /// okena records a task the moment an agent files it, and an agent may
+    /// register it by hand as well; it is still one task. When the two differ,
+    /// the task record wins, since it knows which task it is. Returns whether
+    /// anything changed.
+    pub fn record_asset(&mut self, asset: AgentAsset) -> bool {
+        let url = asset.url.clone();
+        let existing = url.as_deref().and_then(|url| {
+            self.assets
+                .iter_mut()
+                .find(|a| a.url.as_deref() == Some(url))
+        });
+        match existing {
+            Some(existing) if existing.task.is_none() && asset.task.is_some() => {
+                existing.kind = asset.kind;
+                existing.title = asset.title;
+                existing.task = asset.task;
+                true
+            }
+            Some(_) => false,
+            None => {
+                self.assets.push(asset);
+                true
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod agent_tests {
     use super::{AgentAsset, AgentAssetKind, AgentSessionState};
@@ -321,6 +360,7 @@ mod agent_tests {
             AgentAssetKind::PullRequest,
             AgentAssetKind::Branch,
             AgentAssetKind::Document,
+            AgentAssetKind::Task,
         ] {
             let j = serde_json::to_string(&k).expect("encode");
             let back: AgentAssetKind = serde_json::from_str(&j).expect("decode");
@@ -345,10 +385,70 @@ mod agent_tests {
             project: Some("okena".into()),
             branch: None,
             created_at: 42,
+            task: None,
         };
         let back: AgentAsset =
             serde_json::from_str(&serde_json::to_string(&a).expect("encode")).expect("decode");
         assert_eq!(back, a);
         assert_eq!(back.kind.label(), "PR");
+    }
+
+    fn task_asset(key: &str, url: &str) -> AgentAsset {
+        AgentAsset {
+            kind: AgentAssetKind::Task,
+            title: "Split payments".into(),
+            url: Some(url.into()),
+            project: None,
+            created_at: 1,
+            task: Some(crate::tasks::TaskRef {
+                id: crate::tasks::TaskId::new("linear", "uuid-1"),
+                display_key: key.into(),
+                title: "Split payments".into(),
+                url: url.into(),
+                parent_id: None,
+                parent_key: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_task_registered_again_by_hand_is_still_one_row() {
+        let url = "https://linear.app/q/issue/QBL-9";
+        let mut s = AgentSessionState::default();
+        assert!(s.record_asset(task_asset("QBL-9", url)));
+        let by_hand = AgentAsset {
+            kind: AgentAssetKind::Other,
+            title: "QBL-9".into(),
+            url: Some(url.into()),
+            project: None,
+            created_at: 2,
+            task: None,
+        };
+        assert!(!s.record_asset(by_hand.clone()));
+        assert_eq!(s.assets.len(), 1);
+        assert_eq!(s.assets[0].kind, AgentAssetKind::Task);
+
+        // The other way round, the task record takes over the hand-made row.
+        let mut s = AgentSessionState::default();
+        s.record_asset(by_hand);
+        assert!(s.record_asset(task_asset("QBL-9", url)));
+        assert_eq!(s.assets.len(), 1);
+        assert!(s.assets[0].task.is_some());
+    }
+
+    #[test]
+    fn assets_without_a_url_are_never_merged() {
+        let mut s = AgentSessionState::default();
+        for _ in 0..2 {
+            s.record_asset(AgentAsset {
+                kind: AgentAssetKind::Document,
+                title: "notes".into(),
+                url: None,
+                project: None,
+                created_at: 0,
+                task: None,
+            });
+        }
+        assert_eq!(s.assets.len(), 2);
     }
 }

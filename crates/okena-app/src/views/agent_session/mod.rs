@@ -123,6 +123,10 @@ impl AgentSessionPanel {
         ctx: InfoPanelContext,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Tasks this agent filed show their current state, which arrives
+        // whenever the Tasks view loads it.
+        let known_tasks = crate::views::known_tasks::entity(cx);
+        cx.observe(&known_tasks, |_, _, cx| cx.notify()).detach();
         Self {
             client: ctx.client,
             request_broker: ctx.request_broker,

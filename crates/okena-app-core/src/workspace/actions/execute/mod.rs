@@ -140,6 +140,9 @@ pub fn execute_task_provider_action(action: &ActionRequest) -> Option<ActionResu
             kind,
             parent_external_id,
             container_id,
+            // Recording the task on the session that filed it needs the
+            // workspace, so it happens after this call returns, not in it.
+            project_id: _,
         } => tasks::create(
             provider.clone(),
             title.clone(),

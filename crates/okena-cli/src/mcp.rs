@@ -876,6 +876,8 @@ fn file_task(args: &Value, parent_defaults_to_session: bool) -> Result<Value, St
         "kind": args.get("kind").and_then(|k| k.as_str()).unwrap_or("task"),
         "parent_external_id": parent,
         "container_id": container,
+        // Recorded as produced by this session.
+        "project_id": session.project.id,
     }))?;
     // A choice the provider needs made is the answer, not a created task.
     if created.get("needs_choice").is_some() {

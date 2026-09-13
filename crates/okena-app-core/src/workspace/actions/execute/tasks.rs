@@ -1224,13 +1224,16 @@ pub(super) fn register_asset(
             .map(|b| b.trim().to_string())
             .filter(|b| !b.is_empty()),
         created_at: now_millis(),
+        task: None,
     };
 
     let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id) else {
         return ActionResult::Err(format!("project not found: {project_id}"));
     };
     let state = p.agent.get_or_insert_with(Default::default);
-    state.assets.push(asset);
+    // Something okena already recorded — a task the agent filed through the
+    // MCP — is not added a second time.
+    state.record_asset(asset);
     let count = state.assets.len();
     ws.notify_data(cx);
 

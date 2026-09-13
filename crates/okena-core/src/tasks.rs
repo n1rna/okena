@@ -355,7 +355,7 @@ impl Task {
 /// Backlink stored on a worktree project, pointing at the task it was started
 /// for. Persisted in the workspace, so the association survives restarts and
 /// mirrors to web/mobile clients through the existing snapshot path.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRef {
     pub id: TaskId,
     /// Denormalized so the sidebar can label a worktree without a provider

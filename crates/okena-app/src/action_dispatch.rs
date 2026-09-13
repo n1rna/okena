@@ -1105,6 +1105,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             kind,
             parent_external_id,
             container_id,
+            project_id,
         } => ActionRequest::TaskCreate {
             provider,
             title,
@@ -1112,6 +1113,8 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             kind,
             parent_external_id,
             container_id,
+            // The session to record it on is an okena-side id.
+            project_id: project_id.as_deref().map(s),
         },
         ActionRequest::TaskChildren {
             provider,
