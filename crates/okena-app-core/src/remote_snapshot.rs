@@ -68,6 +68,7 @@ pub fn build_api_project(
         task_ref: p.task_ref.clone(),
         spec_change: p.spec_change.clone(),
         knowledge_root: p.knowledge_root.clone(),
+        project_scan: p.project_scan.clone(),
         task_draft: p.task_draft.clone(),
         custom_session: p.custom_session.clone(),
         agent: p.agent.clone(),

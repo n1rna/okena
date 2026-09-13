@@ -20,6 +20,7 @@ pub const fn file(flow: Flow) -> &'static str {
         Flow::KnowledgeDraft => include_str!("templates/knowledge-draft.md"),
         Flow::AgentSession => include_str!("templates/agent-session.md"),
         Flow::ProjectScan => include_str!("templates/project-scan.md"),
+        Flow::ProjectsScan => include_str!("templates/projects-scan.md"),
     }
 }
 

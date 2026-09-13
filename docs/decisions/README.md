@@ -19,3 +19,4 @@ a commit message suffices.
 - 0003 — [Knowledge stores are kind-folder git repos with an okena-owned registry](0003-knowledge-stores.md) — accepted; commit and push superseded by 0004 (2026-09-10)
 - 0004 — [okena commits and pushes store checkouts through one shared store-git module](0004-store-commit-and-push.md) — accepted (2026-09-12)
 - 0005 — [A project map is agent-written docs plus one validated manifest in the repo's knowledge root](0005-project-maps.md) — accepted (2026-09-13)
+- 0006 — [Links between projects are written into both projects' maps](0006-project-links-on-both-sides.md) — accepted (2026-09-13)

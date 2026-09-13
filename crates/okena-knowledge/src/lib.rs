@@ -13,6 +13,8 @@
 //!   and validated (ADR-0005);
 //! - [`project_scan`]: where a scan writes a project's map and what it
 //!   starts from;
+//! - [`project_links`]: links between projects, matched and listed across
+//!   their maps (ADR-0006);
 //! - [`registry`]: okena's per-profile list of store checkouts;
 //! - [`tree`]: the entries inside one root;
 //! - [`discover`]: every root on this machine, with health;
@@ -29,6 +31,7 @@ pub mod frontmatter;
 pub mod git;
 pub mod identity;
 pub mod project;
+pub mod project_links;
 pub mod project_map;
 pub mod project_scan;
 pub mod prompts;

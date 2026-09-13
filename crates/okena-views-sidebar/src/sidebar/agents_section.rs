@@ -36,6 +36,7 @@ fn role_color(role: AgentRole, t: &okena_ui::theme::ThemeColors) -> u32 {
         AgentRole::Task => t.term_cyan,
         AgentRole::Spec => t.success,
         AgentRole::Knowledge => t.term_magenta,
+        AgentRole::Scan => t.term_blue,
         AgentRole::Custom => t.warning,
     }
 }
@@ -322,6 +323,8 @@ impl Sidebar {
                     p.task_ref.as_ref().map(|t| t.display_key.clone())
                 }
                 AgentRole::Custom => p.custom_session.clone(),
+                // The repository it maps, or the repositories it links.
+                AgentRole::Scan => p.project_scan.clone(),
             };
             let mut info = SidebarProjectInfo::from_project(p, workspace, self.window_id);
             // The badge says "spec"; the name saying "(spec)" as well says it

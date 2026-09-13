@@ -103,6 +103,10 @@ infrastructure:
 | `infrastructure[].kind` | no | Free text, e.g. `database`, `cache`, `bucket` |
 | `infrastructure[].description` | no | One line |
 | `infrastructure[].files` | no | The files that define or configure it |
+| `links[].project` | yes | The other project, by its map's `project.name` |
+| `links[].direction` | yes | `uses` or `used_by`, seen from this project |
+| `links[].type`, `links[].name` | yes | The interface the link runs through |
+| `links[].description` | no | One line |
 
 Paths:
 
@@ -138,6 +142,60 @@ publishes, never a local alias.
 The same `type` and `name` may appear only once in `exposes`, and once in
 `consumes`.
 
+## Links
+
+A project's links to other projects are written in its own map, on both sides
+of each link, with no file above the projects
+([ADR-0006](../decisions/0006-project-links-on-both-sides.md)).
+
+```yaml
+links:
+  - project: acme-billing       # the other project's project.name
+    direction: uses             # uses | used_by, seen from this project
+    type: topic
+    name: billing.invoice-issued
+    description: Emails each issued invoice.
+```
+
+- **Both sides:** `uses` in the map of the project that uses the other,
+  `used_by` in the other's, with the same `type` and `name`.
+- **Names:** `project` resolves against each scanned map's `project.name`, then
+  against okena project names.
+- **Projects:** only repositories take part; worktrees and agent sessions are
+  skipped, and a project without a valid map has no links.
+
+okena also links projects on its own, and reads both sources together:
+
+| Source | When |
+|---|---|
+| Matched | One project's `consumes` entry and another's `exposes` entry have the same `type` and `name`, and neither map lists the link |
+| Confirmed | Matched, and listed under `links` |
+| Found by scan | Listed under `links` with no matching `exposes` and `consumes` |
+
+Beside the links:
+
+- **One side only:** a link listed in only one of the two maps says which.
+- **Unmatched:** a `consumes` entry no scanned project exposes, and no link
+  accounts for. Usually the providing project is not scanned yet.
+- **Unresolved:** a `links` entry whose `project` names no scanned project.
+
+Two projects exposing the same thing each get a link from every consumer of it.
+
+### Scanning links
+
+**Scan links**, in a repository's info panel, starts one agent over that
+repository and every other scanned repository.
+
+- **Brief:** the `projects-scan` template, listing each repository with its path,
+  its manifest and whether it is mapped, and pointing at the `project-map` skill.
+- **What it writes:** each link it confirms, into both maps, plus missing
+  `exposes` and `consumes`. A repository without a valid map is mapped first.
+- **Where it runs:** `harness.agent_root`, else the parent folder of the first
+  repository.
+- **Refused:** fewer than two repositories, or a worktree or agent session among
+  them.
+- **Committing:** nothing.
+
 ## Map status
 
 | Status | When |
@@ -166,6 +224,8 @@ location cannot be known.
 | `project_map_doc_path` | A `doc` is not a `.md` file under `docs/` |
 | `project_map_invalid_commit` | `scanned.commit` is not 7 to 40 hex digits |
 | `project_map_duplicate_interface` | The same `type` and `name` appears twice in one list |
+| `project_map_self_link` | A link names the project's own `project.name` |
+| `project_map_duplicate_link` | The same link is listed twice |
 
 ## Scanning
 
@@ -182,6 +242,7 @@ by its absolute path.
   repository, refuses the scan.
 - **Label:** **Rescan** once a manifest exists, valid or not; **Scan** before.
 - **Committing:** nothing. The map is left in the checkout to review.
+- **Listed as:** a **scan** agent, as is a links scan's session.
 - **Agent:** the one you pick, else `harness.agent_command`. Without an agent
   it refuses.
 
@@ -215,6 +276,10 @@ not.
   Harness → Knowledge, in the repository's knowledge root.
 - **Refresh:** an open panel reads the map again every 3 seconds, so a scan's
   result shows up without reopening it.
+- **LINKS:** what this project uses and what uses it, each with its source and
+  a note when only one map lists it; what it consumes that no scanned project
+  exposes; links naming no scanned project; and **Scan links**. It is read
+  across every repository and refreshed with the map.
 
 The read runs in the daemon and replies with the map's state and the key of the
 knowledge root it came from, so a remote project's panel reads the same way as

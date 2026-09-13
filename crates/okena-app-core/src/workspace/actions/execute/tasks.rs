@@ -1382,7 +1382,7 @@ pub(super) fn start_custom_session(
 /// itself, and several run at the configured projects root — an agent given
 /// three repos needs a directory above all of them, the same reasoning
 /// `start_work` uses for a multi-project task.
-fn resolve_session_root(
+pub(super) fn resolve_session_root(
     root: &str,
     context: &[(String, String)],
     settings: &AppSettings,
