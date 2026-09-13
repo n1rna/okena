@@ -854,6 +854,26 @@ pub fn execute_action(
             provider,
             task_external_id,
         } => tasks::children(provider, task_external_id),
+        ActionRequest::TaskGet {
+            provider,
+            task_external_id,
+        } => tasks::get(provider, task_external_id),
+        ActionRequest::TaskUpdate {
+            provider,
+            task_external_id,
+            title,
+            description,
+        } => tasks::update(provider, task_external_id, title, description),
+        ActionRequest::TaskSetState {
+            provider,
+            task_external_id,
+            state,
+        } => tasks::set_state(provider, task_external_id, state),
+        ActionRequest::TaskComment {
+            provider,
+            task_external_id,
+            body,
+        } => tasks::comment(provider, task_external_id, body),
         ActionRequest::TaskStartWork {
             provider,
             task_external_id,

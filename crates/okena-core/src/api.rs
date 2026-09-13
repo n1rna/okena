@@ -1178,6 +1178,37 @@ pub enum ActionRequest {
         provider: String,
         task_external_id: String,
     },
+    /// One task with its description, whoever it is assigned to.
+    ///
+    /// Here and in the edits below, `task_external_id` may be the provider's
+    /// id or the display key (`QBL-371`, `#42`).
+    TaskGet {
+        provider: String,
+        task_external_id: String,
+    },
+    /// Change a task's title and/or description. A field left out is left as
+    /// it is; an empty description clears it.
+    TaskUpdate {
+        provider: String,
+        task_external_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    /// Move a task to a normalized state. The provider picks its own state in
+    /// that category, and the result is the task as it now reads.
+    TaskSetState {
+        provider: String,
+        task_external_id: String,
+        state: crate::tasks::TaskState,
+    },
+    /// Comment on a task. `body` is Markdown.
+    TaskComment {
+        provider: String,
+        task_external_id: String,
+        body: String,
+    },
     /// Start work on a task across one or more projects.
     ///
     /// Creates a worktree on the provider's branch name in every project in

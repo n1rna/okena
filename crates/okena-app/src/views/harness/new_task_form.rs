@@ -215,7 +215,7 @@ impl HarnessPane {
     /// A free-form session rather than a task session: it is not doing the
     /// work, it is deciding what the work is, so it gets no worktrees. okena's
     /// MCP server is what makes it useful — the agent reads the existing
-    /// children and writes new ones back through `okena_create_subtask`,
+    /// children and writes new ones back through `okena_create_task`,
     /// rather than handing the user a list to retype.
     pub(super) fn break_down_with_agent(
         &mut self,
@@ -628,7 +628,7 @@ impl HarnessPane {
 pub(super) fn breakdown_vars(task: &Task) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("key".to_string(), task.display_key.clone()),
-        // `okena_create_subtask` takes the provider's id, not the human key.
+        // The provider's id, which `okena_create_task` takes as `parent`.
         ("parent_id".to_string(), task.id.external_id.clone()),
         ("title".to_string(), task.title.clone()),
         ("kind".to_string(), task.kind.label().to_string()),

@@ -217,6 +217,96 @@ pub(super) fn children(provider: String, task_external_id: String) -> ActionResu
     }
 }
 
+/// One task, by the provider's id or its display key.
+pub(super) fn get(provider: String, task: String) -> ActionResult {
+    let p = match resolve(&provider) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    task_result(p.get_task(&okena_core::tasks::TaskId::new(provider, task)))
+}
+
+/// Change a task's title or description.
+pub(super) fn update(
+    provider: String,
+    task: String,
+    title: Option<String>,
+    description: Option<String>,
+) -> ActionResult {
+    let patch = okena_tasks::TaskPatch {
+        title,
+        description: description.map(|d| d.trim().to_string()),
+    };
+    if patch.is_empty() {
+        return ActionResult::Err("nothing to change: pass a title, a description or both".into());
+    }
+    if patch.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        return ActionResult::Err("a task's title cannot be empty".into());
+    }
+    let p = match resolve(&provider) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    task_result(p.update_task(&okena_core::tasks::TaskId::new(provider, task), &patch))
+}
+
+/// Move a task to a state, and report where it landed.
+pub(super) fn set_state(
+    provider: String,
+    task: String,
+    state: okena_core::tasks::TaskState,
+) -> ActionResult {
+    if state == okena_core::tasks::TaskState::Unknown {
+        return ActionResult::Err(
+            "choose a state: backlog, todo, in_progress, in_review, done or canceled".into(),
+        );
+    }
+    let p = match resolve(&provider) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let id = okena_core::tasks::TaskId::new(provider, task);
+    if let Err(e) = p.set_state(&id, state) {
+        return ActionResult::Err(describe(e));
+    }
+    // Read back for the provider's own name for where it landed — a team's
+    // in-progress column may be called anything. The move has happened, so a
+    // failed read must not report it as a failed move.
+    match p.get_task(&id) {
+        Ok(task) => task_result(Ok(task)),
+        Err(_) => ActionResult::Ok(Some(serde_json::json!({ "state": state }))),
+    }
+}
+
+/// Comment on a task.
+pub(super) fn comment(provider: String, task: String, body: String) -> ActionResult {
+    let body = body.trim();
+    if body.is_empty() {
+        return ActionResult::Err("a comment needs a body".into());
+    }
+    let p = match resolve(&provider) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    match p.add_comment(
+        &okena_core::tasks::TaskId::new(provider, task.clone()),
+        body,
+    ) {
+        Ok(()) => ActionResult::Ok(Some(serde_json::json!({ "task": task, "commented": true }))),
+        Err(e) => ActionResult::Err(describe(e)),
+    }
+}
+
+fn task_result(result: Result<okena_core::tasks::Task, TaskError>) -> ActionResult {
+    match result {
+        Ok(task) => match serde_json::to_value(&task) {
+            Ok(v) => ActionResult::Ok(Some(v)),
+            Err(e) => ActionResult::Err(format!("could not serialize the task: {e}")),
+        },
+        Err(e) => ActionResult::Err(describe(e)),
+    }
+}
+
 /// Read a kind off the wire.
 ///
 /// Unknown values fall back to `Task` rather than failing: a newer client — or
@@ -406,7 +496,11 @@ pub(super) fn start_work(
         Ok(t) => t,
         Err(e) => return ActionResult::Err(describe(e)),
     };
-    let task = match tasks.iter().find(|t| t.id.external_id == task_external_id) {
+    // By id or display key: an agent starting a sub-agent was handed the key.
+    let task = match tasks.iter().find(|t| {
+        t.id.external_id == task_external_id
+            || t.display_key.eq_ignore_ascii_case(&task_external_id)
+    }) {
         Some(t) => t.clone(),
         None => {
             return ActionResult::Err(format!(
@@ -737,6 +831,23 @@ mod tests {
             .expect("azure devops should be listed");
         assert_eq!(ado.display_name, "Azure DevOps");
         assert_eq!(ado.auth, TaskAuthState::Disconnected);
+    }
+
+    #[test]
+    fn task_edits_are_checked_before_any_network_call() {
+        let task = || "QBL-1".to_string();
+        let nothing = err_of(update("linear".into(), task(), None, None));
+        assert!(nothing.contains("nothing to change"), "got: {nothing}");
+        let blank = err_of(update("linear".into(), task(), Some("  ".into()), None));
+        assert!(blank.contains("title"), "got: {blank}");
+        let unknown = err_of(set_state(
+            "linear".into(),
+            task(),
+            okena_core::tasks::TaskState::Unknown,
+        ));
+        assert!(unknown.contains("choose a state"), "got: {unknown}");
+        let silent = err_of(comment("linear".into(), task(), " ".into()));
+        assert!(silent.contains("body"), "got: {silent}");
     }
 
     #[test]
