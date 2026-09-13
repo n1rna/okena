@@ -163,6 +163,7 @@ impl AgentSessionPanel {
     fn task_card(&self, task: &okena_core::tasks::TaskRef, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let external_id = task.id.external_id.clone();
+        let task_provider = task.id.provider.clone();
         let open_url = task.url.clone();
         let copy_url = task.url.clone();
         let provider = crate::views::harness::provider_label(&task.id.provider).to_string();
@@ -267,9 +268,13 @@ impl AgentSessionPanel {
             )
             .on_click(cx.listener(move |this, _, _window, cx| {
                 let external_id = external_id.clone();
+                let provider = task_provider.clone();
                 this.request_broker.update(cx, |broker, cx| {
                     broker.push_workbench_request(
-                        crate::workspace::requests::WorkbenchRequest::OpenTask { external_id },
+                        crate::workspace::requests::WorkbenchRequest::OpenTask {
+                            provider,
+                            external_id,
+                        },
                         cx,
                     );
                 });
