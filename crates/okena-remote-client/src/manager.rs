@@ -232,6 +232,11 @@ pub struct RemoteConnectionManager {
     /// output until the GPUI side drains, so output bursts collapse into a
     /// single repaint pass. Handed to every connection's `ConnectionHandler`.
     activity_tx: async_channel::Sender<()>,
+
+    /// How many times each connection has come up. The daemon on the far side
+    /// may have been replaced across a reconnect, so what a client learned
+    /// about it — an action it does not know — holds for one generation only.
+    connected_generations: HashMap<String, u64>,
 }
 
 impl RemoteConnectionManager {
@@ -280,6 +285,7 @@ impl RemoteConnectionManager {
             event_tx,
             action_queues,
             activity_tx,
+            connected_generations: HashMap::new(),
         };
         manager.start_terminal_activity_pump(activity_rx, cx);
         manager
@@ -522,6 +528,15 @@ impl RemoteConnectionManager {
                 )
             })
             .collect()
+    }
+
+    /// Which time `connection_id` has come up: changes on every reconnect, and
+    /// is 0 before its first.
+    pub fn connected_generation(&self, connection_id: &str) -> u64 {
+        self.connected_generations
+            .get(connection_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Get the backend for a specific connection.
@@ -773,6 +788,14 @@ impl RemoteConnectionManager {
             } => {
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
                     let prev = std::mem::replace(conn.status_mut(), status.clone());
+                    if matches!(status, ConnectionStatus::Connected)
+                        && !matches!(prev, ConnectionStatus::Connected)
+                    {
+                        *self
+                            .connected_generations
+                            .entry(connection_id.clone())
+                            .or_default() += 1;
+                    }
                     let name = &conn.config().name;
                     match &status {
                         ConnectionStatus::Error(msg) => {

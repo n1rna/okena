@@ -80,6 +80,9 @@ pub struct InfoPanelContext {
     pub focus_manager: Entity<FocusManager>,
     pub window_id: WindowId,
     pub terminals: TerminalsRegistry,
+    /// Says when the client's daemon connection comes back, which may bring a
+    /// daemon that knows more actions. `None` where there is no manager.
+    pub remote_manager: Option<Entity<okena_remote_client::RemoteConnectionManager>>,
 }
 
 pub struct AgentSessionPanel {
@@ -113,6 +116,9 @@ pub struct AgentSessionPanel {
     /// than [`crate::views::known_tasks::STATE_STALE_AFTER`], however often the
     /// panel renders.
     task_states_requested: std::collections::HashMap<okena_core::tasks::TaskId, std::time::Instant>,
+    /// The generation of the client's connection, kept current so a daemon
+    /// that refused `TaskGetMany` is asked again once it has reconnected.
+    connection_generation: u64,
 }
 
 struct EmbeddedTerminal {
@@ -132,6 +138,24 @@ impl AgentSessionPanel {
         // this panel's own fetch, or the Tasks view.
         let known_tasks = crate::views::known_tasks::entity(cx);
         cx.observe(&known_tasks, |_, _, cx| cx.notify()).detach();
+        let connection_generation = ctx.remote_manager.as_ref().map_or(0, |rm| {
+            rm.read(cx).connected_generation(ctx.client.connection_id())
+        });
+        // A reconnect reads every task's state afresh, on a daemon that may
+        // now know the batch. Only then: the manager notifies on far more.
+        if let Some(rm) = &ctx.remote_manager {
+            cx.observe(rm, |this, rm, cx| {
+                let generation = rm
+                    .read(cx)
+                    .connected_generation(this.client.connection_id());
+                if generation != this.connection_generation {
+                    this.connection_generation = generation;
+                    this.task_states_requested.clear();
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -148,6 +172,7 @@ impl AgentSessionPanel {
             terminal_focus: cx.focus_handle(),
             sending: false,
             task_states_requested: Default::default(),
+            connection_generation,
         }
     }
 
@@ -205,7 +230,16 @@ impl AgentSessionPanel {
         assets: &[okena_core::session_assets::SessionAsset],
         cx: &mut Context<Self>,
     ) {
-        use crate::views::known_tasks::{STATE_STALE_AFTER, tasks_to_fetch};
+        use crate::views::known_tasks::{
+            STATE_STALE_AFTER, batch_unsupported, is_batch_unknown, record_batch_unsupported,
+            tasks_to_fetch,
+        };
+        let connection_id = self.client.connection_id().to_string();
+        let generation = self.connection_generation;
+        // A daemon that predates the batch would refuse every one of them.
+        if batch_unsupported(&connection_id, generation, cx) {
+            return;
+        }
         let now = std::time::Instant::now();
         let batches = tasks_to_fetch(assets, &self.task_states_requested, now, STATE_STALE_AFTER);
         for (provider, ids) in batches {
@@ -216,6 +250,7 @@ impl AgentSessionPanel {
                 );
             }
             let client = self.client.clone();
+            let connection_id = connection_id.clone();
             cx.spawn(async move |this, cx| {
                 let result = smol::unblock(move || {
                     client
@@ -236,6 +271,20 @@ impl AgentSessionPanel {
                 match result {
                     Ok(tasks) => {
                         cx.update(|cx| crate::views::known_tasks::remember(&tasks, cx));
+                    }
+                    // Not a failure to retry: this daemon will refuse the batch
+                    // until it is replaced. Said once per connection, and no
+                    // wake-up — the reconnect that may fix it notifies instead.
+                    Err((_, e)) if is_batch_unknown(&e) => {
+                        let news = cx.update(|cx| {
+                            record_batch_unsupported(&connection_id, generation, cx)
+                        });
+                        if news {
+                            log::warn!(
+                                "[tasks] the daemon on connection {connection_id} cannot read tasks in bulk; filed tasks show no state until it reconnects"
+                            );
+                        }
+                        return;
                     }
                     // Asked again after the same window as a success: a row
                     // without a state is better than a request every frame.
