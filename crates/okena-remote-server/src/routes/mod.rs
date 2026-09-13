@@ -649,20 +649,27 @@ mod tests {
     }
 
     /// The `type` of the next text frame, or `None` if the daemon closed first.
+    ///
+    /// Host stats are pushed on a timer whose first tick fires as soon as the
+    /// stream loop starts, so they can land between any two frames a test is
+    /// waiting on; they are skipped. The deadline covers the whole wait, so a
+    /// stream that never closes cannot keep it alive with stats pushes.
     async fn next_frame_type<S>(socket: &mut S) -> Option<String>
     where
         S: futures::Stream<Item = Result<TestFrame, TestFrameError>> + Unpin,
     {
         use futures::StreamExt as _;
 
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), socket.next()).await {
+            match tokio::time::timeout_at(deadline, socket.next()).await {
                 Ok(Some(Ok(TestFrame::Text(text)))) => {
                     let frame: serde_json::Value = serde_json::from_str(&text).ok()?;
-                    return frame
-                        .get("type")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string);
+                    let frame_type = frame.get("type").and_then(serde_json::Value::as_str)?;
+                    if frame_type == "system_stats_changed" {
+                        continue;
+                    }
+                    return Some(frame_type.to_string());
                 }
                 Ok(Some(Ok(_))) => continue,
                 _ => return None,
