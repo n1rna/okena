@@ -54,6 +54,8 @@ export interface PrInfo {
   base?: string | null;
   /** Mergeability and reviews, read with the PR while it is open or a draft. Omitted otherwise. */
   readiness?: PrReadiness | null;
+  /** Readiness was left out because the repo rejected it recently; okena asks again later. */
+  readiness_unavailable?: boolean;
 }
 
 export type MergeState = "clean" | "conflicting" | "behind" | "unknown";

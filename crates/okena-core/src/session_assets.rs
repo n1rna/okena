@@ -126,6 +126,7 @@ pub fn derive_session_assets(
                 number: pr.number,
                 base: None,
                 readiness: pr.readiness.clone(),
+                readiness_unavailable: pr.readiness_unavailable,
             }),
             ci: None,
             task: None,
@@ -424,6 +425,7 @@ mod tests {
                 number,
                 base: None,
                 readiness: None,
+                readiness_unavailable: false,
             }),
             ..ApiGitStatus::default()
         }
@@ -887,6 +889,7 @@ mod tests {
             url: format!("https://github.com/o/r/pull/{number}"),
             state,
             readiness: None,
+            readiness_unavailable: false,
         }
     }
 

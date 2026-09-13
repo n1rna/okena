@@ -377,10 +377,15 @@ enum Tone {
 
 /// The readiness indicators a PR row shows: only while the PR is open or a
 /// draft. A merged or closed PR has nothing left in its way, and a stale
-/// "conflicts" beside "merged" would say otherwise.
+/// "conflicts" beside "merged" would say otherwise. When okena left readiness
+/// out because the repo rejected it recently, the row says so, rather than
+/// passing for a clean PR with no reviews.
 fn pr_indicators(pr: &PrInfo) -> Vec<(String, Tone)> {
     match (&pr.state, &pr.readiness) {
         (PrState::Open | PrState::Draft, Some(readiness)) => readiness_indicators(readiness),
+        (PrState::Open | PrState::Draft, None) if pr.readiness_unavailable => {
+            vec![("readiness unavailable".to_string(), Tone::Muted)]
+        }
         _ => Vec::new(),
     }
 }
@@ -506,7 +511,25 @@ mod tests {
             number: 1,
             base: None,
             readiness: Some(readiness),
+            readiness_unavailable: false,
         }
+    }
+
+    #[test]
+    fn readiness_left_out_for_the_repo_says_so() {
+        let mut open = pr(PrState::Open, readiness(MergeState::Clean, None, 0));
+        open.readiness = None;
+        assert!(
+            pr_indicators(&open).is_empty(),
+            "nothing said, nothing shown"
+        );
+        open.readiness_unavailable = true;
+        assert_eq!(
+            pr_indicators(&open),
+            [("readiness unavailable".to_string(), Tone::Muted)]
+        );
+        open.state = PrState::Merged;
+        assert!(pr_indicators(&open).is_empty());
     }
 
     #[test]

@@ -895,6 +895,7 @@ fn record_removed_pr(
         Some(existing) => {
             existing.state = pr.state;
             existing.readiness = pr.readiness;
+            existing.readiness_unavailable = pr.readiness_unavailable;
         }
         None => agent.tracked_prs.push(TrackedPullRequest {
             project: link.project.clone(),
@@ -904,6 +905,7 @@ fn record_removed_pr(
             url: pr.url,
             state: pr.state,
             readiness: pr.readiness,
+            readiness_unavailable: pr.readiness_unavailable,
         }),
     }
     prune_tombstones(agent);
@@ -963,6 +965,7 @@ fn apply_tracked_pr(
         for t in agent.tracked_prs.iter_mut().filter(|t| t.url == url) {
             t.state = pr.state.clone();
             t.readiness = pr.readiness.clone();
+            t.readiness_unavailable = pr.readiness_unavailable;
         }
         prune_tombstones(agent);
         changed |= agent.tracked_prs != before;
@@ -2710,6 +2713,7 @@ mod tests {
             number,
             base: None,
             readiness: None,
+            readiness_unavailable: false,
         }
     }
 
@@ -2732,6 +2736,7 @@ mod tests {
                 url: pr(number, state.clone()).url,
                 state,
                 readiness: None,
+                readiness_unavailable: false,
             });
     }
 
@@ -2782,6 +2787,7 @@ mod tests {
             number: 7,
             base: None,
             readiness: None,
+            readiness_unavailable: false,
         }
     }
 

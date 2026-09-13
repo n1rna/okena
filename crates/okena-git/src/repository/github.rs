@@ -349,9 +349,10 @@ fn is_graphql_rate_limit(error: &Value) -> bool {
 pub(crate) struct GithubClient {
     host: String,
     token: String,
-    /// Messages of the errors the last GraphQL call reported, so a caller can
-    /// tell a query this host rejects from any other failure.
-    last_errors: Vec<String>,
+    /// The errors the last GraphQL call reported, as GitHub sent them, so a
+    /// caller can tell a field this host rejects from any other failure by
+    /// its `type`, `path` and `extensions` rather than its wording.
+    last_errors: Vec<Value>,
 }
 
 impl GithubClient {
@@ -366,7 +367,7 @@ impl GithubClient {
     }
 
     #[cfg(test)]
-    fn with_token(host: &str, token: &str) -> Self {
+    pub(crate) fn with_token(host: &str, token: &str) -> Self {
         Self {
             host: host.to_string(),
             token: token.to_string(),
@@ -374,8 +375,8 @@ impl GithubClient {
         }
     }
 
-    /// The error messages the last [`graphql`](Self::graphql) call reported.
-    pub(crate) fn last_errors(&self) -> &[String] {
+    /// The errors the last [`graphql`](Self::graphql) call reported.
+    pub(crate) fn last_errors(&self) -> &[Value] {
         &self.last_errors
     }
 
@@ -458,11 +459,7 @@ impl GithubClient {
         if let Some(errors) = payload.get("errors").and_then(Value::as_array)
             && !errors.is_empty()
         {
-            self.last_errors = errors
-                .iter()
-                .filter_map(|error| error.get("message").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect();
+            self.last_errors = errors.clone();
             return Err(if errors.iter().any(is_graphql_rate_limit) {
                 ApiError::RateLimited
             } else if errors.iter().all(is_graphql_not_found) {
@@ -479,17 +476,17 @@ impl GithubClient {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use okena_transport::http::testing;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
 
     // The HTTP bus mock is process-global; tests that install one must not
-    // overlap.
+    // overlap, here or in the modules that build on this client.
     static MOCK_LOCK: StdMutex<()> = StdMutex::new(());
 
-    fn mock_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn mock_guard() -> std::sync::MutexGuard<'static, ()> {
         MOCK_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -732,7 +729,7 @@ mod tests {
         }
     }
 
-    fn response(status: u16, headers: &[(&str, &str)], body: &str) -> HttpResponse {
+    pub(crate) fn response(status: u16, headers: &[(&str, &str)], body: &str) -> HttpResponse {
         HttpResponse::new(
             status,
             headers
