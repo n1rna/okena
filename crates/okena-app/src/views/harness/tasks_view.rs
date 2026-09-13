@@ -558,6 +558,20 @@ pub(super) fn sort_tasks(tasks: &mut [Task], sort: TaskSort) {
     }
 }
 
+/// Marker set whenever a task-manager credential is stored or cleared.
+///
+/// Its value means nothing; setting it is the signal. Settings is the only
+/// place that connects, and a Tasks pane observing this reads auth again
+/// instead of waiting to be reopened.
+pub(crate) struct TaskAuthChanged;
+
+impl Global for TaskAuthChanged {}
+
+/// Tell every open Tasks view that a provider was connected or disconnected.
+pub(crate) fn notify_task_auth_changed(cx: &mut App) {
+    cx.set_global(TaskAuthChanged);
+}
+
 /// A provider's name before the daemon has reported its own.
 pub(crate) fn provider_label(provider: &str) -> &str {
     match provider {
@@ -702,8 +716,8 @@ impl HarnessPane {
                         }
                         Err(e) => {
                             // A rejected credential is the one failure with a
-                            // specific fix, so flip to the connect form rather
-                            // than showing a bare error.
+                            // specific fix, so flip to the rejected-key empty
+                            // state rather than showing a bare error.
                             if e.contains("rejected the stored credential") {
                                 this.tasks.connection = TaskAuthState::Expired;
                             }
@@ -711,58 +725,6 @@ impl HarnessPane {
                         }
                     }
                     this.tasks.loading = false;
-                    cx.notify();
-                });
-            });
-        })
-        .detach();
-    }
-
-    pub(super) fn connect(&mut self, cx: &mut Context<Self>) {
-        let api_key = self.tasks.api_key_input.read(cx).value().trim().to_string();
-        if api_key.is_empty() {
-            self.report_error("Enter an API key or token first", cx);
-            return;
-        }
-        let organization_url = (self.tasks.provider == super::AZURE_DEVOPS)
-            .then(|| self.tasks.org_url_input.read(cx).value().trim().to_string());
-        if organization_url.as_deref() == Some("") {
-            self.report_error("Enter your organization URL first", cx);
-            return;
-        }
-
-        self.tasks.loading = true;
-        cx.notify();
-
-        let client = self.client.clone();
-        let provider = self.tasks.provider.clone();
-
-        cx.spawn(async move |this, cx| {
-            let result = smol::unblock(move || {
-                client
-                    .post_action(ActionRequest::TasksConnectApiKey {
-                        provider,
-                        api_key,
-                        organization_url,
-                    })
-                    .and_then(|v| v.ok_or_else(|| "Missing connect result".to_string()))
-            })
-            .await;
-
-            cx.update(|cx| {
-                let _ = this.update(cx, |this, cx| {
-                    this.tasks.loading = false;
-                    match result {
-                        Ok(_) => {
-                            // Clear the key from the field as soon as it's
-                            // stored — no reason to leave a secret on screen.
-                            this.tasks.api_key_input.update(cx, |input, cx| {
-                                input.set_value(String::new(), cx);
-                            });
-                            this.refresh_auth(cx);
-                        }
-                        Err(e) => this.report_error(e, cx),
-                    }
                     cx.notify();
                 });
             });
@@ -3311,80 +3273,88 @@ impl HarnessPane {
 
     // ─── Render ──────────────────────────────────────────────────────────────
 
-    fn render_connect(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// What the view shows until the active provider is connected.
+    ///
+    /// No key field: Settings already has the provider choice and each
+    /// provider's form, and a second form here was a second implementation
+    /// that could only ever offer the one provider the setting named.
+    fn render_not_connected(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let expired = self.tasks.connection == TaskAuthState::Expired;
-        let needs_org = self.tasks.provider == super::AZURE_DEVOPS;
-
-        v_flex()
-            .gap(px(10.0))
-            .p(px(16.0))
-            .max_w(px(560.0))
-            .child(
-                div()
-                    .text_size(ui_text(13.0, cx))
-                    .text_color(rgb(t.text_primary))
-                    .child(if expired {
-                        format!(
-                            "Your {} credential was rejected. Paste a new one to reconnect.",
-                            self.tasks.provider_display_name
-                        )
-                    } else {
-                        format!(
-                            "Connect {} to see your assigned tasks.",
-                            self.tasks.provider_display_name
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .child(super::provider_hint(&self.tasks.provider)),
-            )
-            .when(needs_org, |d| {
-                d.child(
-                    okena_ui::input::input_container(&t, None)
-                        .w_full()
-                        .px(px(8.0))
-                        .py(px(5.0))
-                        .child(
-                            SimpleInput::new(&self.tasks.org_url_input)
-                                .text_size(ui_text(13.0, cx)),
-                        ),
+        // Before the daemon answers there is nothing honest to say yet, and a
+        // "not connected" message would flash for everyone who is.
+        if self.tasks.connection == TaskAuthState::Unknown {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .px(px(16.0))
+                .child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child("Checking your task manager…"),
                 )
-            })
+                .into_any_element();
+        }
+
+        let (heading, explanation) = if self.tasks.connection == TaskAuthState::Expired {
+            let name = &self.tasks.provider_display_name;
+            (
+                format!("{name} rejected your key"),
+                format!(
+                    "The key okena has for {name} no longer works. Replace it in \
+                     Settings to see your assigned tasks again."
+                ),
+            )
+        } else {
+            // Named neutrally: the setting defaults to one provider, but
+            // someone who has connected nothing has not chosen it.
+            (
+                "No task manager connected".to_string(),
+                "okena reads your assigned work from Linear or Azure DevOps. \
+                 Connect one in Settings."
+                    .to_string(),
+            )
+        };
+
+        // Centred both ways; the inner column is capped and may shrink, so a
+        // narrow pane wraps the text rather than pushing it off the side.
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .px(px(16.0))
             .child(
-                okena_ui::input::input_container(&t, None)
+                v_flex()
                     .w_full()
-                    .px(px(8.0))
-                    .py(px(5.0))
+                    .max_w(px(420.0))
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(8.0))
                     .child(
-                        SimpleInput::new(&self.tasks.api_key_input).text_size(ui_text(13.0, cx)),
-                    ),
+                        div()
+                            .w_full()
+                            .text_center()
+                            .text_size(ui_text(15.0, cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(heading),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .text_center()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_secondary))
+                            .child(explanation),
+                    )
+                    .child(div().pt(px(6.0)).child(self.primary_button(
+                        "tasks-open-settings",
+                        "Open settings",
+                        cx.listener(|this, _, _window, cx| this.open_settings("tasks", cx)),
+                        cx,
+                    ))),
             )
-            .child(
-                div()
-                    .id("tasks-connect")
-                    .cursor_pointer()
-                    .w(px(96.0))
-                    .px(px(12.0))
-                    .py(px(5.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.button_primary_bg))
-                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                    .text_size(ui_text_md(cx))
-                    .text_color(rgb(t.button_primary_fg))
-                    .child(if self.tasks.loading {
-                        "Verifying…"
-                    } else {
-                        "Connect"
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| this.connect(cx)),
-                    ),
-            )
+            .into_any_element()
     }
 
     /// A task's groupings, as chips for its row.
@@ -3996,10 +3966,7 @@ impl HarnessPane {
         let connected = self.tasks.connection.is_connected();
 
         if !connected {
-            return v_flex()
-                .size_full()
-                .child(self.render_connect(cx))
-                .into_any_element();
+            return self.render_not_connected(cx);
         }
 
         let account = match &self.tasks.connection {

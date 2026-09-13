@@ -29,7 +29,7 @@ use std::rc::Rc;
 
 pub use editor::EDITOR_CONTEXT;
 pub use okena_core::harness::HarnessSection;
-pub(crate) use tasks_view::provider_label;
+pub(crate) use tasks_view::{notify_task_auth_changed, provider_label};
 
 /// Tasks-view state. Grouped so the pane struct stays readable as more views
 /// grow their own state.
@@ -43,10 +43,6 @@ pub(crate) struct TasksState {
     /// concurrent create, which would race on the worktree path and git's
     /// index lock.
     pub(crate) starting: Option<String>,
-    pub(crate) api_key_input: Entity<SimpleInputState>,
-    /// Organization URL, asked for only by providers whose tokens belong to
-    /// one organization (Azure DevOps).
-    pub(crate) org_url_input: Entity<SimpleInputState>,
     /// Share of the board width given to the Todo lane, 0..1.
     pub(crate) lane_fraction: f32,
     /// Task ids whose sub-tasks are hidden. Collapsed rather than expanded
@@ -326,12 +322,6 @@ pub struct PaneContext {
 
 impl HarnessPane {
     pub fn new(section: HarnessSection, ctx: PaneContext, cx: &mut Context<Self>) -> Self {
-        let api_key_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("Paste your personal API key or access token…")
-        });
-        let org_url_input = cx.new(|cx| {
-            SimpleInputState::new(cx).placeholder("https://dev.azure.com/your-organization")
-        });
         let provider = crate::settings::settings_entity(cx)
             .read(cx)
             .settings
@@ -348,6 +338,13 @@ impl HarnessPane {
                 }
             },
         )
+        .detach();
+        // Connecting and disconnecting happen in Settings, so hear about them
+        // from there: otherwise the empty state stays up until the pane is
+        // reopened, after the user has done exactly what it asked.
+        cx.observe_global::<tasks_view::TaskAuthChanged>(|this: &mut Self, cx| {
+            this.refresh_auth(cx);
+        })
         .detach();
         let new_task_title =
             cx.new(|cx| SimpleInputState::new(cx).placeholder("What needs doing?"));
@@ -388,8 +385,6 @@ impl HarnessPane {
                 tasks: Vec::new(),
                 loading: false,
                 starting: None,
-                api_key_input,
-                org_url_input,
                 lane_fraction: 0.5,
                 collapsed: std::collections::HashSet::new(),
                 children: std::collections::HashMap::new(),
