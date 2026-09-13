@@ -2681,15 +2681,21 @@ mod tests {
             .create_terminal_with_plan(&fixture.to_string_lossy(), &plan)
             .expect("create direct PTY");
 
+        // The shell creates the file when it opens it for the redirect, before
+        // `echo` writes the pid: wait for the pid itself, not the file.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !child_pid_file.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let child_pid = std::fs::read_to_string(&child_pid_file)
-            .expect("child pid was written")
-            .trim()
-            .parse::<i32>()
-            .expect("child pid is numeric");
+        let child_pid = loop {
+            let pid = std::fs::read_to_string(&child_pid_file)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<i32>().ok());
+            match pid {
+                Some(pid) => break pid,
+                None if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                None => panic!("child pid was not written within 2s"),
+            }
+        };
 
         manager.kill(&terminal_id);
         assert!(manager.flush_teardown_with_timeout(
