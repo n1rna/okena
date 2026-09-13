@@ -186,6 +186,18 @@ pub(crate) fn resolve_base_repo(path: &Path) -> Option<GithubRepo> {
     select_base_repo(remote_candidates(&repo), &host_filter())
 }
 
+/// The GitHub repository behind `origin`, where this checkout's own branches
+/// are pushed. A PR whose head lives anywhere else — a fork's branch that
+/// happens to share a name — is not this checkout's.
+pub(crate) fn origin_repo(path: &Path) -> Option<GithubRepo> {
+    let repo = crate::gix_helpers::open(path)?;
+    let remote = repo.find_remote("origin").ok()?;
+    remote
+        .url(gix::remote::Direction::Push)
+        .or_else(|| remote.url(gix::remote::Direction::Fetch))
+        .and_then(repo_from_url)
+}
+
 struct TokenEntry {
     token: Option<String>,
     fetched_at: Instant,

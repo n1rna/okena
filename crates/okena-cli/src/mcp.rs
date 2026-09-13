@@ -645,7 +645,7 @@ fn create_subtask(args: &Value) -> Result<Value, String> {
 
 /// Whether a daemon refused an action for carrying `field`, which it predates.
 fn rejects_field(error: &str, field: &str) -> bool {
-    error.contains("unknown field") && error.contains(&format!("`{field}`"))
+    error.contains(&format!("unknown field `{field}`"))
 }
 
 fn register_asset(args: &Value) -> Result<Value, String> {

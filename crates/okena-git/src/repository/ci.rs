@@ -12,7 +12,7 @@ use std::time::Duration;
 use okena_core::process::{command, safe_output_with_timeout};
 use serde_json::{Value, json};
 
-use super::github::{ApiError, GithubClient, GithubRepo, resolve_base_repo};
+use super::github::{ApiError, GithubClient, GithubRepo, origin_repo, resolve_base_repo};
 use super::status::get_pushed_sha;
 
 /// Hard cap on the remaining `gh` invocation. `gh` can hang indefinitely —
@@ -150,8 +150,10 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
     };
     let current_sha = super::status::get_head_sha(path);
     let pushed_sha = get_pushed_sha(path);
+    // No token or no GitHub remote to ask: nothing was learned, so a PR the
+    // caller already knows must not be read as gone.
     let Some((mut client, repo)) = github_client(path) else {
-        return PrFetch::Fetched(None);
+        return PrFetch::Failed;
     };
 
     let variables = json!({ "owner": repo.owner, "repo": repo.name, "headBranch": branch });
@@ -202,27 +204,132 @@ pub fn fetch_pr_by_number(repo_path: &Path, number: u32) -> PrFetch {
     }
 }
 
-/// Get the newest PR whose head is `branch`, in the base repository of the
-/// checkout at `repo_path`, whatever its state.
+/// Like [`PR_LOOKUP_QUERY`], but a few PRs, each with its head repository: a
+/// branch name alone does not say whose branch it is.
+const PR_BRANCH_LOOKUP_QUERY: &str = r#"
+query PullRequestsByHead($owner: String!, $repo: String!, $headBranch: String!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequests(
+      states: [OPEN, CLOSED, MERGED],
+      headRefName: $headBranch,
+      first: 10,
+      orderBy: {field: CREATED_AT, direction: DESC}
+    ) {
+      nodes {
+        url state isDraft number baseRefName headRefOid
+        headRepositoryOwner { login }
+        headRepository { name }
+      }
+    }
+  }
+}"#;
+
+/// A `pullRequests.nodes[]` entry of [`PR_BRANCH_LOOKUP_QUERY`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct BranchPrNode {
+    #[serde(flatten)]
+    pr: PrNode,
+    head_repository_owner: Option<HeadOwner>,
+    head_repository: Option<HeadRepository>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct HeadOwner {
+    login: String,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct HeadRepository {
+    name: String,
+}
+
+/// Get the newest PR that was opened from `branch` of the checkout at
+/// `repo_path`, whatever its state.
 ///
 /// For a worktree removed before its PR was ever polled: the branch name is
-/// all that is left of it. Unlike [`fetch_pr_info`] there is no checkout to
-/// compare a closed PR's head against, so every state is reported as it is.
+/// all that is left of it, and a name is not an identity. So the PR's head
+/// must live in `origin` — not a fork's branch that happens to share the name
+/// — and, while the branch still exists locally or on origin, point at its
+/// tip. The default branch is never looked up: every fork has one.
 pub fn fetch_pr_by_branch(repo_path: &Path, branch: &str) -> PrFetch {
+    let default_branch = super::branch::get_default_branch(repo_path);
+    if !branch_lookup_allowed(branch, default_branch.as_deref()) {
+        return PrFetch::Fetched(None);
+    }
+    // Without knowing where this checkout pushes, its PR cannot be told apart
+    // from anyone else's on the same name.
+    let Some(head) = origin_repo(repo_path) else {
+        return PrFetch::Fetched(None);
+    };
     let Some((mut client, repo)) = github_client(repo_path) else {
         return PrFetch::Failed;
     };
+    let tips = branch_tips(repo_path, branch);
     let variables = json!({ "owner": repo.owner, "repo": repo.name, "headBranch": branch });
-    match client.graphql(PR_LOOKUP_QUERY, variables) {
+    match client.graphql(PR_BRANCH_LOOKUP_QUERY, variables) {
         Err(ApiError::RateLimited) => PrFetch::RateLimited,
         Err(ApiError::Failed) => PrFetch::Failed,
-        Ok(data) => PrFetch::Fetched(
-            data.pointer("/repository/pullRequests/nodes/0")
+        Ok(data) => {
+            let nodes = data
+                .pointer("/repository/pullRequests/nodes")
                 .cloned()
-                .and_then(|node| serde_json::from_value::<PrNode>(node).ok())
-                .and_then(pr_info_of),
-        ),
+                .and_then(|nodes| serde_json::from_value::<Vec<BranchPrNode>>(nodes).ok())
+                .unwrap_or_default();
+            PrFetch::Fetched(pick_branch_pr(nodes, &head, &tips).and_then(pr_info_of))
+        }
     }
+}
+
+/// Whether a branch is worth looking a PR up by: not blank, and never the
+/// default branch.
+fn branch_lookup_allowed(branch: &str, default_branch: Option<&str>) -> bool {
+    let branch = branch.trim();
+    !branch.is_empty() && Some(branch) != default_branch
+}
+
+/// The newest PR that is this checkout's: its head lives in `head` (origin),
+/// and — when the branch's tip is still known — points at that tip.
+fn pick_branch_pr(nodes: Vec<BranchPrNode>, head: &GithubRepo, tips: &[String]) -> Option<PrNode> {
+    nodes
+        .into_iter()
+        .find(|node| {
+            let owner_matches = node
+                .head_repository_owner
+                .as_ref()
+                .is_some_and(|owner| owner.login.eq_ignore_ascii_case(&head.owner));
+            let repo_matches = node
+                .head_repository
+                .as_ref()
+                .is_some_and(|repo| repo.name.eq_ignore_ascii_case(&head.name));
+            let tip_matches = tips.is_empty()
+                || node
+                    .pr
+                    .head_ref_oid
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|oid| tips.iter().any(|tip| tip == oid));
+            owner_matches && repo_matches && tip_matches
+        })
+        .map(|node| node.pr)
+}
+
+/// Where `branch` points in the repo at `repo_path`: its local head and its
+/// origin tracking ref, whichever still exist.
+fn branch_tips(repo_path: &Path, branch: &str) -> Vec<String> {
+    let Some(repo) = crate::gix_helpers::open(repo_path) else {
+        return Vec::new();
+    };
+    [
+        format!("refs/heads/{branch}"),
+        format!("refs/remotes/origin/{branch}"),
+    ]
+    .iter()
+    .filter_map(|name| repo.rev_parse_single(name.as_str()).ok())
+    .map(|id| id.detach().to_hex().to_string())
+    .collect()
 }
 
 /// Map a PR node to [`PrInfo`](crate::PrInfo). Returns `None` for a closed PR
@@ -1328,5 +1435,73 @@ mod tests {
                 summary: None
             }
         );
+    }
+
+    fn branch_node(owner: &str, repo: &str, oid: &str, number: u32) -> super::BranchPrNode {
+        serde_json::from_value(serde_json::json!({
+            "url": format!("https://github.com/me/okena/pull/{number}"),
+            "state": "OPEN",
+            "isDraft": false,
+            "number": number,
+            "headRefOid": oid,
+            "headRepositoryOwner": { "login": owner },
+            "headRepository": { "name": repo },
+        }))
+        .expect("branch node")
+    }
+
+    fn origin() -> super::GithubRepo {
+        super::GithubRepo {
+            host: "github.com".into(),
+            owner: "me".into(),
+            name: "okena".into(),
+        }
+    }
+
+    #[test]
+    fn a_forks_pr_on_the_same_branch_name_is_not_claimed() {
+        let fork_only = vec![branch_node("someone", "okena", "abc", 12)];
+        assert!(super::pick_branch_pr(fork_only, &origin(), &[]).is_none());
+
+        // The fork's PR is newer, but only ours is ours.
+        let both = vec![
+            branch_node("someone", "okena", "abc", 12),
+            branch_node("Me", "Okena", "abc", 7),
+        ];
+        assert_eq!(
+            super::pick_branch_pr(both, &origin(), &[]).map(|pr| pr.number),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn a_pr_whose_head_is_not_the_branch_tip_is_not_claimed() {
+        let tips = vec!["def".to_string()];
+        let stale = vec![branch_node("me", "okena", "abc", 7)];
+        assert!(super::pick_branch_pr(stale, &origin(), &tips).is_none());
+
+        let both = vec![
+            branch_node("me", "okena", "abc", 7),
+            branch_node("me", "okena", "def", 5),
+        ];
+        assert_eq!(
+            super::pick_branch_pr(both, &origin(), &tips).map(|pr| pr.number),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn the_default_branch_is_never_looked_up() {
+        assert!(!super::branch_lookup_allowed("main", Some("main")));
+        assert!(!super::branch_lookup_allowed("  ", Some("main")));
+        assert!(super::branch_lookup_allowed("chore/qbl-1-x", Some("main")));
+        assert!(super::branch_lookup_allowed("fix-typo", None));
+    }
+
+    #[test]
+    fn a_branch_that_is_gone_everywhere_has_no_tips() {
+        let (_tmp, repo) = super::super::test_support::init_temp_repo();
+        assert!(super::branch_tips(&repo, "never-existed").is_empty());
+        assert_eq!(super::branch_tips(&repo, "main").len(), 1);
     }
 }

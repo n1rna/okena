@@ -262,7 +262,8 @@ pub struct AgentSessionState {
     /// not stored here — see `crate::session_assets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets: Vec<AgentAsset>,
-    /// Open PRs of this session's removed worktrees, kept until they close.
+    /// PRs of this session's removed worktrees: an open one until it closes,
+    /// and a merged or closed one only while a registered asset names it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracked_prs: Vec<TrackedPullRequest>,
 }
