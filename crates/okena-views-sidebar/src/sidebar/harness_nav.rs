@@ -14,7 +14,7 @@ use okena_ui::tokens::{ui_text, ui_text_ms};
 use okena_workspace::harness_state::active_harness;
 use okena_workspace::requests::WorkbenchRequest;
 
-use super::Sidebar;
+use super::{Sidebar, SidebarList};
 
 impl Sidebar {
     pub(super) fn render_harness_nav(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -22,39 +22,47 @@ impl Sidebar {
 
         let active = active_harness(self.window_id, cx);
 
+        // The two overviews first: they are where the work is watched, and the
+        // harness views below are where it is planned. Links rather than a
+        // button in the list header, so every place the main area can show is
+        // named in one list.
+        let overviews: Vec<AnyElement> = [
+            ("agents", "Agents", SidebarList::Agents),
+            ("projects", "Projects", SidebarList::Projects),
+        ]
+        .into_iter()
+        .map(|(slug, label, list)| {
+            let is_active = active.is_none() && self.overview_is_active(list, cx);
+            self.nav_item(
+                SharedString::from(format!("harness-nav-{slug}")),
+                label,
+                is_active,
+                cx,
+            )
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.open_overview(list, cx);
+            }))
+            .into_any_element()
+        })
+        .collect();
+
         let items: Vec<AnyElement> = HarnessSection::all()
             .into_iter()
             .map(|section| {
                 let broker = self.request_broker.clone();
                 let is_active = active == Some(section);
-                div()
-                    .id(SharedString::from(format!(
-                        "harness-nav-{}",
-                        section.slug()
-                    )))
-                    .cursor_pointer()
-                    .h(px(24.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .when(is_active, |d| d.bg(rgb(t.bg_selection)))
-                    .when(!is_active, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
-                    .text_size(ui_text(13.0, cx))
-                    .text_color(if is_active {
-                        rgb(t.text_primary)
-                    } else {
-                        rgb(t.text_secondary)
-                    })
-                    .child(section.label())
-                    .on_click(move |_, _window, cx| {
-                        broker.update(cx, |b, cx| {
-                            b.push_workbench_request(
-                                WorkbenchRequest::OpenHarnessView(section),
-                                cx,
-                            );
-                        });
-                    })
-                    .into_any_element()
+                self.nav_item(
+                    SharedString::from(format!("harness-nav-{}", section.slug())),
+                    section.label(),
+                    is_active,
+                    cx,
+                )
+                .on_click(move |_, _window, cx| {
+                    broker.update(cx, |b, cx| {
+                        b.push_workbench_request(WorkbenchRequest::OpenHarnessView(section), cx);
+                    });
+                })
+                .into_any_element()
             })
             .collect();
 
@@ -69,12 +77,40 @@ impl Sidebar {
                     .text_color(rgb(t.text_muted))
                     .child("HARNESS"),
             )
+            .children(overviews)
             .children(items)
             .child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border)))
     }
 }
 
 impl Sidebar {
+    /// One entry in the nav, the same for an overview and a harness view.
+    fn nav_item(
+        &self,
+        id: SharedString,
+        label: &'static str,
+        is_active: bool,
+        cx: &App,
+    ) -> Stateful<Div> {
+        let t = theme(cx);
+        div()
+            .id(id)
+            .cursor_pointer()
+            .h(px(24.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .when(is_active, |d| d.bg(rgb(t.bg_selection)))
+            .when(!is_active, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+            .text_size(ui_text(13.0, cx))
+            .text_color(if is_active {
+                rgb(t.text_primary)
+            } else {
+                rgb(t.text_secondary)
+            })
+            .child(label)
+    }
+
     /// Leave the harness view so the projects grid shows again.
     ///
     /// Called from every path that selects a project — click and keyboard

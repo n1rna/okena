@@ -81,7 +81,7 @@ impl KnowledgeState {
 
     /// Stop showing the open file. Its buffer stays only if it holds unsaved
     /// edits. Call before `root_key` changes: buffers are keyed by it.
-    fn clear_selection(&mut self) {
+    pub(super) fn clear_selection(&mut self) {
         if let Some(path) = self.selected.take() {
             self.documents
                 .leave(self.root_key.as_deref().unwrap_or_default(), &path);
@@ -369,6 +369,10 @@ impl HarnessPane {
         if self.knowledge.selected.as_deref() != Some(path.as_str()) {
             self.knowledge.clear_selection();
         }
+        // The form and an entry share the one panel, so picking an entry is
+        // how you leave the form. Without this, clicking one while drafting
+        // looked like nothing had happened.
+        self.knowledge_draft.open = false;
         self.knowledge.selected = Some(path.clone());
         self.knowledge.content_error = None;
         cx.notify();
@@ -792,7 +796,25 @@ impl HarnessPane {
                 });
             }
         }
-        col.into_any_element()
+        // Last, under the material they are writing: what is running matters
+        // less than what exists, right up until you want to know.
+        col.children(self.render_related_agents(self.knowledge_session_ids(cx), cx))
+            .into_any_element()
+    }
+
+    /// Sessions writing knowledge.
+    ///
+    /// Every knowledge session, not only ones in the open root: a user
+    /// switching roots to check on an agent would otherwise have to guess
+    /// which root it was started under.
+    fn knowledge_session_ids(&self, cx: &App) -> Vec<String> {
+        self.workspace
+            .read(cx)
+            .projects()
+            .iter()
+            .filter(|p| p.is_knowledge_session())
+            .map(|p| p.id.clone())
+            .collect()
     }
 
     /// Right column with nothing open: what this root is, its sync state, its
@@ -1160,14 +1182,6 @@ impl HarnessPane {
                 .into_any_element();
         };
 
-        // Writing with an agent takes the whole view, like drafting a spec
-        // change does.
-        if self.knowledge_draft.open {
-            return view
-                .child(self.render_knowledge_draft_form(&stores, cx))
-                .into_any_element();
-        }
-
         let mut actions = vec![
             self.toolbar_icon(
                 "knowledge-settings",
@@ -1189,25 +1203,12 @@ impl HarnessPane {
         ];
         // Only offered where knowledge could be written.
         if stores.roots.iter().any(|r| r.healthy) {
-            actions.push(
-                div()
-                    .id("knowledge-new-with-agent")
-                    .cursor_pointer()
-                    .flex_shrink_0()
-                    .px(px(12.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.button_primary_bg))
-                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
-                    .text_size(ui_text_md(cx))
-                    .text_color(rgb(t.button_primary_fg))
-                    .child("New with agent")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| this.open_knowledge_draft(cx)),
-                    )
-                    .into_any_element(),
-            );
+            actions.push(self.primary_button(
+                "knowledge-new",
+                "New",
+                cx.listener(|this, _, _window, cx| this.open_knowledge_draft(cx)),
+                cx,
+            ));
         }
         let mut view = view.child(self.render_toolbar(actions, cx));
         if let Some(notice) = self.knowledge_draft.notice.clone() {
@@ -1235,7 +1236,14 @@ impl HarnessPane {
                 .w_full()
                 .bg(rgb(t.bg_primary))
                 .child(self.render_knowledge_tree(&stores, cx))
-                .child(self.render_knowledge_document(open_root.as_ref(), cx)),
+                // The form stands where an entry's text stands. It used to
+                // take the whole view, which hid the entries you are meant to
+                // read before adding to them.
+                .child(if self.knowledge_draft.open {
+                    self.render_knowledge_draft_form(&stores, cx)
+                } else {
+                    self.render_knowledge_document(open_root.as_ref(), cx)
+                }),
         )
         .into_any_element()
     }

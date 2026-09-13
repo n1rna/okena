@@ -64,8 +64,7 @@ fence, then the entry's name.
 
 A template lists the `{placeholder}` names its body uses. A placeholder is a
 single identifier in braces (`{key}`, `{change_dir}`), so JSON such as
-`{"a": 1}` does not count. Which flows exist, and which variables each one
-fills, is not defined yet.
+`{"a": 1}` does not count. The flows are listed under "Launch prompts" below.
 
 Frontmatter okena cannot parse does not hide the entry. The entry is still
 listed, carrying a `frontmatter_invalid` warning. Fields other than those above
@@ -235,9 +234,104 @@ used by OpenSpec stores, is described in
   - **In a project root:** committing is left to you.
   - **Agent:** it starts the agent you pick, else `harness.agent_command`;
     without an agent it refuses.
-- **Settings → Knowledge** clones, adds and creates stores. It removes a store
+- **Settings → Knowledge** clones, adds and creates stores. `prompts` names the
+  store launch briefs are read from; unset is okena's built-ins. It removes a store
   from the registry while leaving the checkout on disk. It also switches
   project discovery on or off and sets the clone folder.
+
+## Launch prompts
+
+Every brief okena opens an agent with comes from a template, so an
+organisation can change how its agents are briefed without waiting for a
+release.
+
+### Flows
+
+A **flow** is a point at which okena briefs an agent. A store overrides one by
+putting a file at `templates/<flow>.md`; its frontmatter should say
+`for: <flow>`.
+
+| Flow | When | Variables |
+|---|---|---|
+| `task-start` | Starting work on a task, in its worktrees | `key`, `title`, `url`, `branch`, `description`, `projects`, `note` |
+| `task-coordinate` | Splitting a task among sub-agents and starting them | `key`, `title`, `description`, `children`, `projects`, `note` |
+| `break-down` | Splitting a task into sub-tasks over MCP | `key`, `parent_id`, `title`, `kind`, `url`, `description`, `child_kind` |
+| `task-create` | Drafting a new task | `title`, `kind`, `container`, `parent`, `description` |
+| `spec-draft` | Filling in a scaffolded OpenSpec change | `idea`, `change`, `change_dir`, `root_path`, `store_note`, `references` |
+| `knowledge-draft` | Adding to or updating a knowledge root | `request`, `path`, `what`, `commit_note` |
+| `agent-session` | A free-form session against a goal you typed | `goal`, `projects` |
+
+### Template syntax
+
+Three forms, each about where text comes from — there are no conditionals or
+loops, so reading a template tells you what the agent will be told:
+
+| Form | Means |
+|---|---|
+| `{name}` | A value okena fills. |
+| `{>partial}` | The text of `templates/partials/<partial>.md`. |
+| `{name\|partial}` | The value, or the partial when the value is empty. |
+
+`{{` and `}}` are literal braces. A placeholder the flow does not fill, or a
+partial that does not exist, is left verbatim and reported — never silently
+emptied. Partials may include partials, four deep.
+
+### Partials
+
+Every sentence okena says to an agent is in a flow template or a partial; none
+is written in code. Where okena has to choose between wordings — a store or a
+folder, who commits, a fan-out or a group — the choice is code and the words are
+the partial it picks.
+
+| Partial | Used for |
+|---|---|
+| `reporting` | Every flow: report `state` and `suggestions` through `okena_report_status` when stopping to wait |
+| `no-description`, `no-description-yet` | A breakdown or draft brief when there is no description |
+| `given-projects`, `given-worktrees` | Heading over the `projects` list (`{list}`) |
+| `spec-store-note`, `spec-folder-note` | How to use the `openspec` CLI (`{store_id}`, `{change}`) |
+| `spec-references`, `spec-reference` | Referenced stores (`{list}`; `{store_id}`, `{path}`) |
+| `knowledge-commit-store`, `knowledge-commit-project` | Who commits knowledge |
+| `fan-out-note` | Each agent of a fan-out (`{parent}`, `{siblings}`) |
+| `group-note` | An agent given several sub-tasks by a coordinator (`{also}`) |
+| `coordinate-child` | One sub-task in a coordinator's list (`{key}`, `{kind}`, `{title}`, `{summary}`) |
+
+Some variables are still assembled by okena, because they are lists or
+optional blocks: `store_note`, `references`, `projects`, `note`, `children`.
+Each is either empty or arrives with its own blank line in front, so a template
+can place it on its own line without leaving a hole when it is absent. Their
+words come from the partials above.
+
+### Resolution
+
+Per flow and per partial:
+
+1. The store named by `harness.knowledge.prompts`, if it has the file.
+2. okena's built-in.
+
+A store can override one partial — say, `reporting` — without supplying any
+template, and one template without supplying any partial. A store that is
+unregistered, moved or unreadable degrades to the built-ins rather than
+breaking every launch.
+
+`harness.agent_args` is the exception. Where it is set it still wins for
+`task-start`: it is an explicit instruction about how to launch that agent, and
+more specific than any template.
+
+### The `okena-defaults` store
+
+okena's own templates and partials are written to
+`<profile config dir>/knowledge/okena-defaults` and registered, so they are
+readable in Harness → Knowledge like any other store. They are the same bytes
+the built-ins render from.
+
+- It is a knowledge root, not a git repository.
+- okena keeps it current. `.okena-knowledge/defaults.lock` records a hash of
+  each file as okena writes it. On start, a file still matching its hash is
+  updated when the built-in changes; a file you have edited no longer matches
+  and is left alone. A file with no record is only adopted if it already
+  matches the built-in, since okena cannot tell an old default from an edit.
+- To override a file for everyone, copy it into your own store at the same path
+  and point `harness.knowledge.prompts` at that store.
 
 ## Limits
 

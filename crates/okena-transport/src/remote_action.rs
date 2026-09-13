@@ -768,6 +768,10 @@ mod action_timeout_tests {
             agent_root: None,
             branch: None,
             agent_command: None,
+            note: None,
+            coordinate: false,
+            also: Vec::new(),
+            siblings: Vec::new(),
         }
     }
 

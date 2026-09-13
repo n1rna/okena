@@ -145,12 +145,84 @@ pub struct AgentAsset {
     pub created_at: u64,
 }
 
+/// Where an agent says it is, as distinct from what its terminal shows.
+///
+/// The terminal can tell okena that a prompt is idle; it cannot tell okena
+/// *why*. An agent that stopped because it has a question and one that stopped
+/// because the work is ready for you look identical from outside, and they ask
+/// for different things from you. So the agent says which.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ser, De, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    /// Getting on with it; nothing needed from you.
+    #[default]
+    Working,
+    /// Stopped to ask you something it cannot decide alone.
+    NeedsInput,
+    /// Finished a piece of work and waiting for you to look, or to say what
+    /// happens next — commit, open a PR, carry on.
+    ReadyForReview,
+    /// Cannot continue: a failing build, a missing credential, a conflict.
+    Blocked,
+    /// Done, with nothing further planned.
+    Done,
+    /// A state a newer agent reported that this build doesn't model. Treated
+    /// as wanting attention, since an unknown reason to stop is still a stop.
+    #[serde(other)]
+    Unknown,
+}
+
+impl AgentState {
+    /// Whether this is a reason for you to look, rather than a report.
+    pub const fn wants_attention(self) -> bool {
+        matches!(
+            self,
+            AgentState::NeedsInput
+                | AgentState::ReadyForReview
+                | AgentState::Blocked
+                | AgentState::Unknown
+        )
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            AgentState::Working => "working",
+            AgentState::NeedsInput => "needs input",
+            AgentState::ReadyForReview => "ready for review",
+            AgentState::Blocked => "blocked",
+            AgentState::Done => "done",
+            AgentState::Unknown => "needs attention",
+        }
+    }
+}
+
+/// Something the agent suggests you tell it next.
+///
+/// The label is what you read; the instruction is what gets typed into the
+/// agent if you pick it. Kept apart so a button can say "Commit and open a PR"
+/// while the agent receives the precise sentence it asked to be given.
+#[derive(Clone, Debug, PartialEq, Eq, Ser, De)]
+pub struct AgentSuggestion {
+    pub label: String,
+    pub instruction: String,
+}
+
 /// Agent-reported state for a session project.
 #[derive(Clone, Debug, PartialEq, Eq, Ser, De, Default)]
 pub struct AgentSessionState {
     /// Free-text status the agent last reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Why it stopped, when it has. `None` from an agent that only ever sent a
+    /// status line, which is every agent before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<AgentState>,
+    /// What it is asking, when it needs input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    /// What it suggests you tell it next.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<AgentSuggestion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets: Vec<AgentAsset>,
 }
@@ -158,6 +230,38 @@ pub struct AgentSessionState {
 #[cfg(test)]
 mod agent_tests {
     use super::{AgentAsset, AgentAssetKind, AgentSessionState};
+
+    #[test]
+    fn only_stopping_states_want_attention() {
+        use super::AgentState;
+        assert!(!AgentState::Working.wants_attention());
+        assert!(!AgentState::Done.wants_attention());
+        for s in [
+            AgentState::NeedsInput,
+            AgentState::ReadyForReview,
+            AgentState::Blocked,
+        ] {
+            assert!(s.wants_attention(), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_state_from_a_newer_agent_still_asks_for_attention() {
+        // An unrecognized reason to stop is still a stop; reading it as
+        // "working" would hide an agent that is waiting on you.
+        let s: super::AgentState = serde_json::from_str("\"awaiting_approval\"").expect("decode");
+        assert_eq!(s, super::AgentState::Unknown);
+        assert!(s.wants_attention());
+    }
+
+    #[test]
+    fn a_state_from_an_older_daemon_decodes_with_no_reason() {
+        let s: AgentSessionState =
+            serde_json::from_str(r#"{"status":"reading the code"}"#).expect("decode");
+        assert_eq!(s.status.as_deref(), Some("reading the code"));
+        assert_eq!(s.state, None);
+        assert!(s.suggestions.is_empty());
+    }
 
     #[test]
     fn unknown_asset_kind_decodes_as_other() {

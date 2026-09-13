@@ -41,9 +41,51 @@ impl ProjectData {
         self.spec_change.is_some()
     }
 
+    /// Whether this project is a knowledge-writing session.
+    pub fn is_knowledge_session(&self) -> bool {
+        self.knowledge_root.is_some()
+    }
+
+    /// Whether this project is an agent drafting a task that does not exist
+    /// yet.
+    pub fn is_task_draft_session(&self) -> bool {
+        self.task_draft.is_some()
+    }
+
     /// Whether this project is a free-form agent session the user configured.
     pub fn is_custom_session(&self) -> bool {
         self.custom_session.is_some()
+    }
+
+    /// What an agent session was started to do, or `None` for a plain project.
+    ///
+    /// Derived from the markers rather than stored, because every one of them
+    /// is already stored and a fifth field saying which of the four is set
+    /// could only ever disagree with them.
+    ///
+    /// Order matters: a breakdown carries both `custom_session` and
+    /// `task_ref`, and a work session carries `task_ref` alone, so the
+    /// narrower markers have to be checked first.
+    pub fn agent_role(&self) -> Option<AgentRole> {
+        if self.spec_change.is_some() {
+            return Some(AgentRole::Spec);
+        }
+        if self.knowledge_root.is_some() {
+            return Some(AgentRole::Knowledge);
+        }
+        // Drafting a ticket, or reshaping one that exists — both are agents
+        // working *on* the ticket rather than on the work it describes.
+        if self.task_draft.is_some() {
+            return Some(AgentRole::Task);
+        }
+        if self.custom_session.is_some() {
+            return Some(if self.task_ref.is_some() {
+                AgentRole::Task
+            } else {
+                AgentRole::Custom
+            });
+        }
+        self.is_agent_session().then_some(AgentRole::Implement)
     }
 
     /// Whether this project is any kind of agent session.
@@ -51,7 +93,63 @@ impl ProjectData {
     /// Both kinds are rooted above the repos rather than in one, so anything
     /// that lists sessions apart from repos wants this rather than either half.
     pub fn is_any_agent_session(&self) -> bool {
-        self.is_agent_session() || self.is_spec_session() || self.is_custom_session()
+        self.is_agent_session()
+            || self.is_spec_session()
+            || self.is_custom_session()
+            || self.is_knowledge_session()
+            || self.is_task_draft_session()
+    }
+}
+
+/// What an agent session was started to do.
+///
+/// The kinds okena can tell apart, which is what a reader scanning a mixed
+/// list needs — not every distinction okena makes internally. Drafting a
+/// ticket, breaking one down and updating one are all [`AgentRole::Task`]:
+/// they differ in what the agent does to the ticket, not in what it is for,
+/// and three badges for that would be noise in a sidebar.
+///
+/// Testing and review agents will be their own variants when they exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentRole {
+    /// Doing the work a ticket describes, in its worktrees.
+    Implement,
+    /// Writing or reshaping a ticket: drafting a new one, breaking one down,
+    /// filling one in.
+    Task,
+    /// Drafting an OpenSpec change.
+    Spec,
+    /// Writing into a knowledge root.
+    Knowledge,
+    /// A free-form session against a goal the user typed.
+    Custom,
+}
+
+impl AgentRole {
+    /// The word on the row's badge. Short, because it sits before a name that
+    /// needs the width more.
+    pub const fn badge(self) -> &'static str {
+        match self {
+            AgentRole::Implement => "build",
+            AgentRole::Task => "task",
+            AgentRole::Spec => "spec",
+            AgentRole::Knowledge => "docs",
+            AgentRole::Custom => "agent",
+        }
+    }
+
+    /// The suffix okena used to append to these sessions' names.
+    ///
+    /// Kept only to strip it back off: the badge says the same thing, and a
+    /// row reading "add-login (spec)" beside a badge reading "spec" says it
+    /// twice. New sessions are not given one; sessions created before this
+    /// still carry it in a name that is now the user's to rename.
+    pub const fn legacy_name_suffix(self) -> Option<&'static str> {
+        match self {
+            AgentRole::Spec => Some(" (spec)"),
+            AgentRole::Implement | AgentRole::Task | AgentRole::Custom => Some(" (agent)"),
+            AgentRole::Knowledge => None,
+        }
     }
 }
 
@@ -260,6 +358,22 @@ pub struct ProjectData {
     /// the Specs view can tie a running agent back to the change it is writing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_change: Option<String>,
+    /// The title a task-drafting session is working towards, if it is one.
+    ///
+    /// A task-create agent has no task to point at yet — that is what it is
+    /// for — so it cannot be recognized by `task_ref` like the others. This
+    /// holds whatever the user typed, which is also what the placeholder row
+    /// in the task list has to show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_draft: Option<String>,
+    /// The knowledge root this session is writing into, if it is one.
+    ///
+    /// Holds the root's key. Stored rather than derived from the session's
+    /// goal text for the same reason `spec_change` is: a session that stopped
+    /// being recognizable because someone reworded it would silently fall out
+    /// of the Knowledge view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_root: Option<String>,
     /// What a free-form agent session was started to do.
     ///
     /// The third kind of session, alongside task work and spec writing: one the
@@ -406,6 +520,8 @@ mod tests {
             task_ref: None,
             agent: None,
             spec_change: None,
+            knowledge_root: None,
+            task_draft: None,
             custom_session: None,
             folder_color: Default::default(),
             hooks: Default::default(),
@@ -2027,6 +2143,8 @@ mod tests {
             display_key: "LIN-9".into(),
             title: "Ship the harness".into(),
             url: "https://linear.app/x/issue/LIN-9".into(),
+            parent_id: None,
+            parent_key: None,
         });
 
         let round: ProjectData =
@@ -2068,6 +2186,8 @@ mod agent_session_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             spec_change: None,
+            knowledge_root: None,
+            task_draft: None,
             custom_session: None,
             agent: None,
             folder_color: Default::default(),
@@ -2090,6 +2210,8 @@ mod agent_session_tests {
             display_key: "LIN-1".into(),
             title: "t".into(),
             url: "u".into(),
+            parent_id: None,
+            parent_key: None,
         }
     }
 
@@ -2119,5 +2241,106 @@ mod agent_session_tests {
             branch_name: String::new(),
         });
         assert!(!p.is_agent_session());
+    }
+}
+
+#[cfg(test)]
+mod agent_role_tests {
+    use super::{AgentRole, ProjectData};
+
+    /// Built the way the neighbouring tests do: from the JSON a persisted
+    /// project actually is, so a marker renamed on the wire fails here too.
+    fn project(extra: serde_json::Value) -> ProjectData {
+        let mut v = serde_json::json!({ "id": "p1", "name": "p", "path": "/p" });
+        let map = v.as_object_mut().expect("object");
+        for (k, value) in extra.as_object().expect("object") {
+            map.insert(k.clone(), value.clone());
+        }
+        serde_json::from_value(v).expect("decode")
+    }
+
+    fn task_ref() -> serde_json::Value {
+        serde_json::json!({
+            "id": { "provider": "linear", "external_id": "uuid" },
+            "display_key": "QBL-1",
+            "title": "t",
+            "url": ""
+        })
+    }
+
+    #[test]
+    fn a_plain_project_has_no_role() {
+        assert_eq!(project(serde_json::json!({})).agent_role(), None);
+    }
+
+    #[test]
+    fn a_worktree_on_a_task_is_not_a_session() {
+        // Its agent runs in the worktree; the session is the thing above them.
+        let p = project(serde_json::json!({
+            "task_ref": task_ref(),
+            "worktree_info": { "parent_project_id": "p0" },
+        }));
+        assert_eq!(p.agent_role(), None);
+    }
+
+    #[test]
+    fn a_task_session_is_implementing() {
+        let p = project(serde_json::json!({ "task_ref": task_ref() }));
+        assert_eq!(p.agent_role(), Some(AgentRole::Implement));
+    }
+
+    #[test]
+    fn a_helper_about_a_task_is_working_on_the_ticket_not_the_work() {
+        // A breakdown carries both markers. Reading it as `Implement` would
+        // say an agent is doing the work when it is only deciding what it is.
+        let p = project(serde_json::json!({
+            "task_ref": task_ref(),
+            "custom_session": "QBL-1 breakdown",
+        }));
+        assert_eq!(p.agent_role(), Some(AgentRole::Task));
+    }
+
+    #[test]
+    fn drafting_a_ticket_is_a_ticket_agent_even_with_no_ticket_yet() {
+        let p = project(serde_json::json!({
+            "task_draft": "Add SSO",
+            "custom_session": "Draft: Add SSO",
+        }));
+        assert_eq!(p.agent_role(), Some(AgentRole::Task));
+    }
+
+    #[test]
+    fn spec_and_knowledge_are_told_apart_from_free_form() {
+        assert_eq!(
+            project(serde_json::json!({ "spec_change": "add-login" })).agent_role(),
+            Some(AgentRole::Spec)
+        );
+        assert_eq!(
+            project(serde_json::json!({
+                "knowledge_root": "store:acme",
+                "custom_session": "Knowledge: ci",
+            }))
+            .agent_role(),
+            Some(AgentRole::Knowledge)
+        );
+        assert_eq!(
+            project(serde_json::json!({ "custom_session": "audit unwraps" })).agent_role(),
+            Some(AgentRole::Custom)
+        );
+    }
+
+    #[test]
+    fn every_role_has_a_distinct_badge() {
+        let roles = [
+            AgentRole::Implement,
+            AgentRole::Task,
+            AgentRole::Spec,
+            AgentRole::Knowledge,
+            AgentRole::Custom,
+        ];
+        let mut badges: Vec<&str> = roles.iter().map(|r| r.badge()).collect();
+        badges.sort_unstable();
+        badges.dedup();
+        assert_eq!(badges.len(), roles.len(), "two roles share a badge");
     }
 }

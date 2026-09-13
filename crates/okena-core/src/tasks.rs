@@ -352,6 +352,19 @@ pub struct TaskRef {
     pub display_key: String,
     pub title: String,
     pub url: String,
+    /// Provider id of the task's parent, when it has one.
+    ///
+    /// Carried so a session knows where its task sits in the breakdown without
+    /// asking the provider. That is what lets okena show an epic's agent above
+    /// its stories' agents even when each was started on its own, and while
+    /// offline — the hierarchy is the tickets', not a record of who started
+    /// what.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// The parent's human key, so a child can name it with nothing else
+    /// loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_key: Option<String>,
 }
 
 impl From<&Task> for TaskRef {
@@ -361,6 +374,8 @@ impl From<&Task> for TaskRef {
             display_key: t.display_key.clone(),
             title: t.title.clone(),
             url: t.url.clone(),
+            parent_id: t.parent_id.clone(),
+            parent_key: t.parent_key.clone(),
         }
     }
 }

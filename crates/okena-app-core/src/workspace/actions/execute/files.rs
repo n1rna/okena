@@ -963,6 +963,8 @@ mod entry_mutation_tests {
         let project = ProjectData {
             task_ref: None,
             spec_change: None,
+            knowledge_root: None,
+            task_draft: None,
             custom_session: None,
             agent: None,
             id: "p1".to_string(),
