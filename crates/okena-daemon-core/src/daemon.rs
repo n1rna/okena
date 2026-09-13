@@ -567,6 +567,7 @@ impl DaemonCore {
                 reactor.workspace.clone(),
                 git_status_tx.clone(),
                 reactor.state_version.clone(),
+                reactor.workspace_tick.clone(),
                 remote_subscribed_terminals.clone(),
                 remote_visible_projects.clone(),
                 git_poll_trigger_rx,

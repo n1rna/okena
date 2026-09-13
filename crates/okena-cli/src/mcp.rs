@@ -257,7 +257,10 @@ fn tool_definitions() -> Value {
             "name": "okena_register_asset",
             "description":
                 "Record something this agent produced — a pull request, branch or \
-                 document — against its session. Appends; call once per asset.",
+                 document — against its session. Appends; call once per asset. \
+                 Branches and pull requests of the task's worktrees are detected \
+                 without this; registering one anyway (by `url`, or by `branch` \
+                 and `project`) gives it your title.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -272,6 +275,10 @@ fn tool_definitions() -> Value {
                         "type": "string",
                         "description":
                             "Repo it landed in, when the agent spans several projects."
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Branch it is on, when it is on one."
                     }
                 },
                 "required": ["kind", "title"],
@@ -656,7 +663,7 @@ fn register_asset(args: &Value) -> Result<Value, String> {
         "kind": kind,
         "title": title,
     });
-    for key in ["url", "project"] {
+    for key in ["url", "project", "branch"] {
         if let Some(v) = args
             .get(key)
             .and_then(|v| v.as_str())

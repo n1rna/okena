@@ -167,6 +167,37 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
     }
 }
 
+/// The query behind `gh pr view <number>`.
+const PR_BY_NUMBER_QUERY: &str = r#"
+query PullRequestByNumber($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) { url state isDraft number baseRefName headRefOid }
+  }
+}"#;
+
+/// Get a PR by number in the base repository of the checkout at `repo_path`.
+///
+/// For a PR whose worktree is gone: there is no branch left to look it up by,
+/// but the repo it came from still resolves the remote and credentials. Unlike
+/// [`fetch_pr_info`], a merged or closed PR is reported as such, since that is
+/// exactly what the caller is waiting to hear.
+pub fn fetch_pr_by_number(repo_path: &Path, number: u32) -> PrFetch {
+    let Some((mut client, repo)) = github_client(repo_path) else {
+        return PrFetch::Fetched(None);
+    };
+    let variables = json!({ "owner": repo.owner, "repo": repo.name, "number": number });
+    match client.graphql(PR_BY_NUMBER_QUERY, variables) {
+        Err(ApiError::RateLimited) => PrFetch::RateLimited,
+        Err(ApiError::Failed) => PrFetch::Fetched(None),
+        Ok(data) => PrFetch::Fetched(
+            data.pointer("/repository/pullRequest")
+                .cloned()
+                .and_then(|node| serde_json::from_value::<PrNode>(node).ok())
+                .and_then(pr_info_of),
+        ),
+    }
+}
+
 /// Map a PR node to [`PrInfo`](crate::PrInfo). Returns `None` for a closed PR
 /// whose head is no longer the current branch head.
 fn pr_info_from_node(
@@ -174,9 +205,6 @@ fn pr_info_from_node(
     current_sha: Option<&str>,
     pushed_sha: Option<&str>,
 ) -> Option<crate::PrInfo> {
-    if !node.url.starts_with("http") {
-        return None;
-    }
     let head_oid = node
         .head_ref_oid
         .as_deref()
@@ -184,6 +212,14 @@ fn pr_info_from_node(
         .filter(|s| !s.is_empty());
     let is_closed_pr = !node.is_draft && matches!(node.state.as_str(), "MERGED" | "CLOSED");
     if is_closed_pr && !closed_pr_head_matches(head_oid, current_sha, pushed_sha) {
+        return None;
+    }
+    pr_info_of(node)
+}
+
+/// Map a PR node to [`PrInfo`](crate::PrInfo), whatever its state.
+fn pr_info_of(node: PrNode) -> Option<crate::PrInfo> {
+    if !node.url.starts_with("http") {
         return None;
     }
     let state = if node.is_draft {

@@ -2385,45 +2385,18 @@ impl HarnessPane {
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_muted))
                     .child(if info.mcp {
-                        "Nothing registered yet."
+                        "Nothing produced yet."
                     } else {
-                        "Cannot report — no okena MCP."
+                        "Nothing detected, and cannot report — no okena MCP."
                     }),
             );
         }
         for asset in &info.assets {
-            out = out.child(
-                v_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap(px(1.0))
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(t.bg_secondary))
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_primary))
-                            .child(asset.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child(match (&asset.project, &asset.url) {
-                                (Some(p), _) => format!("{} · {p}", asset.kind.label()),
-                                (None, Some(url)) => format!("{} · {url}", asset.kind.label()),
-                                (None, None) => asset.kind.label().to_string(),
-                            }),
-                    ),
-            );
+            out = out.child(crate::views::components::render_asset_row(
+                asset,
+                t.bg_secondary,
+                cx,
+            ));
         }
 
         out.into_any_element()

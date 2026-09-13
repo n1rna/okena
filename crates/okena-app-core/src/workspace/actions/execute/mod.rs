@@ -676,7 +676,8 @@ pub fn execute_action(
             title,
             url,
             project,
-        } => tasks::register_asset(ws, project_id, kind, title, url, project, cx),
+            branch,
+        } => tasks::register_asset(ws, project_id, kind, title, url, project, branch, cx),
         ActionRequest::AgentReportStatus {
             project_id,
             status,

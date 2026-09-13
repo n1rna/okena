@@ -5,7 +5,8 @@
 //! they were separately written and had already started to.
 
 use crate::workspace::state::Workspace;
-use okena_core::harness::{AgentAsset, AgentState, AgentSuggestion};
+use okena_core::harness::{AgentState, AgentSuggestion};
+use okena_core::session_assets::{LinkedCheckout, SessionAsset, derive_session_assets};
 use okena_core::tasks::TaskRef;
 
 /// What a session was started to do.
@@ -108,7 +109,9 @@ pub struct AgentSessionInfo {
     pub question: Option<String>,
     /// What it suggests you tell it next.
     pub suggestions: Vec<AgentSuggestion>,
-    pub assets: Vec<AgentAsset>,
+    /// What it produced: the branches and PRs okena detects on its worktrees,
+    /// merged with what the agent registered.
+    pub assets: Vec<SessionAsset>,
     pub workspaces: Vec<RelatedWorkspace>,
     /// The agent on this task's parent, when one is running.
     pub parent: Option<RelatedAgent>,
@@ -281,6 +284,30 @@ impl AgentSessionInfo {
         let (agent, mcp, waiting, idle) = Self::terminal_facts(ws, terminals, project);
         let reported = project.agent.as_ref().and_then(|a| a.state);
 
+        // What it produced. Derived here, each time it is read, from the same
+        // mirror a remote session's snapshot fills — so a branch's push state
+        // cannot go stale and a registered PR cannot show twice.
+        let checkouts: Vec<LinkedCheckout<'_>> = workspaces
+            .iter()
+            .filter_map(|w| {
+                let p = ws.project(&w.project_id)?;
+                let info = p.worktree_info.as_ref()?;
+                Some(LinkedCheckout {
+                    project: ws
+                        .project(&info.parent_project_id)
+                        .map_or(p.name.as_str(), |parent| parent.name.as_str()),
+                    branch: Some(info.branch_name.as_str()),
+                    git: ws
+                        .remote_snapshot(&p.id)
+                        .and_then(|s| s.git_status.as_ref()),
+                })
+            })
+            .collect();
+        let assets = match project.agent.as_ref() {
+            Some(a) => derive_session_assets(&a.assets, &checkouts, &a.tracked_prs),
+            None => derive_session_assets(&[], &checkouts, &[]),
+        };
+
         // The breakdown around it: the agent on the task's parent, and the
         // agents on its sub-tasks. Read from the tickets, so it holds however
         // each was started.
@@ -342,11 +369,7 @@ impl AgentSessionInfo {
                 .as_ref()
                 .map(|a| a.suggestions.clone())
                 .unwrap_or_default(),
-            assets: project
-                .agent
-                .as_ref()
-                .map(|a| a.assets.clone())
-                .unwrap_or_default(),
+            assets,
             workspaces,
             parent,
             children,

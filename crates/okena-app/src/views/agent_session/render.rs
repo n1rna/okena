@@ -70,41 +70,8 @@ impl AgentSessionPanel {
         self.chip(activity.label(), activity.color(&t), cx)
     }
 
-    fn asset_row(&self, asset: &okena_core::harness::AgentAsset, cx: &App) -> AnyElement {
-        let t = theme(cx);
-        v_flex()
-            .w_full()
-            .min_w_0()
-            .gap(px(1.0))
-            .px(px(8.0))
-            .py(px(5.0))
-            .rounded(px(4.0))
-            .bg(rgb(t.bg_primary))
-            .border_1()
-            .border_color(rgb(t.border))
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_primary))
-                    .child(asset.title.clone()),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(match (&asset.project, &asset.url) {
-                        (Some(p), _) => format!("{} · {p}", asset.kind.label()),
-                        (None, Some(url)) => format!("{} · {url}", asset.kind.label()),
-                        (None, None) => asset.kind.label().to_string(),
-                    }),
-            )
-            .into_any_element()
+    fn asset_row(&self, asset: &okena_core::session_assets::SessionAsset, cx: &App) -> AnyElement {
+        crate::views::components::render_asset_row(asset, theme(cx).bg_primary, cx)
     }
 
     /// The scrolling body: every section, in the same order at both densities.
@@ -369,9 +336,9 @@ impl AgentSessionPanel {
                 if info.mcp {
                     // Distinguishes "produced nothing" from "cannot tell us",
                     // which look identical without this.
-                    "Nothing registered yet."
+                    "Nothing produced yet."
                 } else {
-                    "Cannot report — no okena MCP."
+                    "Nothing detected, and cannot report — no okena MCP."
                 },
                 cx,
             ));

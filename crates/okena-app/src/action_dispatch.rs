@@ -947,6 +947,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             title,
             url,
             project,
+            branch,
         } => ActionRequest::AgentRegisterAsset {
             project_id: s(&project_id),
             kind,
@@ -955,6 +956,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             // `project` is a human-facing repo label from the agent, not an
             // okena id — nothing to translate.
             project,
+            branch,
         },
         ActionRequest::AgentReportStatus {
             project_id,

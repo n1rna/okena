@@ -41,7 +41,9 @@ pub use branch::{
     list_branches_classified, merge_branch, push_branch, rebase_onto, resolve_base_ref,
     resolve_review_base, stage_file, stash_changes, stash_pop, unstage_file,
 };
-pub use ci::{CiFetch, PrFetch, fetch_ci_checks, fetch_pr_info, list_pull_requests};
+pub use ci::{
+    CiFetch, PrFetch, fetch_ci_checks, fetch_pr_by_number, fetch_pr_info, list_pull_requests,
+};
 pub use clone::{
     CloneProgress, clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,
     parse_clone_progress, start_clone_repository, validate_clone_url,
