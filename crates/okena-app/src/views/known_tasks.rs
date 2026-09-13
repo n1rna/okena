@@ -105,17 +105,30 @@ fn task_caption(kind: &str, key: &str, state: Option<&str>) -> String {
     }
 }
 
-/// Tasks named by `assets`, grouped by provider, leaving out any in `skip`.
+/// How long a fetched state is trusted before a panel showing it asks again.
 ///
-/// What a session panel asks its provider about: one batch per provider, and
-/// never a task whose request is already on its way.
+/// A task moves on the provider without telling okena, so a panel left open
+/// has to look again; a minute keeps it current without polling a provider
+/// harder than anyone reading the row would notice.
+pub const STATE_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Tasks named by `assets` that are due a fetch, grouped by provider.
+///
+/// `requested` is when each task was last asked for. A task asked for within
+/// `stale_after` of `now` is left out — its answer is fresh, or still on its
+/// way — and anything older is asked for again. One batch per provider.
 pub fn tasks_to_fetch<'a>(
     assets: impl IntoIterator<Item = &'a AgentAsset>,
-    skip: &std::collections::HashSet<TaskId>,
+    requested: &HashMap<TaskId, std::time::Instant>,
+    now: std::time::Instant,
+    stale_after: std::time::Duration,
 ) -> Vec<(String, Vec<String>)> {
     let mut by_provider: Vec<(String, Vec<String>)> = Vec::new();
     for task in assets.into_iter().filter_map(|a| a.task.as_ref()) {
-        if skip.contains(&task.id) {
+        if requested
+            .get(&task.id)
+            .is_some_and(|at| now.saturating_duration_since(*at) < stale_after)
+        {
             continue;
         }
         let ids = match by_provider.iter_mut().find(|(p, _)| *p == task.id.provider) {
@@ -137,7 +150,10 @@ mod tests {
     use super::{task_caption, tasks_to_fetch};
     use okena_core::harness::{AgentAsset, AgentAssetKind};
     use okena_core::tasks::{TaskId, TaskRef};
-    use std::collections::HashSet;
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    const WINDOW: Duration = Duration::from_secs(60);
 
     #[test]
     fn a_task_row_names_its_key_and_only_a_known_state() {
@@ -175,13 +191,41 @@ mod tests {
             task("linear", "a"),
             task("linear", "c"),
         ];
-        let in_flight = HashSet::from([TaskId::new("linear", "c")]);
+        let now = Instant::now();
+        let in_flight = HashMap::from([(TaskId::new("linear", "c"), now)]);
         assert_eq!(
-            tasks_to_fetch(&assets, &in_flight),
+            tasks_to_fetch(&assets, &in_flight, now, WINDOW),
             vec![
                 ("linear".to_string(), vec!["a".to_string(), "b".to_string()]),
                 ("azure_devops".to_string(), vec!["7".to_string()]),
             ]
+        );
+    }
+
+    #[test]
+    fn a_stale_state_is_asked_for_again_and_a_fresh_one_is_not() {
+        // A task that moved to Done while its panel stayed open has to show
+        // it without the panel being reopened.
+        let assets = [task("linear", "fresh"), task("linear", "stale")];
+        let start = Instant::now();
+        let now = start + Duration::from_secs(90);
+        let requested = HashMap::from([
+            (
+                TaskId::new("linear", "fresh"),
+                start + Duration::from_secs(60),
+            ),
+            (TaskId::new("linear", "stale"), start),
+        ]);
+        assert_eq!(
+            tasks_to_fetch(&assets, &requested, now, WINDOW),
+            vec![("linear".to_string(), vec!["stale".to_string()])]
+        );
+        // Right at the edge of the window it is due.
+        let at_edge = start + WINDOW;
+        let only_stale = HashMap::from([(TaskId::new("linear", "stale"), start)]);
+        assert_eq!(
+            tasks_to_fetch(&assets[1..], &only_stale, at_edge, WINDOW),
+            vec![("linear".to_string(), vec!["stale".to_string()])]
         );
     }
 }
