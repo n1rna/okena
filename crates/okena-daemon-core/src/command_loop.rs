@@ -2938,6 +2938,30 @@ pub async fn daemon_command_loop(
                 }
                 continue;
             }
+            // ── Task-provider calls: off the queue and the workspace lock ──
+            // Each is one or more round trips to Linear or Azure DevOps — a
+            // state change is three — and none of them touches the workspace.
+            // Run inline, every terminal would wait on the provider.
+            RemoteCommand::Action(
+                action @ (ActionRequest::TasksConnectApiKey { .. }
+                | ActionRequest::TasksList { .. }
+                | ActionRequest::TaskContainers { .. }
+                | ActionRequest::TaskCreate { .. }
+                | ActionRequest::TaskChildren { .. }
+                | ActionRequest::TaskGet { .. }
+                | ActionRequest::TaskUpdate { .. }
+                | ActionRequest::TaskSetState { .. }
+                | ActionRequest::TaskComment { .. }),
+            ) => {
+                spawn_blocking_command_with(reply, &runtime, move || {
+                    okena_app_core::workspace::actions::execute::execute_task_provider_action(
+                        &action,
+                    )
+                    .map(|r| r.into_command_result())
+                    .unwrap_or_else(|| CommandResult::Err("not a task provider action".into()))
+                });
+                continue;
+            }
             // ── OpenSpec store changes: off the queue and the workspace lock ──
             // Store setup runs `git init` and a commit (the user's hooks may
             // run), and every registry change may wait up to 5 s on the lock an

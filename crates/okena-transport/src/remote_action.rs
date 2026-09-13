@@ -113,7 +113,13 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // budget as the reads.
         | ActionRequest::TaskContainers { .. }
         | ActionRequest::TaskCreate { .. }
-        | ActionRequest::TaskChildren { .. } => ActionClientKind::Search,
+        | ActionRequest::TaskChildren { .. }
+        // Edits resolve before they write (a key to an id, a category to a
+        // team's own state), and a state change reads the task back after.
+        | ActionRequest::TaskGet { .. }
+        | ActionRequest::TaskUpdate { .. }
+        | ActionRequest::TaskSetState { .. }
+        | ActionRequest::TaskComment { .. } => ActionClientKind::Search,
         _ => ActionClientKind::Fast,
     }
 }

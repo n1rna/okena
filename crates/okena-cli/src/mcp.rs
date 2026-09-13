@@ -183,12 +183,136 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "okena_list_containers",
+            "description":
+                "List the teams or projects a new top-level task can be filed in, \
+                 on this session's task provider.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "okena_create_task",
+            "description":
+                "File a task on this session's task provider (Linear, Azure \
+                 DevOps). Top-level with `container`, or a child with `parent`. \
+                 Without either, the task goes in your only team — or, when you \
+                 have several, the result lists them and asks which: pick one \
+                 and call again.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Short imperative title." },
+                    "description": {
+                        "type": "string",
+                        "description": "Markdown: why it matters and what \"done\" means."
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["epic", "feature", "story", "task", "defect"],
+                        "description": "Where it sits in the breakdown. Defaults to task."
+                    },
+                    "container": {
+                        "type": "string",
+                        "description":
+                            "Team or project for a top-level task: its id, key \
+                             (`QBL`) or name. Ignored with `parent`."
+                    },
+                    "parent": {
+                        "type": "string",
+                        "description":
+                            "Id or key of the parent, to file a child in the \
+                             parent's team."
+                    }
+                },
+                "required": ["title"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_get_task",
+            "description":
+                "Read a task with its description and state. Defaults to this \
+                 session's own task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description":
+                            "Id or key (`QBL-371`, `#42`). Defaults to this session's task."
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_update_task",
+            "description":
+                "Change a task's title or description. Fields you leave out are \
+                 left as they are; the description you pass replaces the whole \
+                 description, so read it first with `okena_get_task`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Id or key. Defaults to this session's task."
+                    },
+                    "title": { "type": "string", "description": "New title." },
+                    "description": {
+                        "type": "string",
+                        "description": "New description, in Markdown. Empty clears it."
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_set_task_state",
+            "description":
+                "Move a task to a state. The provider picks its own column in \
+                 that category, and the result shows which.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Id or key. Defaults to this session's task."
+                    },
+                    "state": {
+                        "type": "string",
+                        "enum": ["backlog", "todo", "in_progress", "in_review", "done", "canceled"]
+                    }
+                },
+                "required": ["state"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_comment_task",
+            "description":
+                "Comment on a task — progress, a decision, a question for whoever \
+                 reads it next.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Id or key. Defaults to this session's task."
+                    },
+                    "body": { "type": "string", "description": "The comment, in Markdown." }
+                },
+                "required": ["body"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "okena_create_subtask",
             "description":
                 "Create a sub-task under a task, in the same team as its parent. \
                  Use this to break work down: one call per child. Prefer several \
                  small children over one large one, and say in the description \
-                 what \"done\" means for that child.",
+                 what \"done\" means for that child. Same as `okena_create_task` \
+                 with `parent` defaulting to this session's task.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -209,7 +333,7 @@ fn tool_definitions() -> Value {
                     "parent": {
                         "type": "string",
                         "description":
-                            "Provider id of the parent. Defaults to this session's task."
+                            "Id or key of the parent. Defaults to this session's task."
                     }
                 },
                 "required": ["title"],
@@ -317,7 +441,13 @@ fn call_tool(params: &Value) -> Result<Value, Value> {
         "okena_list_projects" => list_projects(),
         "okena_report_status" => report_status(&args),
         "okena_list_subtasks" => list_subtasks(&args),
+        "okena_list_containers" => list_containers(),
+        "okena_create_task" => create_task(&args),
         "okena_create_subtask" => create_subtask(&args),
+        "okena_get_task" => get_task(&args),
+        "okena_update_task" => update_task(&args),
+        "okena_set_task_state" => set_task_state(&args),
+        "okena_comment_task" => comment_task(&args),
         "okena_start_work" => start_work(&args),
         "okena_register_asset" => register_asset(&args),
         other => {
@@ -454,13 +584,7 @@ fn target_task(args: &Value) -> Result<(String, String), String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        // An explicit id still needs a provider: this session's own, or else
-        // the one the harness is set to.
-        let session = current_session()?;
-        let provider = match session.project.task_ref.as_ref() {
-            Some(t) => t.id.provider.clone(),
-            None => active_provider()?,
-        };
+        let provider = session_provider(&current_session()?)?;
         return Ok((provider, explicit.to_string()));
     }
     let session = current_session()?;
@@ -468,6 +592,31 @@ fn target_task(args: &Value) -> Result<(String, String), String> {
         "this session is not linked to a task — pass `parent` to say which task to work under",
     )?;
     Ok((task.id.provider.clone(), task.id.external_id.clone()))
+}
+
+/// The provider a session's tasks live on: its own task's, or else the one the
+/// harness is set to.
+fn session_provider(session: &Session) -> Result<String, String> {
+    match session.project.task_ref.as_ref() {
+        Some(t) => Ok(t.id.provider.clone()),
+        None => active_provider(),
+    }
+}
+
+/// A non-blank string argument.
+fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Run a daemon action and hand back its result as JSON, so a tool returns
+/// structure the agent can read rather than a string of escaped JSON.
+fn action(body: &Value) -> Result<Value, String> {
+    let token = super::ensure_token()?;
+    let response = super::api_action(&token, &body.to_string())?;
+    Ok(serde_json::from_str(&response).unwrap_or(Value::String(response)))
 }
 
 /// The task provider the harness is set to, from the daemon's settings.
@@ -610,30 +759,211 @@ fn sibling_repo_ids(session: &Session) -> Result<Vec<String>, String> {
     Ok(unique)
 }
 
+fn list_containers() -> Result<Value, String> {
+    let provider = session_provider(&current_session()?)?;
+    let containers = fetch_containers(&provider)?;
+    Ok(json!({ "provider": provider, "containers": containers }))
+}
+
+fn fetch_containers(provider: &str) -> Result<Vec<Value>, String> {
+    let response = action(&json!({ "action": "task_containers", "provider": provider }))?;
+    Ok(response
+        .get("containers")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// Which container a new top-level task goes in, or the choice to put back
+/// to the agent.
+///
+/// Matched against whatever the agent is likely to have been told: the id, the
+/// key (`QBL`), the name, or the `Name (KEY)` form the task-create brief uses.
+/// With nothing asked for, a single container is not a choice. Otherwise the
+/// options go back as a normal result — the agent has to decide, not recover.
+fn pick_container(asked: Option<&str>, containers: &[Value]) -> Result<String, Value> {
+    let field = |c: &Value, k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let Some(asked) = asked else {
+        return match containers {
+            [only] => Ok(field(only, "id")),
+            _ => Err(json!({
+                "needs_choice": "Which team or project should this go in? Call again with one of \
+                                 these as `container`.",
+                "options": containers,
+            })),
+        };
+    };
+    let found = containers.iter().find(|c| {
+        let (id, name, key) = (field(c, "id"), field(c, "name"), field(c, "key"));
+        id == asked
+            || name.eq_ignore_ascii_case(asked)
+            || (!key.is_empty()
+                && (key.eq_ignore_ascii_case(asked)
+                    || format!("{name} ({key})").eq_ignore_ascii_case(asked)))
+    });
+    match found {
+        Some(c) => Ok(field(c, "id")),
+        None => Err(json!({
+            "needs_choice": format!(
+                "No team or project matches `{asked}`. Call again with one of these as `container`."
+            ),
+            "options": containers,
+        })),
+    }
+}
+
+/// File a task: top-level in a team or project, or a child of another.
+fn create_task(args: &Value) -> Result<Value, String> {
+    file_task(args, false)
+}
+
+/// `okena_create_task` with `parent` defaulting to this session's task, as
+/// briefs written before top-level tasks existed expect.
 fn create_subtask(args: &Value) -> Result<Value, String> {
-    let title = args
-        .get("title")
-        .and_then(|s| s.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    file_task(args, true)
+}
+
+fn file_task(args: &Value, parent_defaults_to_session: bool) -> Result<Value, String> {
+    let title = str_arg(args, "title")
         .ok_or("`title` is required")?
         .to_string();
-    let (provider, parent) = target_task(args)?;
-    let token = super::ensure_token()?;
+    let session = current_session()?;
+    let provider = session_provider(&session)?;
+    let parent = match str_arg(args, "parent") {
+        Some(parent) => Some(parent.to_string()),
+        None if parent_defaults_to_session => Some(
+            session
+                .project
+                .task_ref
+                .as_ref()
+                .map(|t| t.id.external_id.clone())
+                .ok_or(
+                    "this session is not linked to a task — pass `parent` to say which task \
+                     to work under",
+                )?,
+        ),
+        None => None,
+    };
 
-    let response = super::api_action(
-        &token,
-        &json!({
-            "action": "task_create",
-            "provider": provider,
-            "title": title,
-            "description": args.get("description").and_then(|d| d.as_str()).unwrap_or(""),
-            "kind": args.get("kind").and_then(|k| k.as_str()).unwrap_or("task"),
-            "parent_external_id": parent,
+    // A child goes where its parent is; only a top-level task needs a place.
+    let container = if parent.is_some() {
+        None
+    } else {
+        let containers = fetch_containers(&provider)?;
+        if containers.is_empty() {
+            return Err(format!(
+                "{provider} lists no teams or projects you can file a task in"
+            ));
+        }
+        match pick_container(str_arg(args, "container"), &containers) {
+            Ok(id) => Some(id),
+            Err(choice) => return Ok(choice),
+        }
+    };
+
+    let created = action(&json!({
+        "action": "task_create",
+        "provider": provider,
+        "title": title,
+        "description": args.get("description").and_then(|d| d.as_str()).unwrap_or(""),
+        "kind": args.get("kind").and_then(|k| k.as_str()).unwrap_or("task"),
+        "parent_external_id": parent,
+        "container_id": container,
+    }))?;
+    // A choice the provider needs made is the answer, not a created task.
+    if created.get("needs_choice").is_some() {
+        return Ok(created);
+    }
+    // The alias answers in the shape briefs were written against: the created
+    // task as a JSON string.
+    let created = if parent_defaults_to_session {
+        Value::String(created.to_string())
+    } else {
+        created
+    };
+    Ok(json!({ "created": created, "parent": parent }))
+}
+
+fn get_task(args: &Value) -> Result<Value, String> {
+    let (provider, task) = target_task(args)?;
+    let found = action(&json!({
+        "action": "task_get",
+        "provider": provider,
+        "task_external_id": task,
+    }))?;
+    Ok(json!({ "task": found }))
+}
+
+fn update_task(args: &Value) -> Result<Value, String> {
+    let title = args.get("title").and_then(|t| t.as_str());
+    let description = args.get("description").and_then(|d| d.as_str());
+    if title.is_none() && description.is_none() {
+        return Err("pass `title`, `description` or both — there is nothing to change".into());
+    }
+    let (provider, task) = target_task(args)?;
+    let updated = action(&json!({
+        "action": "task_update",
+        "provider": provider,
+        "task_external_id": task,
+        "title": title,
+        "description": description,
+    }))?;
+    Ok(json!({ "task": updated }))
+}
+
+fn set_task_state(args: &Value) -> Result<Value, String> {
+    let state = parse_state(str_arg(args, "state").ok_or("`state` is required")?)?;
+    let (provider, task) = target_task(args)?;
+    let moved = action(&json!({
+        "action": "task_set_state",
+        "provider": provider,
+        "task_external_id": task,
+        "state": state,
+    }))?;
+    Ok(json!({ "task": moved }))
+}
+
+fn comment_task(args: &Value) -> Result<Value, String> {
+    let body = str_arg(args, "body")
+        .ok_or("`body` is required")?
+        .to_string();
+    let (provider, task) = target_task(args)?;
+    action(&json!({
+        "action": "task_comment",
+        "provider": provider,
+        "task_external_id": task,
+        "body": body,
+    }))
+}
+
+/// The states an agent can move a task to: okena's normalized categories, since
+/// a team's own column names are its business.
+const TASK_STATES: &[&str] = &[
+    "backlog",
+    "todo",
+    "in_progress",
+    "in_review",
+    "done",
+    "canceled",
+];
+
+/// A state as an agent wrote it — `In Progress`, `in-review` and `cancelled`
+/// all mean what they say.
+fn parse_state(raw: &str) -> Result<&'static str, String> {
+    let mut normalized = raw.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+    if normalized == "cancelled" {
+        normalized = "canceled".into();
+    }
+    TASK_STATES
+        .iter()
+        .copied()
+        .find(|s| *s == normalized)
+        .ok_or_else(|| {
+            format!(
+                "unknown state `{raw}` — use one of: {}",
+                TASK_STATES.join(", ")
+            )
         })
-        .to_string(),
-    )?;
-    Ok(json!({ "created": response, "parent": parent }))
 }
 
 fn register_asset(args: &Value) -> Result<Value, String> {
@@ -704,6 +1034,47 @@ mod tests {
     }
 
     #[test]
+    fn a_container_is_found_by_whatever_the_agent_was_told() {
+        use super::pick_container;
+        let teams = [
+            json!({ "id": "t1", "name": "Qblok", "key": "QBL" }),
+            json!({ "id": "t2", "name": "Platform", "key": "PLT" }),
+        ];
+        for asked in ["t1", "QBL", "qbl", "Qblok", "Qblok (QBL)"] {
+            assert_eq!(
+                pick_container(Some(asked), &teams),
+                Ok("t1".to_string()),
+                "{asked}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_choice_comes_back_as_options_not_an_error() {
+        use super::pick_container;
+        let teams = [
+            json!({ "id": "t1", "name": "Qblok", "key": "QBL" }),
+            json!({ "id": "t2", "name": "Platform", "key": "PLT" }),
+        ];
+        for asked in [None, Some("Nope")] {
+            let choice = pick_container(asked, &teams).expect_err("must ask");
+            assert!(choice["needs_choice"].as_str().is_some(), "{choice}");
+            assert_eq!(choice["options"].as_array().map(Vec::len), Some(2));
+        }
+        // One team is not a choice.
+        assert_eq!(pick_container(None, &teams[..1]), Ok("t1".to_string()));
+    }
+
+    #[test]
+    fn states_are_read_forgivingly_and_checked_before_any_call() {
+        use super::parse_state;
+        assert_eq!(parse_state("In Progress"), Ok("in_progress"));
+        assert_eq!(parse_state("in-review"), Ok("in_review"));
+        assert_eq!(parse_state("cancelled"), Ok("canceled"));
+        assert!(parse_state("shipped").is_err());
+    }
+
+    #[test]
     fn initialize_reports_protocol_and_tools_capability() {
         let r = dispatch("initialize", &json!({})).expect("initialize must succeed");
         assert_eq!(r["protocolVersion"], PROTOCOL_VERSION);
@@ -729,12 +1100,18 @@ mod tests {
         assert_eq!(
             names,
             [
+                "okena_comment_task",
                 "okena_create_subtask",
+                "okena_create_task",
+                "okena_get_task",
+                "okena_list_containers",
                 "okena_list_projects",
                 "okena_list_subtasks",
                 "okena_register_asset",
                 "okena_report_status",
+                "okena_set_task_state",
                 "okena_start_work",
+                "okena_update_task",
                 "okena_whoami",
             ]
         );

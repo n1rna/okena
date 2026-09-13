@@ -118,7 +118,7 @@ impl Flow {
             ],
             Flow::TaskBreakDown => &[
                 "key",
-                // The provider's own id, which is what `okena_create_subtask`
+                // The provider's own id, which is what `okena_create_task`
                 // takes for `parent` — not the human key beside it.
                 "parent_id",
                 "title",

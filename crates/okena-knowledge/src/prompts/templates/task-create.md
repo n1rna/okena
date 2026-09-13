@@ -14,6 +14,6 @@ Before writing anything, look at how this codebase and the existing tasks are wo
 - A short imperative title — what will be true when it is done, not what to go and do.
 - A description saying why it is worth doing, what "done" means concretely, and anything a person picking it up would otherwise have to ask.
 
-Write it back with `okena_create_subtask` when it is a child of something, and otherwise show it to me to file. Ask me about anything you would have to guess at — an invented acceptance criterion is worse than a question.
+Ask me about anything you would have to guess at — an invented acceptance criterion is worse than a question. When the draft is settled, file it yourself with `okena_create_task`: `container` set to the team named above, or `parent` when it is a child of something. If okena comes back with a list of teams to choose from, ask me which. Then read it back with `okena_get_task` and give me its key and link.
 
 {>reporting}

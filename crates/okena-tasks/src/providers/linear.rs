@@ -9,7 +9,8 @@
 //! data path.
 
 use crate::provider::{
-    AuthStatus, Credential, TaskContainer, TaskDraft, TaskError, TaskProvider, task_branch_name,
+    AuthStatus, Credential, TaskContainer, TaskDraft, TaskError, TaskPatch, TaskProvider,
+    task_branch_name,
 };
 use okena_core::tasks::{GroupAxis, Task, TaskGroup, TaskId, TaskKind, TaskState};
 use okena_transport::http::{self, HttpError, HttpRequest};
@@ -24,12 +25,37 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// Linear caps page size at 250; the assigned-work queue is far smaller.
 const PAGE_SIZE: u32 = 100;
 
+/// The issue fields `parse_issue` reads, as a fragment every query that
+/// returns issues spreads, so the queries cannot drift from the parser or
+/// from each other.
+macro_rules! issue_fields {
+    () => {
+        r#"
+fragment IssueFields on Issue {
+  id
+  identifier
+  title
+  description
+  url
+  updatedAt
+  state { name type }
+  parent { id identifier }
+  labels(first: 20) { nodes { name } }
+  team { id key name }
+  project { id name }
+  cycle { id number name }
+}
+"#
+    };
+}
+
 /// Assigned, still-open issues, most recently updated first.
 ///
 /// The `state.type` filter runs server-side so a large finished backlog is
 /// never transferred. Linear's state types are a closed set:
 /// `triage | backlog | unstarted | started | completed | canceled`.
-const QUERY_ASSIGNED: &str = r#"
+const QUERY_ASSIGNED: &str = concat!(
+    r#"
 query AssignedIssues($first: Int!) {
   viewer {
     id
@@ -39,24 +65,13 @@ query AssignedIssues($first: Int!) {
       filter: { state: { type: { nin: ["completed", "canceled"] } } }
       orderBy: updatedAt
     ) {
-      nodes {
-        id
-        identifier
-        title
-        description
-        url
-        updatedAt
-        state { name type }
-        parent { id identifier }
-        labels(first: 20) { nodes { name } }
-        team { id key name }
-        project { id name }
-        cycle { id number name }
-      }
+      nodes { ...IssueFields }
     }
   }
 }
-"#;
+"#,
+    issue_fields!()
+);
 
 /// Teams the authenticated user belongs to, for choosing where a new issue
 /// goes. Linear scopes issues to a team and requires one on create.
@@ -108,7 +123,8 @@ mutation CreateLabel($teamId: String!, $name: String!) {
 
 /// Create an issue, returning it in the same shape the list query uses so the
 /// caller gets a real `Task` without a second fetch.
-const MUTATION_CREATE_ISSUE: &str = r#"
+const MUTATION_CREATE_ISSUE: &str = concat!(
+    r#"
 mutation CreateIssue(
   $teamId: String!
   $title: String!
@@ -126,47 +142,26 @@ mutation CreateIssue(
     }
   ) {
     success
-    issue {
-      id
-      identifier
-      title
-      description
-      url
-      updatedAt
-      state { name type }
-      parent { id identifier }
-      labels(first: 20) { nodes { name } }
-      team { id key name }
-      project { id name }
-      cycle { id number name }
-    }
+    issue { ...IssueFields }
   }
 }
-"#;
+"#,
+    issue_fields!()
+);
 
 /// Sub-issues of a parent, whoever they are assigned to.
-const QUERY_CHILDREN: &str = r#"
+const QUERY_CHILDREN: &str = concat!(
+    r#"
 query IssueChildren($id: String!) {
   issue(id: $id) {
     children(first: 100) {
-      nodes {
-        id
-        identifier
-        title
-        description
-        url
-        updatedAt
-        state { name type }
-        parent { id identifier }
-        labels(first: 20) { nodes { name } }
-        team { id key name }
-        project { id name }
-        cycle { id number name }
-      }
+      nodes { ...IssueFields }
     }
   }
 }
-"#;
+"#,
+    issue_fields!()
+);
 
 /// The workflow states available to the issue's own team.
 ///
@@ -188,6 +183,46 @@ query IssueStates($id: String!) {
 const MUTATION_SET_STATE: &str = r#"
 mutation SetState($id: String!, $stateId: String!) {
   issueUpdate(id: $id, input: { stateId: $stateId }) {
+    success
+  }
+}
+"#;
+
+/// One issue, by UUID or identifier — `issue(id:)` takes either.
+const QUERY_ISSUE: &str = concat!(
+    r#"
+query Issue($id: String!) {
+  issue(id: $id) { ...IssueFields }
+}
+"#,
+    issue_fields!()
+);
+
+/// The UUID behind an identifier. Mutations are handed the UUID: an
+/// identifier changes when its issue moves team, the UUID never does.
+const QUERY_ISSUE_ID: &str = r#"
+query IssueId($id: String!) {
+  issue(id: $id) { id }
+}
+"#;
+
+/// Edit an issue. `$input` carries only the fields being changed — an explicit
+/// `null` would clear one.
+const MUTATION_UPDATE_ISSUE: &str = concat!(
+    r#"
+mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) {
+    success
+    issue { ...IssueFields }
+  }
+}
+"#,
+    issue_fields!()
+);
+
+const MUTATION_CREATE_COMMENT: &str = r#"
+mutation CreateComment($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
     success
   }
 }
@@ -278,6 +313,27 @@ impl LinearProvider {
         }
     }
 
+    /// The UUID for a UUID or an identifier, asked for only when it is the
+    /// latter.
+    fn issue_uuid(&self, id: &str) -> Result<String, TaskError> {
+        if is_uuid(id) {
+            return Ok(id.to_string());
+        }
+        let data = self.graphql(
+            "linear.issue_id",
+            QUERY_ISSUE_ID,
+            serde_json::json!({ "id": id }),
+        )?;
+        data.get("issue")
+            .and_then(|i| i.get("id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: format!("no issue `{id}`"),
+            })
+    }
+
     fn graphql(
         &self,
         label: &'static str,
@@ -285,14 +341,17 @@ impl LinearProvider {
         variables: serde_json::Value,
     ) -> Result<serde_json::Value, TaskError> {
         let cred = self.credential()?;
-        let req = Self::authorize(
-            HttpRequest::post(API_URL)
-                .json(&serde_json::json!({ "query": query, "variables": variables }))
-                .label(label)
-                .min_interval(MIN_INTERVAL)
-                .timeout(TIMEOUT),
-            cred,
-        );
+        let mut req = HttpRequest::post(API_URL)
+            .json(&serde_json::json!({ "query": query, "variables": variables }))
+            .label(label)
+            .timeout(TIMEOUT);
+        // Only the queue poll is floored. The floor refuses rather than waits,
+        // so on anything else it would fail an agent's second comment or
+        // second sub-task in a row.
+        if label == "linear.assigned" {
+            req = req.min_interval(MIN_INTERVAL);
+        }
+        let req = Self::authorize(req, cred);
 
         let resp = http::send(req).map_err(|e| match e {
             // 401/403 mean the credential is bad — surfaced distinctly so the
@@ -357,6 +416,38 @@ impl LinearProvider {
                 message: "response had no `data`".into(),
             })
     }
+}
+
+fn check_provider(id: &TaskId) -> Result<(), TaskError> {
+    if id.provider == PROVIDER_ID {
+        Ok(())
+    } else {
+        Err(TaskError::Protocol {
+            provider: PROVIDER_ID,
+            message: format!("task belongs to provider `{}`", id.provider),
+        })
+    }
+}
+
+/// Whether `id` is a Linear UUID rather than an identifier like `QBL-12`.
+fn is_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.char_indices().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// The `issueUpdate` input for a patch: only the fields it changes.
+fn update_input(patch: &TaskPatch) -> serde_json::Value {
+    let mut input = serde_json::Map::new();
+    if let Some(title) = patch.title.as_deref() {
+        input.insert("title".into(), title.trim().into());
+    }
+    if let Some(description) = patch.description.as_deref() {
+        input.insert("description".into(), description.into());
+    }
+    serde_json::Value::Object(input)
 }
 
 /// Map a Linear workflow-state type onto a normalized category.
@@ -633,7 +724,7 @@ impl TaskProvider for LinearProvider {
         // A sub-task inherits its parent's team — Linear has no cross-team
         // parenting, and asking the user to pick one that must match would be
         // a choice with exactly one right answer.
-        let (team_id, labels) = match draft.parent_external_id.as_deref() {
+        let (team_id, labels, parent_id) = match draft.parent_external_id.as_deref() {
             Some(parent) => {
                 let data = self.graphql(
                     "linear.parent_context",
@@ -647,7 +738,15 @@ impl TaskProvider for LinearProvider {
                         provider: PROVIDER_ID,
                         message: "could not read the parent issue's team".into(),
                     })?;
-                (team_id_of(team)?, label_map(team))
+                // The parent may have been named by its identifier; the
+                // mutation gets the UUID this lookup returned.
+                let parent_id = data
+                    .get("issue")
+                    .and_then(|i| i.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(parent)
+                    .to_string();
+                (team_id_of(team)?, label_map(team), Some(parent_id))
             }
             None => {
                 let team_id = draft.container_id.clone().ok_or_else(|| {
@@ -666,7 +765,7 @@ impl TaskProvider for LinearProvider {
                     provider: PROVIDER_ID,
                     message: "could not read the team".into(),
                 })?;
-                (team_id, label_map(team))
+                (team_id, label_map(team), None)
             }
         };
 
@@ -679,7 +778,7 @@ impl TaskProvider for LinearProvider {
                 "teamId": team_id,
                 "title": draft.title.trim(),
                 "description": draft.description,
-                "parentId": draft.parent_external_id,
+                "parentId": parent_id,
                 "labelIds": label_ids,
             }),
         )?;
@@ -777,10 +876,17 @@ impl TaskProvider for LinearProvider {
                 message: format!("the issue's team has no `{want}` workflow state"),
             })?;
 
+        // `id` may be an identifier; the lookup above returned the UUID.
+        let issue_id = data
+            .get("issue")
+            .and_then(|i| i.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(id.external_id.as_str())
+            .to_string();
         let data = self.graphql(
             "linear.set_state",
             MUTATION_SET_STATE,
-            serde_json::json!({ "id": id.external_id, "stateId": chosen }),
+            serde_json::json!({ "id": issue_id, "stateId": chosen }),
         )?;
 
         let ok = data
@@ -794,6 +900,68 @@ impl TaskProvider for LinearProvider {
             Err(TaskError::Protocol {
                 provider: PROVIDER_ID,
                 message: "issueUpdate reported failure".into(),
+            })
+        }
+    }
+
+    fn get_task(&self, id: &TaskId) -> Result<Task, TaskError> {
+        check_provider(id)?;
+        let data = self.graphql(
+            "linear.issue",
+            QUERY_ISSUE,
+            serde_json::json!({ "id": id.external_id }),
+        )?;
+        data.get("issue")
+            .and_then(parse_issue)
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: format!("could not read issue `{}`", id.external_id),
+            })
+    }
+
+    fn update_task(&self, id: &TaskId, patch: &TaskPatch) -> Result<Task, TaskError> {
+        check_provider(id)?;
+        let issue_id = self.issue_uuid(&id.external_id)?;
+        let data = self.graphql(
+            "linear.update_issue",
+            MUTATION_UPDATE_ISSUE,
+            serde_json::json!({ "id": issue_id, "input": update_input(patch) }),
+        )?;
+        let updated = data
+            .get("issueUpdate")
+            .filter(|u| u.get("success").and_then(|v| v.as_bool()).unwrap_or(false))
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: "issueUpdate reported failure".into(),
+            })?;
+        updated
+            .get("issue")
+            .and_then(parse_issue)
+            .ok_or_else(|| TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: "issueUpdate returned an issue okena could not read".into(),
+            })
+    }
+
+    fn add_comment(&self, id: &TaskId, body: &str) -> Result<(), TaskError> {
+        check_provider(id)?;
+        let issue_id = self.issue_uuid(&id.external_id)?;
+        let data = self.graphql(
+            "linear.comment",
+            MUTATION_CREATE_COMMENT,
+            serde_json::json!({ "issueId": issue_id, "body": body }),
+        )?;
+        let ok = data
+            .get("commentCreate")
+            .and_then(|c| c.get("success"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if ok {
+            Ok(())
+        } else {
+            Err(TaskError::Protocol {
+                provider: PROVIDER_ID,
+                message: "commentCreate reported failure".into(),
             })
         }
     }
@@ -929,6 +1097,42 @@ mod tests {
             Err(TaskError::Protocol { .. })
         ));
     }
+
+    #[test]
+    fn tells_a_uuid_from_an_identifier() {
+        assert!(is_uuid("f0fe2bc3-d9fe-4db4-b8ce-9aac476ac19d"));
+        assert!(!is_uuid("QBL-373"));
+        assert!(!is_uuid("f0fe2bc3d9fe4db4b8ce9aac476ac19d0000"));
+    }
+
+    #[test]
+    fn an_update_sends_only_what_changes() {
+        // An explicit null would clear what Linear already has.
+        let title_only = update_input(&TaskPatch {
+            title: Some(" New title ".into()),
+            description: None,
+        });
+        assert_eq!(title_only, serde_json::json!({ "title": "New title" }));
+        let cleared = update_input(&TaskPatch {
+            title: None,
+            description: Some(String::new()),
+        });
+        assert_eq!(cleared, serde_json::json!({ "description": "" }));
+    }
+
+    #[test]
+    fn reads_and_writes_refuse_a_foreign_provider_task() {
+        let p = LinearProvider::new(Some(Credential::ApiKey("k".into())));
+        let foreign = TaskId::new("azure_devops", "7");
+        assert!(matches!(
+            p.get_task(&foreign),
+            Err(TaskError::Protocol { .. })
+        ));
+        assert!(matches!(
+            p.add_comment(&foreign, "hi"),
+            Err(TaskError::Protocol { .. })
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -987,6 +1191,20 @@ mod group_tests {
     }
 
     #[test]
+    fn every_issue_query_carries_the_fields_it_spreads() {
+        for query in [
+            super::QUERY_ASSIGNED,
+            super::QUERY_CHILDREN,
+            super::QUERY_ISSUE,
+            super::MUTATION_CREATE_ISSUE,
+            super::MUTATION_UPDATE_ISSUE,
+        ] {
+            assert!(query.contains("...IssueFields"), "{query}");
+            assert!(query.contains("fragment IssueFields on Issue"), "{query}");
+        }
+    }
+
+    #[test]
     fn a_group_with_a_blank_name_is_dropped_rather_than_shown_empty() {
         let groups = parse_groups(&json!({
             "team": { "id": "t1", "name": "   " },
@@ -994,5 +1212,166 @@ mod group_tests {
         }));
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].axis, GroupAxis::Project);
+    }
+}
+
+/// Writes by display key, against a mocked API: every mutation must be handed
+/// the UUID, since an identifier changes when its issue moves team.
+#[cfg(test)]
+mod mock_tests {
+    use super::*;
+    use crate::providers::NET;
+    use okena_transport::http::{HttpResponse, testing};
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+
+    const UUID: &str = "f0fe2bc3-d9fe-4db4-b8ce-9aac476ac19d";
+
+    type Sent = Arc<Mutex<Vec<(String, Value)>>>;
+
+    fn ok(v: Value) -> Result<HttpResponse, HttpError> {
+        Ok(HttpResponse::new(200, vec![], v.to_string().into_bytes()))
+    }
+
+    fn issue_node() -> Value {
+        json!({
+            "id": UUID, "identifier": "QBL-9", "title": "Split payments",
+            "state": { "name": "In Progress", "type": "started" },
+        })
+    }
+
+    /// Answer each GraphQL operation by name, recording its variables.
+    fn linear_api(sent: Sent) -> testing::MockGuard {
+        testing::mock(move |req| {
+            let body = req.json_body().cloned().unwrap_or(Value::Null);
+            let operation = body["query"]
+                .as_str()
+                .and_then(|q| q.split_whitespace().nth(1))
+                .and_then(|name| name.split('(').next())
+                .unwrap_or("")
+                .to_string();
+            if let Ok(mut log) = sent.lock() {
+                log.push((operation.clone(), body["variables"].clone()));
+            }
+            ok(match operation.as_str() {
+                "IssueId" => json!({ "data": { "issue": { "id": UUID } } }),
+                "UpdateIssue" => {
+                    json!({ "data": { "issueUpdate": { "success": true, "issue": issue_node() } } })
+                }
+                "CreateComment" => json!({ "data": { "commentCreate": { "success": true } } }),
+                "IssueStates" => json!({ "data": { "issue": { "id": UUID, "team": { "states": {
+                    "nodes": [
+                        { "id": "s-todo", "name": "Todo", "type": "unstarted", "position": 0.0 },
+                        { "id": "s-doing", "name": "In Progress", "type": "started", "position": 1.0 },
+                    ]
+                } } } } }),
+                "SetState" => json!({ "data": { "issueUpdate": { "success": true } } }),
+                "ParentContext" => json!({ "data": { "issue": {
+                    "id": UUID, "team": { "id": "team-1", "labels": { "nodes": [] } },
+                } } }),
+                "CreateIssue" => {
+                    json!({ "data": { "issueCreate": { "success": true, "issue": issue_node() } } })
+                }
+                other => panic!("unexpected operation `{other}`"),
+            })
+        })
+    }
+
+    fn provider() -> LinearProvider {
+        LinearProvider::new(Some(Credential::ApiKey("k".into())))
+    }
+
+    fn by_key() -> TaskId {
+        TaskId::new("linear", "QBL-9")
+    }
+
+    fn variables(sent: &Sent, operation: &str) -> Value {
+        sent.lock()
+            .ok()
+            .and_then(|s| {
+                s.iter()
+                    .find(|(op, _)| op == operation)
+                    .map(|(_, v)| v.clone())
+            })
+            .unwrap_or_else(|| panic!("no `{operation}` was sent"))
+    }
+
+    #[test]
+    fn an_update_by_key_writes_to_the_uuid() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = Sent::default();
+        let _mock = linear_api(sent.clone());
+
+        let task = provider()
+            .update_task(
+                &by_key(),
+                &TaskPatch {
+                    title: None,
+                    description: Some("Two cards".into()),
+                },
+            )
+            .expect("updates");
+        assert_eq!(task.display_key, "QBL-9");
+        let vars = variables(&sent, "UpdateIssue");
+        assert_eq!(vars["id"], UUID);
+        assert_eq!(vars["input"], json!({ "description": "Two cards" }));
+    }
+
+    #[test]
+    fn a_comment_by_key_is_filed_on_the_uuid() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = Sent::default();
+        let _mock = linear_api(sent.clone());
+
+        provider()
+            .add_comment(&by_key(), "Picked up")
+            .expect("comments");
+        let vars = variables(&sent, "CreateComment");
+        assert_eq!(vars["issueId"], UUID);
+        assert_eq!(vars["body"], "Picked up");
+    }
+
+    #[test]
+    fn a_state_change_by_key_moves_the_uuid() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = Sent::default();
+        let _mock = linear_api(sent.clone());
+
+        provider()
+            .set_state(&by_key(), TaskState::InProgress)
+            .expect("moves");
+        assert_eq!(variables(&sent, "IssueStates")["id"], "QBL-9");
+        let vars = variables(&sent, "SetState");
+        assert_eq!(vars["id"], UUID);
+        assert_eq!(vars["stateId"], "s-doing");
+    }
+
+    #[test]
+    fn a_child_of_a_key_is_created_under_the_uuid() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = Sent::default();
+        let _mock = linear_api(sent.clone());
+
+        provider()
+            .create_task(&TaskDraft {
+                title: "Split payments".into(),
+                parent_external_id: Some("QBL-9".into()),
+                ..Default::default()
+            })
+            .expect("creates");
+        let vars = variables(&sent, "CreateIssue");
+        assert_eq!(vars["parentId"], UUID);
+        assert_eq!(vars["teamId"], "team-1");
+    }
+
+    #[test]
+    fn back_to_back_writes_are_not_refused_by_the_rate_floor() {
+        // The floor refuses rather than waits; only the queue poll has one.
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let _mock = linear_api(Sent::default());
+        let p = provider();
+        for _ in 0..3 {
+            p.add_comment(&by_key(), "again").expect("not throttled");
+        }
     }
 }

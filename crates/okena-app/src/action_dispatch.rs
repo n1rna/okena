@@ -1118,6 +1118,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             provider,
             task_external_id,
         },
+        passthrough @ (ActionRequest::TaskGet { .. }
+        | ActionRequest::TaskUpdate { .. }
+        | ActionRequest::TaskSetState { .. }
+        | ActionRequest::TaskComment { .. }) => passthrough,
         ActionRequest::TasksAuthStatus => ActionRequest::TasksAuthStatus,
         ActionRequest::TasksConnectApiKey {
             provider,

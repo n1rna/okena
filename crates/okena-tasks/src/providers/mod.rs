@@ -8,5 +8,10 @@ pub mod azure_devops;
 mod html;
 pub mod linear;
 
+/// The HTTP bus's mock is process-global, so provider tests that mock it take
+/// turns — across providers, not only within one.
+#[cfg(test)]
+pub(crate) static NET: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub use azure_devops::AzureDevOpsProvider;
 pub use linear::LinearProvider;
