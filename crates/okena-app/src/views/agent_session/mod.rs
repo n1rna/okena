@@ -108,6 +108,10 @@ pub struct AgentSessionPanel {
     terminal_focus: FocusHandle,
     /// An instruction on its way, so a double click does not send it twice.
     sending: bool,
+    /// Tasks whose state this panel has asked for while showing this
+    /// session, answered or still on the way. Each is asked about once per
+    /// showing, however often the panel renders.
+    task_states_requested: std::collections::HashSet<okena_core::tasks::TaskId>,
 }
 
 struct EmbeddedTerminal {
@@ -123,8 +127,8 @@ impl AgentSessionPanel {
         ctx: InfoPanelContext,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Tasks this agent filed show their current state, which arrives
-        // whenever the Tasks view loads it.
+        // Tasks this agent filed show their current state, whoever loaded it:
+        // this panel's own fetch, or the Tasks view.
         let known_tasks = crate::views::known_tasks::entity(cx);
         cx.observe(&known_tasks, |_, _, cx| cx.notify()).detach();
         Self {
@@ -142,6 +146,7 @@ impl AgentSessionPanel {
             remote_manager: None,
             terminal_focus: cx.focus_handle(),
             sending: false,
+            task_states_requested: Default::default(),
         }
     }
 
@@ -173,7 +178,63 @@ impl AgentSessionPanel {
         self.pending_delete = None;
         self.terminal = None;
         self.sending = false;
+        // Showing a session again reads its tasks' states afresh.
+        self.task_states_requested.clear();
         cx.notify();
+    }
+
+    /// Ask the provider for the state of the tasks this agent filed.
+    ///
+    /// The panel asks for itself rather than relying on the Tasks view, which
+    /// may never have been opened. Once per task per showing — when the panel
+    /// opens, and for any task that appears while it is shown — in one batch
+    /// per provider. Through the session's own client, so a remote session's
+    /// tasks are read by the machine whose agent filed them.
+    fn fetch_task_states(
+        &mut self,
+        assets: &[okena_core::harness::AgentAsset],
+        cx: &mut Context<Self>,
+    ) {
+        let batches =
+            crate::views::known_tasks::tasks_to_fetch(assets, &self.task_states_requested);
+        for (provider, ids) in batches {
+            self.task_states_requested.extend(
+                ids.iter()
+                    .map(|id| okena_core::tasks::TaskId::new(provider.clone(), id.clone())),
+            );
+            let client = self.client.clone();
+            cx.spawn(async move |_, cx| {
+                let result = smol::unblock(move || {
+                    client
+                        .post_action(okena_core::api::ActionRequest::TaskGetMany {
+                            provider: provider.clone(),
+                            task_external_ids: ids,
+                        })
+                        .and_then(|v| v.ok_or_else(|| "the answer had no tasks".to_string()))
+                        .and_then(|v| {
+                            serde_json::from_value::<Vec<okena_core::tasks::Task>>(
+                                v["tasks"].clone(),
+                            )
+                            .map_err(|e| format!("unexpected tasks: {e}"))
+                        })
+                        .map_err(|e| (provider, e))
+                })
+                .await;
+                match result {
+                    Ok(tasks) => {
+                        cx.update(|cx| crate::views::known_tasks::remember(&tasks, cx));
+                    }
+                    // Not retried until the session is shown again: a row
+                    // without a state is better than a request every frame.
+                    Err((provider, e)) => {
+                        log::warn!(
+                            "[tasks] could not read the state of filed {provider} tasks: {e}"
+                        );
+                    }
+                }
+            })
+            .detach();
+        }
     }
 
     /// Type `text` into the agent and submit it.

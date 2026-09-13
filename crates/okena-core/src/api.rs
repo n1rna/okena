@@ -1269,6 +1269,13 @@ pub enum ActionRequest {
         task_external_id: String,
         body: String,
     },
+    /// Several tasks at once, by provider id: how a client refreshes the
+    /// state of tasks it already holds. Ids the provider does not know are
+    /// left out of the answer.
+    TaskGetMany {
+        provider: String,
+        task_external_ids: Vec<String>,
+    },
     /// Start work on a task across one or more projects.
     ///
     /// Creates a worktree on the provider's branch name in every project in

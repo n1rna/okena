@@ -220,6 +220,18 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
     issue_fields!()
 );
 
+/// Several issues by UUID, in one request.
+const QUERY_ISSUES_BY_ID: &str = concat!(
+    r#"
+query IssuesById($ids: [ID!]!, $first: Int!) {
+  issues(filter: { id: { in: $ids } }, first: $first) {
+    nodes { ...IssueFields }
+  }
+}
+"#,
+    issue_fields!()
+);
+
 const MUTATION_CREATE_COMMENT: &str = r#"
 mutation CreateComment($issueId: String!, $body: String!) {
   commentCreate(input: { issueId: $issueId, body: $body }) {
@@ -965,6 +977,34 @@ impl TaskProvider for LinearProvider {
             })
         }
     }
+
+    fn get_tasks(&self, ids: &[TaskId]) -> Result<Vec<Task>, TaskError> {
+        // Tasks okena holds carry the UUID already, so this is normally no
+        // lookup at all; a key still works, at a round trip each.
+        let mut uuids = Vec::with_capacity(ids.len());
+        for id in ids {
+            check_provider(id)?;
+            uuids.push(self.issue_uuid(&id.external_id)?);
+        }
+        let mut tasks = Vec::with_capacity(uuids.len());
+        for chunk in uuids.chunks(PAGE_SIZE as usize) {
+            let data = self.graphql(
+                "linear.issues_by_id",
+                QUERY_ISSUES_BY_ID,
+                serde_json::json!({ "ids": chunk, "first": chunk.len() }),
+            )?;
+            let nodes = data
+                .get("issues")
+                .and_then(|i| i.get("nodes"))
+                .and_then(|n| n.as_array())
+                .ok_or_else(|| TaskError::Protocol {
+                    provider: PROVIDER_ID,
+                    message: "could not read the issues".into(),
+                })?;
+            tasks.extend(nodes.iter().filter_map(parse_issue));
+        }
+        Ok(tasks)
+    }
 }
 
 #[cfg(test)]
@@ -1269,6 +1309,7 @@ mod mock_tests {
                 "ParentContext" => json!({ "data": { "issue": {
                     "id": UUID, "team": { "id": "team-1", "labels": { "nodes": [] } },
                 } } }),
+                "IssuesById" => json!({ "data": { "issues": { "nodes": [issue_node()] } } }),
                 "CreateIssue" => {
                     json!({ "data": { "issueCreate": { "success": true, "issue": issue_node() } } })
                 }
@@ -1373,5 +1414,22 @@ mod mock_tests {
         for _ in 0..3 {
             p.add_comment(&by_key(), "again").expect("not throttled");
         }
+    }
+
+    #[test]
+    fn several_tasks_by_uuid_are_read_in_one_request() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = Sent::default();
+        let _mock = linear_api(sent.clone());
+
+        let ids = [TaskId::new("linear", UUID), TaskId::new("linear", UUID)];
+        let tasks = provider().get_tasks(&ids).expect("reads");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].state_name, "In Progress");
+        let log = sent.lock().map(|s| s.clone()).unwrap_or_default();
+        // A UUID needs no lookup: the batch is the only request.
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert_eq!(log[0].0, "IssuesById");
+        assert_eq!(log[0].1["ids"], json!([UUID, UUID]));
     }
 }

@@ -2951,7 +2951,8 @@ pub async fn daemon_command_loop(
                 | ActionRequest::TaskGet { .. }
                 | ActionRequest::TaskUpdate { .. }
                 | ActionRequest::TaskSetState { .. }
-                | ActionRequest::TaskComment { .. }),
+                | ActionRequest::TaskComment { .. }
+                | ActionRequest::TaskGetMany { .. }),
             ) => {
                 spawn_blocking_command_with(reply, &runtime, move || {
                     okena_app_core::workspace::actions::execute::execute_task_provider_action(

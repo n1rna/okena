@@ -520,7 +520,6 @@ impl HarnessPane {
                         Ok(tasks) => {
                             this.tasks.tasks = tasks;
                             crate::views::known_tasks::remember(&this.tasks.tasks, cx);
-                            this.refresh_produced_tasks(cx);
                             // Children may have been created since — by an
                             // agent through MCP, or by someone else entirely —
                             // so a refresh drops what was cached rather than
@@ -1183,67 +1182,6 @@ impl HarnessPane {
             .chain(self.tasks.children.values().flatten())
             .find(|t| t.id.external_id == external_id)
             .cloned()
-    }
-
-    /// Re-read the tasks agents filed that the queue does not include.
-    ///
-    /// The queue leaves out closed tasks and ones assigned to somebody else —
-    /// which is what a filed sub-task often is — so without this a task moved
-    /// to Done would keep showing its last open state on the session that
-    /// filed it.
-    fn refresh_produced_tasks(&mut self, cx: &mut Context<Self>) {
-        let provider = self.tasks.provider.clone();
-        let ids = Self::produced_task_ids(
-            self.workspace.read(cx).projects(),
-            &provider,
-            &self.tasks.tasks,
-        );
-        if ids.is_empty() {
-            return;
-        }
-        let client = self.client.clone();
-        cx.spawn(async move |_, cx| {
-            let tasks: Vec<Task> = smol::unblock(move || {
-                ids.into_iter()
-                    .filter_map(|id| {
-                        client
-                            .post_action(ActionRequest::TaskGet {
-                                provider: provider.clone(),
-                                task_external_id: id,
-                            })
-                            .ok()
-                            .flatten()
-                            .and_then(|v| serde_json::from_value::<Task>(v).ok())
-                    })
-                    .collect()
-            })
-            .await;
-            cx.update(|cx| crate::views::known_tasks::remember(&tasks, cx));
-        })
-        .detach();
-    }
-
-    /// Provider ids of tasks recorded on sessions that `queue` does not hold.
-    fn produced_task_ids(
-        projects: &[crate::workspace::state::ProjectData],
-        provider: &str,
-        queue: &[Task],
-    ) -> Vec<String> {
-        let mut ids: Vec<String> = Vec::new();
-        let produced = projects
-            .iter()
-            .filter_map(|p| p.agent.as_ref())
-            .flat_map(|a| &a.assets)
-            .filter_map(|a| a.task.as_ref());
-        for task in produced {
-            if task.id.provider == provider
-                && !queue.iter().any(|t| t.id == task.id)
-                && !ids.contains(&task.id.external_id)
-            {
-                ids.push(task.id.external_id.clone());
-            }
-        }
-        ids
     }
 
     /// The split choice, as modes on the work launcher.

@@ -315,6 +315,38 @@ fn error_result(e: TaskError) -> ActionResult {
     }
 }
 
+/// Several tasks at once, by provider id.
+///
+/// A failure is logged as well as returned: callers refresh in the background,
+/// where an error nobody reads would otherwise vanish.
+pub(super) fn get_many(provider: String, ids: Vec<String>) -> ActionResult {
+    let p = match resolve(&provider) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let ids: Vec<okena_core::tasks::TaskId> = ids
+        .into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| okena_core::tasks::TaskId::new(provider.clone(), id))
+        .collect();
+    if ids.is_empty() {
+        return ActionResult::Ok(Some(serde_json::json!({ "tasks": [] })));
+    }
+    match p.get_tasks(&ids) {
+        Ok(tasks) => match serde_json::to_value(&tasks) {
+            Ok(v) => ActionResult::Ok(Some(serde_json::json!({ "tasks": v }))),
+            Err(e) => ActionResult::Err(format!("could not serialize tasks: {e}")),
+        },
+        Err(e) => {
+            log::warn!(
+                "[tasks] refreshing {} task(s) on {provider} failed: {e}",
+                ids.len()
+            );
+            ActionResult::Err(describe(e))
+        }
+    }
+}
+
 /// Read a kind off the wire.
 ///
 /// Unknown values fall back to `Task` rather than failing: a newer client — or
@@ -1231,9 +1263,9 @@ pub(super) fn register_asset(
         return ActionResult::Err(format!("project not found: {project_id}"));
     };
     let state = p.agent.get_or_insert_with(Default::default);
-    // Something okena already recorded — a task the agent filed through the
-    // MCP — is not added a second time.
-    state.record_asset(asset);
+    // Stored as reported. Two rows about the same thing are matched when the
+    // list is built, where the match can change later; merging here could not.
+    state.assets.push(asset);
     let count = state.assets.len();
     ws.notify_data(cx);
 

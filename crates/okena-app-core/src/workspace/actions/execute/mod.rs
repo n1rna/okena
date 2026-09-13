@@ -180,6 +180,10 @@ pub fn execute_task_provider_action(action: &ActionRequest) -> Option<ActionResu
             task_external_id,
             body,
         } => tasks::comment(provider.clone(), task_external_id.clone(), body.clone()),
+        ActionRequest::TaskGetMany {
+            provider,
+            task_external_ids,
+        } => tasks::get_many(provider.clone(), task_external_ids.clone()),
         _ => return None,
     })
 }
@@ -947,7 +951,8 @@ pub fn execute_action(
         | ActionRequest::TaskGet { .. }
         | ActionRequest::TaskUpdate { .. }
         | ActionRequest::TaskSetState { .. }
-        | ActionRequest::TaskComment { .. }) => execute_task_provider_action(&action)
+        | ActionRequest::TaskComment { .. }
+        | ActionRequest::TaskGetMany { .. }) => execute_task_provider_action(&action)
             .unwrap_or_else(|| ActionResult::Err("not a task provider action".into())),
         ActionRequest::TaskStartWork {
             provider,
