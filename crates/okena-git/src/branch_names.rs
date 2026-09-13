@@ -1,4 +1,3 @@
-use okena_core::process::{command, safe_output};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -198,83 +197,20 @@ fn adjective_for(
     format!("{}{}", stem, suffix)
 }
 
-/// Per-repo username cache. Keyed by canonical repo path so that different
-/// repositories resolve to their own GitHub owner.
-static USERNAME_CACHE: parking_lot::Mutex<
-    Option<std::collections::HashMap<std::path::PathBuf, String>>,
-> = parking_lot::Mutex::new(None);
+/// Prefix for quick-created worktrees. They carry no ticket to say what kind
+/// of work they are, so they read as chores, matching the commit style.
+const PREFIX: &str = "chore";
 
-fn detect_github_username(repo_path: &Path) -> String {
-    let canonical = repo_path
-        .canonicalize()
-        .unwrap_or_else(|_| repo_path.to_path_buf());
-    let mut guard = USERNAME_CACHE.lock();
-    let cache = guard.get_or_insert_with(std::collections::HashMap::new);
-    if let Some(cached) = cache.get(&canonical) {
-        return cached.clone();
-    }
-    let username = detect_github_username_inner(repo_path);
-    cache.insert(canonical, username.clone());
-    username
-}
-
-fn detect_github_username_inner(repo_path: &Path) -> String {
-    // Tier 1: gh api user — returns the authenticated user's login,
-    // which is correct even when the remote is owned by an org.
-    // Result is cached so the network call only happens once.
-    if let Ok(output) = safe_output(command("gh").args(["api", "user", "--jq", ".login"]))
-        && output.status.success()
-    {
-        let login = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !login.is_empty() {
-            return sanitize_username(&login);
-        }
-    }
-
-    // Tier 2: git config user.name
-    if let Some(repo) = crate::gix_helpers::open(repo_path)
-        && let Some(name) = repo.config_snapshot().string("user.name")
-    {
-        let name = name.to_string();
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            return sanitize_username(trimmed);
-        }
-    }
-
-    // Tier 3: fallback
-    "dev".to_string()
-}
-
-fn sanitize_username(name: &str) -> String {
-    name.to_lowercase()
-        .replace(' ', "-")
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-')
-        .collect()
-}
-
-/// Generate a unique branch name like `username/rohlik` that doesn't collide
+/// Generate a unique branch name like `chore/rohlik` that doesn't collide
 /// with existing branches or worktree branches.
 ///
-/// **Blocking I/O**: spawns git/gh subprocesses. Must be called off the main
+/// **Blocking I/O**: spawns git subprocesses. Must be called off the main
 /// thread (e.g., via `smol::unblock`).
 pub fn generate_branch_name(repo_path: &Path) -> String {
-    // Run username detection and branch listing in parallel —
-    // they spawn independent subprocesses.
-    #[allow(
-        clippy::expect_used,
-        reason = "scoped worker panic re-raised by the orchestrator is the intended behavior"
-    )]
-    let (username, taken) = std::thread::scope(|s| {
-        let u = s.spawn(|| detect_github_username(repo_path));
-        let t = s.spawn(|| collect_taken_branches(repo_path));
-        (
-            u.join().expect("username detection thread panicked"),
-            t.join().expect("branch listing thread panicked"),
-        )
-    });
+    pick_branch_name(&collect_taken_branches(repo_path))
+}
 
+fn pick_branch_name(taken: &HashSet<String>) -> String {
     // Shuffle goods and adjectives so the generated name feels random
     let mut good_idx: Vec<usize> = (0..GOODS.len()).collect();
     let mut adj_idx: Vec<usize> = (0..ADJECTIVE_STEMS.len()).collect();
@@ -283,7 +219,7 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
 
     // Phase 1: try plain goods
     for &i in &good_idx {
-        let candidate = format!("{}/{}", username, GOODS[i].name);
+        let candidate = format!("{}/{}", PREFIX, GOODS[i].name);
         if !taken.contains(&candidate) {
             return candidate;
         }
@@ -295,7 +231,7 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
         for &i in &good_idx {
             let good = &GOODS[i];
             let adj = adjective_for(stem, sm, sf, sn, good);
-            let candidate = format!("{}/{}-{}", username, adj, good.name);
+            let candidate = format!("{}/{}-{}", PREFIX, adj, good.name);
             if !taken.contains(&candidate) {
                 return candidate;
             }
@@ -303,14 +239,14 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
     }
 
     // Phase 3: numeric suffix fallback (practically unreachable — Phase 1 covers 38,
-    // Phase 2 covers 380 combos, so 418+ branches must already exist for this user)
+    // Phase 2 covers 380 combos, so 418+ branches must already exist under this prefix)
     for suffix_num in 2u32..1000 {
         for &ai in &adj_idx {
             let (stem, sm, sf, sn) = ADJECTIVE_STEMS[ai];
             for &i in &good_idx {
                 let good = &GOODS[i];
                 let adj = adjective_for(stem, sm, sf, sn, good);
-                let candidate = format!("{}/{}-{}-{}", username, adj, good.name, suffix_num);
+                let candidate = format!("{}/{}-{}-{}", PREFIX, adj, good.name, suffix_num);
                 if !taken.contains(&candidate) {
                     return candidate;
                 }
@@ -319,7 +255,7 @@ pub fn generate_branch_name(repo_path: &Path) -> String {
     }
 
     // Fallback: UUID-based name (practically unreachable)
-    format!("{}/worktree-{}", username, uuid::Uuid::new_v4())
+    format!("{}/worktree-{}", PREFIX, uuid::Uuid::new_v4())
 }
 
 fn collect_taken_branches(repo_path: &Path) -> HashSet<String> {
@@ -388,10 +324,26 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_username() {
-        assert_eq!(sanitize_username("John Doe"), "john-doe");
-        assert_eq!(sanitize_username("user@name!"), "username");
-        assert_eq!(sanitize_username("Already-Good"), "already-good");
+    fn names_are_chores_without_a_username() {
+        let name = pick_branch_name(&HashSet::new());
+        let good = name.strip_prefix("chore/").expect("chore prefix");
+        assert!(GOODS.iter().any(|g| g.name == good), "got {name}");
+    }
+
+    #[test]
+    fn taken_names_are_skipped() {
+        let mut taken: HashSet<String> =
+            GOODS.iter().map(|g| format!("chore/{}", g.name)).collect();
+        taken.remove("chore/rohlik");
+        assert_eq!(pick_branch_name(&taken), "chore/rohlik");
+
+        // Every plain good taken: falls through to adjective combos.
+        taken.insert("chore/rohlik".into());
+        let name = pick_branch_name(&taken);
+        assert!(
+            name.starts_with("chore/") && !taken.contains(&name),
+            "got {name}"
+        );
     }
 
     #[test]
