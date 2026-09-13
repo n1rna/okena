@@ -533,7 +533,7 @@ impl ProjectInfoPanel {
                     .text_color(rgb(t.text_primary))
                     .child(s.name.clone()),
             )
-            .children(s.kind.subject().map(|subject| {
+            .children(s.subject().map(|subject| {
                 div()
                     .w_full()
                     .min_w_0()

@@ -470,6 +470,21 @@ impl AgentSessionInfo {
         activity_of(self.running, self.live, self.idle.clone())
     }
 
+    /// The line identifying what the session works on, for a card.
+    ///
+    /// A session on several picked tasks says how many more beside the first,
+    /// right after its key: a long title is cut at the card's edge, and the
+    /// count must not be what goes.
+    pub fn subject(&self) -> Option<String> {
+        let Some((first, rest)) = self.tasks.split_first() else {
+            return self.kind.subject();
+        };
+        Some(match rest.len() {
+            0 => format!("{} — {}", first.display_key, first.title),
+            more => format!("{} +{more} — {}", first.display_key, first.title),
+        })
+    }
+
     /// The terminal to show for this session, if any.
     pub fn visible_terminal_id(ws: &Workspace, project_id: &str) -> Option<String> {
         ws.project(project_id)?
@@ -690,6 +705,36 @@ mod tests {
             .collect();
         assert_eq!(keys, ["QBL-1"]);
         assert_eq!(tasks_key(&p).as_deref(), Some("QBL-1"));
+    }
+
+    #[test]
+    fn a_card_on_several_picked_tasks_counts_the_others_beside_the_key() {
+        let mut s = info(true, false, "");
+        s.kind = AgentSessionKind::Task(task("u1", "QBL-1"));
+        s.tasks = vec![
+            task("u1", "QBL-1"),
+            task("u2", "QBL-2"),
+            task("u3", "QBL-3"),
+        ];
+        assert_eq!(s.subject().as_deref(), Some("QBL-1 +2 — Title"));
+    }
+
+    #[test]
+    fn a_card_on_one_task_reads_as_it_did() {
+        let mut s = info(true, false, "");
+        s.kind = AgentSessionKind::Task(task("u1", "QBL-1"));
+        s.tasks = vec![task("u1", "QBL-1")];
+        assert_eq!(s.subject(), s.kind.subject());
+        assert_eq!(s.subject().as_deref(), Some("QBL-1 — Title"));
+    }
+
+    #[test]
+    fn a_card_not_on_a_task_keeps_its_kind_subject() {
+        let mut s = info(true, false, "");
+        s.kind = AgentSessionKind::Spec {
+            change: "add-login".into(),
+        };
+        assert_eq!(s.subject().as_deref(), Some("add-login"));
     }
 
     #[test]
