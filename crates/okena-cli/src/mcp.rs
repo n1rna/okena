@@ -868,17 +868,14 @@ fn file_task(args: &Value, parent_defaults_to_session: bool) -> Result<Value, St
         }
     };
 
-    let created = action(&json!({
-        "action": "task_create",
-        "provider": provider,
-        "title": title,
-        "description": args.get("description").and_then(|d| d.as_str()).unwrap_or(""),
-        "kind": args.get("kind").and_then(|k| k.as_str()).unwrap_or("task"),
-        "parent_external_id": parent,
-        "container_id": container,
-        // Recorded as produced by this session.
-        "project_id": session.project.id,
-    }))?;
+    let created = action(&task_create_body(
+        &provider,
+        &title,
+        args,
+        parent.as_deref(),
+        container.as_deref(),
+        &session.project.id,
+    ))?;
     // A choice the provider needs made is the answer, not a created task.
     if created.get("needs_choice").is_some() {
         return Ok(created);
@@ -891,6 +888,28 @@ fn file_task(args: &Value, parent_defaults_to_session: bool) -> Result<Value, St
         created
     };
     Ok(json!({ "created": created, "parent": parent }))
+}
+
+/// The daemon action that files a task. `project_id` is the filing session, so
+/// okena records the task as something that session produced.
+fn task_create_body(
+    provider: &str,
+    title: &str,
+    args: &Value,
+    parent: Option<&str>,
+    container: Option<&str>,
+    project_id: &str,
+) -> Value {
+    json!({
+        "action": "task_create",
+        "provider": provider,
+        "title": title,
+        "description": args.get("description").and_then(|d| d.as_str()).unwrap_or(""),
+        "kind": args.get("kind").and_then(|k| k.as_str()).unwrap_or("task"),
+        "parent_external_id": parent,
+        "container_id": container,
+        "project_id": project_id,
+    })
 }
 
 fn get_task(args: &Value) -> Result<Value, String> {
@@ -1096,6 +1115,29 @@ mod tests {
         assert_eq!(parse_state("in-review"), Ok("in_review"));
         assert_eq!(parse_state("cancelled"), Ok("canceled"));
         assert!(parse_state("shipped").is_err());
+    }
+
+    #[test]
+    fn a_filed_task_names_the_session_that_filed_it() {
+        let body = super::task_create_body(
+            "linear",
+            "Split payments",
+            &json!({ "kind": "story" }),
+            Some("QBL-9"),
+            None,
+            "session-1",
+        );
+        assert_eq!(body["project_id"], "session-1");
+        assert_eq!(body["parent_external_id"], "QBL-9");
+        assert_eq!(body["kind"], "story");
+        // And the daemon reads it as the action it names.
+        let parsed: okena_core::api::ActionRequest =
+            serde_json::from_value(body).expect("a TaskCreate the daemon accepts");
+        assert!(matches!(
+            parsed,
+            okena_core::api::ActionRequest::TaskCreate { project_id: Some(ref p), .. }
+                if p == "session-1"
+        ));
     }
 
     #[test]

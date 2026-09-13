@@ -140,8 +140,9 @@ pub fn execute_task_provider_action(action: &ActionRequest) -> Option<ActionResu
             kind,
             parent_external_id,
             container_id,
-            // Recording the task on the session that filed it needs the
-            // workspace, so it happens after this call returns, not in it.
+            // Recorded on the filing session once this returns, by a caller
+            // holding the workspace — see `record_created_task`. This call
+            // never touches the workspace, so it can run without its lock.
             project_id: _,
         } => tasks::create(
             provider.clone(),
@@ -186,6 +187,21 @@ pub fn execute_task_provider_action(action: &ActionRequest) -> Option<ActionResu
         } => tasks::get_many(provider.clone(), task_external_ids.clone()),
         _ => return None,
     })
+}
+
+/// Record a task an agent just filed on the session in `project_id`, from the
+/// provider's answer to the create.
+///
+/// Separate from [`execute_task_provider_action`] so a caller can run the
+/// provider call without the workspace and take the workspace only for this.
+/// Best effort: a session that is gone records nothing and fails nothing.
+pub fn record_created_task(
+    ws: &mut Workspace,
+    project_id: &str,
+    created: &serde_json::Value,
+    cx: &mut impl WorkspaceCx,
+) -> bool {
+    tasks::record_created_task(ws, project_id, created, cx)
 }
 
 /// Execute any `ActionRequest` against the workspace.
@@ -943,10 +959,24 @@ pub fn execute_action(
         ActionRequest::TasksDisconnect { provider } => tasks::disconnect(provider),
         // The daemon routes these off its command loop before they get here;
         // this path is for every other caller.
+        action @ ActionRequest::TaskCreate { .. } => {
+            let result = execute_task_provider_action(&action)
+                .unwrap_or_else(|| ActionResult::Err("not a task provider action".into()));
+            if let (
+                ActionRequest::TaskCreate {
+                    project_id: Some(project_id),
+                    ..
+                },
+                ActionResult::Ok(Some(created)),
+            ) = (&action, &result)
+            {
+                record_created_task(ws, project_id, created, cx);
+            }
+            result
+        }
         action @ (ActionRequest::TasksConnectApiKey { .. }
         | ActionRequest::TasksList { .. }
         | ActionRequest::TaskContainers { .. }
-        | ActionRequest::TaskCreate { .. }
         | ActionRequest::TaskChildren { .. }
         | ActionRequest::TaskGet { .. }
         | ActionRequest::TaskUpdate { .. }

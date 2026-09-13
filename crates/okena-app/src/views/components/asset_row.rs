@@ -138,7 +138,10 @@ pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
                 .truncate()
                 .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_muted))
-                .child(subtitle(asset)),
+                .child(subtitle(
+                    asset,
+                    crate::views::known_tasks::task_state(asset.task.as_ref(), cx).as_deref(),
+                )),
         )
         .when_some(asset.url.clone(), |heading, url| {
             heading
@@ -254,9 +257,9 @@ fn readiness_indicators(readiness: &PrReadiness) -> Vec<(String, Tone)> {
 
 /// Kind, repo and — when the title does not already say it — branch. The link
 /// only when there is no repo to name, as the only place it came from.
-fn subtitle(asset: &SessionAsset) -> String {
+fn subtitle(asset: &SessionAsset, task_state: Option<&str>) -> String {
     let mut parts = vec![asset.kind.label().to_string()];
-    parts.extend(task_caption(asset));
+    parts.extend(task_caption(asset, task_state));
     parts.extend(asset.project.clone());
     if let Some(branch) = asset.branch.as_ref().filter(|b| **b != asset.title) {
         parts.push(branch.clone());
@@ -269,10 +272,15 @@ fn subtitle(asset: &SessionAsset) -> String {
     parts.join(" · ")
 }
 
-/// How the row names the task an asset is about, ahead of the repo. The one
-/// place a richer caption goes; for now, the task's key.
-fn task_caption(asset: &SessionAsset) -> Option<String> {
-    asset.task.as_ref().map(|task| task.display_key.clone())
+/// How the row names the task an asset is about, ahead of the repo: its key,
+/// and where it now stands on the provider once okena has heard. The state is
+/// looked up by the caller, which has the app, so this stays plain.
+fn task_caption(asset: &SessionAsset, state: Option<&str>) -> Option<String> {
+    let task = asset.task.as_ref()?;
+    Some(match state {
+        Some(state) => format!("{} · {state}", task.display_key),
+        None => task.display_key.clone(),
+    })
 }
 
 /// "↑2 ↓1" against the base branch (`origin/<default>`), not the upstream, or
@@ -433,17 +441,30 @@ mod tests {
             parent_id: None,
             parent_key: None,
         });
-        assert_eq!(subtitle(&row), "PR · QBL-374 · okena");
+        assert_eq!(subtitle(&row, None), "PR · QBL-374 · okena");
+        // Once okena has heard where the task stands, it follows the key.
+        assert_eq!(
+            subtitle(&row, Some("In Progress")),
+            "PR · QBL-374 · In Progress · okena"
+        );
+    }
+
+    #[test]
+    fn a_state_without_a_task_says_nothing() {
+        assert_eq!(
+            subtitle(&asset("Detect assets", None, Some("okena")), Some("Done")),
+            "PR · okena"
+        );
     }
 
     #[test]
     fn the_branch_is_named_only_when_the_title_does_not_already() {
         assert_eq!(
-            subtitle(&asset("feat/x", Some("feat/x"), Some("okena"))),
+            subtitle(&asset("feat/x", Some("feat/x"), Some("okena")), None),
             "PR · okena"
         );
         assert_eq!(
-            subtitle(&asset("Detect assets", Some("feat/x"), Some("okena"))),
+            subtitle(&asset("Detect assets", Some("feat/x"), Some("okena")), None),
             "PR · okena · feat/x"
         );
     }
@@ -451,7 +472,7 @@ mod tests {
     #[test]
     fn the_link_stands_in_for_a_missing_repo() {
         assert_eq!(
-            subtitle(&asset("Detect assets", None, None)),
+            subtitle(&asset("Detect assets", None, None), None),
             "PR · https://github.com/o/r/pull/1"
         );
     }

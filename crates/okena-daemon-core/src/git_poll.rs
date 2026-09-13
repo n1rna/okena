@@ -2923,6 +2923,7 @@ mod tests {
                 project: None,
                 branch: None,
                 created_at: 0,
+                task: None,
             });
     }
 

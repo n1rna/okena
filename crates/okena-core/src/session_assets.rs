@@ -42,8 +42,9 @@ pub struct SessionAsset {
     pub pr: Option<PrInfo>,
     /// The CI rollup of the checkout behind this row.
     pub ci: Option<CiCheckSummary>,
-    /// The task a registered asset is about, carried through for its caption.
-    /// Nothing sets it yet; registered tasks arrive with the agent's asset.
+    /// The task this row is, when okena recorded it as one — a task an agent
+    /// filed through okena's MCP. Carried through for its caption, and the
+    /// key a hand-registered ticket link is matched on.
     pub task: Option<TaskRef>,
     /// Whether the agent registered it, alone or merged into a detected row.
     pub registered: bool,
@@ -152,9 +153,21 @@ pub fn derive_session_assets(
             }
             continue;
         }
-        // Registered twice and detected by neither: still one row, under the
-        // first registration's title.
-        if rows[detected..].iter().any(|row| matches(asset, row)) {
+        // Registered twice and detected by neither: still one row. The row
+        // that carries the task wins, since it knows which task it is, and
+        // the agent's title wins over the ticket's own, which is all okena's
+        // record of a filed task has.
+        if let Some(row) = rows[detected..].iter_mut().find(|row| matches(asset, row)) {
+            match (&row.task, &asset.task) {
+                (None, Some(task)) => {
+                    row.kind = asset.kind.clone();
+                    row.task = Some(task.clone());
+                }
+                (Some(task), None) if row.title == task.title => {
+                    row.title = asset.title.clone();
+                }
+                _ => {}
+            }
             continue;
         }
         rows.push(SessionAsset {
@@ -163,12 +176,9 @@ pub fn derive_session_assets(
             url: asset.url.clone(),
             project: asset.project.clone(),
             branch: asset.branch.clone(),
-            state: None,
-            uncommitted: None,
-            pr: None,
-            ci: None,
-            task: None,
+            task: asset.task.clone(),
             registered: true,
+            ..SessionAsset::default()
         });
     }
     rows
@@ -223,13 +233,62 @@ fn checkout_row(c: &LinkedCheckout<'_>) -> Option<SessionAsset> {
 /// Whether a registered asset and a row describe the same thing.
 ///
 /// The single place a match key lives, used both against detected rows and to
-/// collapse repeated registrations. Another key — a task parsed from a ticket
-/// URL, say — is added here and applies to both.
+/// collapse repeated registrations: the same URL, or the same task. A task is
+/// named by its key — from okena's own record of it, or parsed from a ticket
+/// URL — so a hand-registered `…/issue/QBL-375` is the task okena recorded at
+/// `…/issue/QBL-375/its-title-slug`, and a link copied before the ticket was
+/// renamed still matches.
 fn matches(asset: &AgentAsset, row: &SessionAsset) -> bool {
-    matches!(
+    if matches!(
         (asset.url.as_deref(), row.url.as_deref()),
         (Some(a), Some(b)) if same_url(a, b)
+    ) {
+        return true;
+    }
+    let key = |task: Option<&TaskRef>, url: Option<&str>| {
+        task.map(|t| t.display_key.clone())
+            .or_else(|| url.and_then(task_key_from_url))
+    };
+    matches!(
+        (
+            key(asset.task.as_ref(), asset.url.as_deref()),
+            key(row.task.as_ref(), row.url.as_deref()),
+        ),
+        (Some(a), Some(b)) if a.eq_ignore_ascii_case(&b)
     )
+}
+
+/// The task key a ticket URL names: `QBL-375` from a Linear issue URL, with or
+/// without its title slug, or `#42` from an Azure DevOps work item URL. `None`
+/// for anything else, pull requests included.
+pub fn task_key_from_url(url: &str) -> Option<String> {
+    let url = url.trim().split(['?', '#']).next()?;
+    let path = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let mut segments = path.split('/').filter(|s| !s.is_empty());
+    let host = segments.next()?.to_ascii_lowercase();
+    let rest: Vec<&str> = segments.collect();
+    let after = |name: &str| {
+        rest.iter()
+            .position(|s| s.eq_ignore_ascii_case(name))
+            .and_then(|i| rest.get(i + 1))
+            .copied()
+    };
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+
+    if host == "linear.app" {
+        let key = after("issue")?;
+        let (team, number) = key.split_once('-')?;
+        let team_ok = !team.is_empty() && team.chars().all(|c| c.is_ascii_alphanumeric());
+        return (team_ok && digits(number)).then(|| key.to_ascii_uppercase());
+    }
+    if host == "dev.azure.com" || host.ends_with(".visualstudio.com") {
+        rest.iter()
+            .any(|s| s.eq_ignore_ascii_case("_workitems"))
+            .then_some(())?;
+        let number = after("edit")?;
+        return digits(number).then(|| format!("#{number}"));
+    }
+    None
 }
 
 /// The detected row a registered asset describes, if any.
@@ -330,7 +389,23 @@ mod tests {
             project: None,
             branch: None,
             created_at: 0,
+            task: None,
         }
+    }
+
+    /// A task okena recorded when an agent filed it: titled after the ticket.
+    fn filed_task(key: &str, url: &str) -> AgentAsset {
+        let mut asset = registered(AgentAssetKind::Task, "Split payments");
+        asset.url = Some(url.into());
+        asset.task = Some(TaskRef {
+            id: crate::tasks::TaskId::new("linear", format!("uuid-{key}")),
+            display_key: key.into(),
+            title: "Split payments".into(),
+            url: url.into(),
+            parent_id: None,
+            parent_key: None,
+        });
+        asset
     }
 
     #[test]
@@ -429,6 +504,85 @@ mod tests {
             ..SessionAsset::default()
         };
         assert!(row.pr.is_none() && row.state.is_none() && !row.registered);
+    }
+
+    #[test]
+    fn a_hand_registered_ticket_link_collapses_into_the_filed_task() {
+        let filed = filed_task(
+            "QBL-375",
+            "https://linear.app/q/issue/QBL-375/session-tasks-are-recorded",
+        );
+        let mut by_hand = registered(AgentAssetKind::Other, "Recording filed tasks");
+        by_hand.url = Some("https://linear.app/q/issue/qbl-375".into());
+
+        for order in [[filed.clone(), by_hand.clone()], [by_hand, filed]] {
+            let rows = derive_session_assets(&order, &[], &[]);
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            let row = &rows[0];
+            assert_eq!(
+                row.task.as_ref().map(|t| t.display_key.as_str()),
+                Some("QBL-375"),
+                "the row carries the task"
+            );
+            assert_eq!(row.kind, AgentAssetKind::Task);
+            assert_eq!(row.title, "Recording filed tasks", "the agent's title");
+        }
+    }
+
+    #[test]
+    fn two_different_tasks_stay_two_rows() {
+        let rows = derive_session_assets(
+            &[
+                filed_task("QBL-1", "https://linear.app/q/issue/QBL-1/a"),
+                filed_task("QBL-2", "https://linear.app/q/issue/QBL-2/b"),
+            ],
+            &[],
+            &[],
+        );
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn a_task_with_a_link_and_a_branch_keeps_its_own_row() {
+        // The branch rule only merges what has no link of its own.
+        let g = git(None, None);
+        let mut filed = filed_task("QBL-375", "https://linear.app/q/issue/QBL-375/x");
+        filed.branch = Some("feat/x".into());
+        filed.project = Some("okena".into());
+        let rows = derive_session_assets(&[filed], &[checkout("okena", Some(&g))], &[]);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].title, "feat/x");
+        assert!(rows[0].task.is_none());
+        assert!(rows[1].task.is_some());
+    }
+
+    #[test]
+    fn task_keys_come_from_linear_and_azure_devops_links_only() {
+        let key = |url| task_key_from_url(url);
+        assert_eq!(
+            key("https://linear.app/qblok/issue/QBL-375/session-tasks").as_deref(),
+            Some("QBL-375")
+        );
+        assert_eq!(
+            key("linear.app/qblok/issue/qbl-375/").as_deref(),
+            Some("QBL-375")
+        );
+        assert_eq!(
+            key("https://dev.azure.com/contoso/Web%20Shop/_workitems/edit/42/").as_deref(),
+            Some("#42")
+        );
+        assert_eq!(
+            key("https://contoso.visualstudio.com/Shop/_workitems/edit/7?x=1").as_deref(),
+            Some("#7")
+        );
+        for other in [
+            "https://github.com/o/r/pull/7",
+            "https://linear.app/qblok/project/harness-1",
+            "https://linear.app/qblok/issue/not-a-key",
+            "https://dev.azure.com/contoso/Shop/_git/repo/pullrequest/42",
+        ] {
+            assert_eq!(key(other), None, "{other}");
+        }
     }
 
     #[test]

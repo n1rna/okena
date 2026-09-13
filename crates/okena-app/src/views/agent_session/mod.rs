@@ -202,7 +202,7 @@ impl AgentSessionPanel {
     /// has nothing due free.
     fn fetch_task_states(
         &mut self,
-        assets: &[okena_core::harness::AgentAsset],
+        assets: &[okena_core::session_assets::SessionAsset],
         cx: &mut Context<Self>,
     ) {
         use crate::views::known_tasks::{STATE_STALE_AFTER, tasks_to_fetch};
