@@ -961,6 +961,7 @@ impl WindowView {
                 focus_manager: self.focus_manager.clone(),
                 window_id,
                 terminals: self.terminals.clone(),
+                remote_manager: self.remote_manager.clone(),
             }
         });
         let ws_for_observe = self.workspace.clone();

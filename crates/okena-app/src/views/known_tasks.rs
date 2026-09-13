@@ -130,6 +130,111 @@ pub fn tasks_to_fetch<'a>(
     by_provider
 }
 
+/// `TaskGetMany` as it goes over the wire, and so as a daemon that does not
+/// know it names it in its refusal.
+const TASK_GET_MANY: &str = "task_get_many";
+
+/// Whether `error` is a daemon refusing `TaskGetMany` because it predates it.
+///
+/// Such a daemon cannot parse the request at all, so the answer is serde's
+/// message about the unknown tag rather than anything the action returned.
+pub fn is_batch_unknown(error: &str) -> bool {
+    error.contains(&format!("unknown variant `{TASK_GET_MANY}`"))
+}
+
+/// Connections whose daemon does not know `TaskGetMany`, each with the
+/// connection generation it was learned on.
+///
+/// App-wide, so every panel on that connection stops asking and the refusal
+/// is logged once. A reconnect may bring a newer daemon, so the fact lapses
+/// when the connection's generation moves on.
+#[derive(Default)]
+pub struct BatchUnsupported {
+    by_connection: HashMap<String, u64>,
+}
+
+impl Global for BatchUnsupported {}
+
+impl BatchUnsupported {
+    /// Whether the batch is known to be refused on this connection as it is now.
+    pub fn applies(&self, connection_id: &str, generation: u64) -> bool {
+        self.by_connection.get(connection_id) == Some(&generation)
+    }
+
+    /// Remember a refusal. True when it is news for this connection generation.
+    pub fn record(&mut self, connection_id: &str, generation: u64) -> bool {
+        self.by_connection
+            .insert(connection_id.to_string(), generation)
+            != Some(generation)
+    }
+}
+
+pub fn batch_unsupported(connection_id: &str, generation: u64, cx: &App) -> bool {
+    cx.try_global::<BatchUnsupported>()
+        .is_some_and(|b| b.applies(connection_id, generation))
+}
+
+pub fn record_batch_unsupported(connection_id: &str, generation: u64, cx: &mut App) -> bool {
+    cx.default_global::<BatchUnsupported>()
+        .record(connection_id, generation)
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::{BatchUnsupported, is_batch_unknown};
+
+    /// A daemon from before `TaskGetMany`: it knows reading one task, not many.
+    #[derive(serde::Deserialize, Debug)]
+    #[serde(tag = "action", rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum OldDaemonAction {
+        TaskGet { provider: String },
+    }
+
+    #[test]
+    fn an_old_daemons_refusal_of_the_batch_is_recognised() {
+        let request = serde_json::to_value(okena_core::api::ActionRequest::TaskGetMany {
+            provider: "linear".into(),
+            task_external_ids: vec!["a".into()],
+        })
+        .unwrap();
+        let refusal = serde_json::from_value::<OldDaemonAction>(request).unwrap_err();
+        // What reaches the panel: the status line and axum's rejection text.
+        let answer = format!(
+            "Server returned 422 Unprocessable Entity: Failed to deserialize the JSON body into the target type: {refusal}"
+        );
+        assert!(is_batch_unknown(&answer), "{answer}");
+
+        // Any other failure is still just a failure, logged every time.
+        assert!(!is_batch_unknown("HTTP request failed: connection refused"));
+        assert!(!is_batch_unknown(
+            "unknown variant `task_get`, expected one of"
+        ));
+        assert!(!is_batch_unknown("Linear API error: not authorized"));
+    }
+
+    #[test]
+    fn a_refused_batch_stops_on_its_connection_until_it_reconnects() {
+        let mut refused = BatchUnsupported::default();
+        assert!(!refused.applies("remote-1", 1));
+
+        assert!(refused.record("remote-1", 1), "the first refusal is news");
+        assert!(refused.applies("remote-1", 1));
+        assert!(
+            !refused.record("remote-1", 1),
+            "a repeat is not logged again"
+        );
+        assert!(!refused.applies("local", 1), "other connections still ask");
+
+        // A reconnect may bring a newer daemon: ask it again.
+        assert!(!refused.applies("remote-1", 2));
+        assert!(
+            refused.record("remote-1", 2),
+            "a refusal after reconnecting is news"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::tasks_to_fetch;
