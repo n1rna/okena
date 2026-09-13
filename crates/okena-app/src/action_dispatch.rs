@@ -973,6 +973,51 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             question,
             suggestions,
         },
+        ActionRequest::AgentTestPlan {
+            project_id,
+            terminal_id,
+            steps,
+        } => ActionRequest::AgentTestPlan {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            steps,
+        },
+        ActionRequest::AgentTestStepStart {
+            project_id,
+            terminal_id,
+            step,
+        } => ActionRequest::AgentTestStepStart {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            step,
+        },
+        ActionRequest::AgentTestStepResult {
+            project_id,
+            terminal_id,
+            step,
+            outcome,
+            reason,
+            evidence,
+        } => ActionRequest::AgentTestStepResult {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            step,
+            outcome,
+            reason,
+            // Paths and URLs on the agent's host — not okena ids.
+            evidence,
+        },
+        ActionRequest::AgentTestRunFinish {
+            project_id,
+            terminal_id,
+            verdict,
+            summary,
+        } => ActionRequest::AgentTestRunFinish {
+            project_id: s(&project_id),
+            terminal_id: s(&terminal_id),
+            verdict,
+            summary,
+        },
         ActionRequest::AgentSendInstruction { project_id, text } => {
             ActionRequest::AgentSendInstruction {
                 project_id: s(&project_id),

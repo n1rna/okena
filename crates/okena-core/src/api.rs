@@ -2017,6 +2017,43 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         suggestions: Vec<crate::harness::AgentSuggestion>,
     },
+    /// Submit the plan for the verification run of the agent in `terminal_id`.
+    ///
+    /// Opens a run when the agent has none open, and replaces the plan of one
+    /// no step of which has started. Refused once a step has started, rather
+    /// than dropping the steps already done.
+    AgentTestPlan {
+        project_id: String,
+        terminal_id: String,
+        steps: Vec<VerificationStepPlan>,
+    },
+    /// Mark a step of the agent's open run as running. `step` counts from 1,
+    /// as the plan is numbered.
+    AgentTestStepStart {
+        project_id: String,
+        terminal_id: String,
+        step: usize,
+    },
+    /// Record a step's outcome — passed, failed or skipped — with the agent's
+    /// reason and whatever evidence it attaches.
+    AgentTestStepResult {
+        project_id: String,
+        terminal_id: String,
+        step: usize,
+        outcome: VerificationStepState,
+        reason: String,
+        #[serde(default, skip_serializing_if = "VerificationEvidence::is_empty")]
+        evidence: VerificationEvidence,
+    },
+    /// Close the agent's open run with an overall verdict. Steps it never
+    /// reached are marked skipped.
+    AgentTestRunFinish {
+        project_id: String,
+        terminal_id: String,
+        verdict: VerificationVerdict,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
     /// Type an instruction into a session's agent and submit it.
     ///
     /// A dedicated action rather than `SendText`: the daemon knows which of a

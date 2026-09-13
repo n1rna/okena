@@ -1405,7 +1405,7 @@ pub(super) mod agent_shell_tests {
 // ─── Agent reporting ─────────────────────────────────────────────────────────
 
 /// Current wall-clock in Unix millis, or 0 if the clock is before the epoch.
-fn now_millis() -> u64 {
+pub(super) fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
