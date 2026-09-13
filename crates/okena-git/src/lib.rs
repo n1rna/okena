@@ -53,7 +53,9 @@ use std::path::{Path, PathBuf};
 // PR/CI types live in `okena-core` so they can ride the remote wire protocol
 // (`ApiGitStatus`). Re-exported here so existing `okena_git::{PrInfo, ..}`
 // paths keep working and `GitStatus` below can embed them.
-pub use okena_core::api::{CiCheck, CiCheckSummary, CiStatus, PrInfo, PrState};
+pub use okena_core::api::{
+    CiCheck, CiCheckSummary, CiStatus, MergeState, PrInfo, PrReadiness, PrState, ReviewDecision,
+};
 
 /// Git status information for display in project header
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

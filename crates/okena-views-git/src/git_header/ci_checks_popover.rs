@@ -2,6 +2,9 @@
 //! When a PR exists, the header doubles as a link to the PR on GitHub.
 //! When there's no PR (e.g. on the default branch), the popover still shows
 //! the branch-level check-runs / statuses fetched for the HEAD commit.
+//!
+//! The header and list are free functions so the PR rows of an agent session's
+//! PRODUCED list show the same checks the same way, inside their own popover.
 
 use super::GitHeader;
 use crate::project_header::{CiStatusColor, PrStateColor};
@@ -71,158 +74,11 @@ impl GitHeader {
             bounds.origin.y + bounds.size.height + px(6.0),
         );
 
-        let pr_number = pr_info.map(|p| p.number);
-        let pr_url = pr_info.map(|p| p.url.clone());
-        let pr_state_label = pr_info.map(|p| p.state.label());
-        let pr_state_color = pr_info.map(|p| p.state.color(t));
-        let summary_tooltip = summary.tooltip_text();
-        let summary_status_color = summary.status.color(t);
-        let summary_status_icon = summary.status.icon();
-        let checks: Vec<git::CiCheck> = summary.checks.clone();
-
-        let row = |check: git::CiCheck, key: String, cx: &mut Context<Self>| -> AnyElement {
-            let link = check.link.clone();
-            let elapsed = check.elapsed_label();
-            let workflow = check.workflow.clone();
-            let description = check.description.clone();
-            let icon_path = if check.is_skipped {
-                "icons/eye-off.svg"
-            } else {
-                check.status.icon()
-            };
-            let icon_color = if check.is_skipped {
-                t.text_muted
-            } else {
-                check.status.color(t)
-            };
-            let is_clickable = link.is_some();
-            let mut el = h_flex()
-                .id(ElementId::Name(key.into()))
-                .px(px(10.0))
-                .py(px(4.0))
-                .gap(px(8.0))
-                .items_center()
-                .text_size(ui_text_ms(cx))
-                .when(is_clickable, |d: Stateful<Div>| {
-                    d.cursor_pointer().hover(|s| s.bg(rgb(t.bg_hover)))
-                })
-                .child(
-                    svg()
-                        .path(icon_path)
-                        .size(px(10.0))
-                        .text_color(rgb(icon_color)),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap(px(1.0))
-                        .child(
-                            div()
-                                .text_color(rgb(t.text_primary))
-                                .text_ellipsis()
-                                .overflow_hidden()
-                                .child(check.name.clone()),
-                        )
-                        .when_some(workflow, |d, wf| {
-                            d.child(
-                                div()
-                                    .text_size(ui_text_sm(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .text_ellipsis()
-                                    .overflow_hidden()
-                                    .child(wf),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_muted))
-                        .flex_shrink_0()
-                        .child(elapsed),
-                )
-                .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                    cx.stop_propagation();
-                });
-            if let Some(desc) = description {
-                el = el.tooltip(move |_window, cx| Tooltip::new(desc.clone()).build(_window, cx));
-            }
-            if let Some(url) = link {
-                el = el.on_click(move |_, _window, _cx| {
-                    open_url(&url);
-                });
-            }
-            el.into_any_element()
-        };
-
-        // Header: either a PR badge linking to the PR, or a branch-only
-        // "Checks" label when no PR exists.
-        let summary_tooltip_for_header = summary_tooltip.clone();
-        let header = if let (Some(num), Some(label), Some(color)) =
-            (pr_number, pr_state_label, pr_state_color)
-        {
-            h_flex()
-                .px(px(10.0))
-                .py(px(6.0))
-                .gap(px(6.0))
-                .items_center()
-                .border_b_1()
-                .border_color(rgb(t.border))
-                .child(
-                    svg()
-                        .path("icons/git-pull-request.svg")
-                        .size(px(11.0))
-                        .text_color(rgb(color)),
-                )
-                .child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_secondary))
-                        .child(format!("#{} \u{2014} {}", num, label)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_muted))
-                        .text_ellipsis()
-                        .overflow_hidden()
-                        .child(summary_tooltip_for_header),
-                )
-        } else {
-            h_flex()
-                .px(px(10.0))
-                .py(px(6.0))
-                .gap(px(6.0))
-                .items_center()
-                .border_b_1()
-                .border_color(rgb(t.border))
-                .child(
-                    svg()
-                        .path(summary_status_icon)
-                        .size(px(11.0))
-                        .text_color(rgb(summary_status_color)),
-                )
-                .child(
-                    div()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_secondary))
-                        .child("Checks"),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(ui_text_sm(cx))
-                        .text_color(rgb(t.text_muted))
-                        .text_ellipsis()
-                        .overflow_hidden()
-                        .child(summary_tooltip_for_header),
-                )
-        };
+        let header = render_ci_checks_header(summary, pr_info, t, cx);
+        let list = render_ci_checks_list(summary, t, cx);
 
         // Footer "Open on GitHub" — only when we have a PR URL to open.
-        let footer = pr_url.map(|url| {
+        let footer = pr_info.map(|p| p.url.clone()).map(|url| {
             h_flex()
                 .px(px(10.0))
                 .py(px(6.0))
@@ -272,34 +128,173 @@ impl GitHeader {
                         cx.stop_propagation();
                     })
                     .child(header)
-                    .child({
-                        let body = v_flex()
-                            .id("ci-checks-scroll")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .py(px(4.0));
-                        if checks.is_empty() {
-                            body.child(
-                                div()
-                                    .px(px(10.0))
-                                    .py(px(8.0))
-                                    .text_size(ui_text_sm(cx))
-                                    .text_color(rgb(t.text_muted))
-                                    .child("No checks reported"),
-                            )
-                        } else {
-                            body.children(
-                                checks
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(i, c)| row(c, format!("ci-check-{}", i), cx)),
-                            )
-                        }
-                    })
+                    .child(list)
                     .when_some(footer, |d, f| d.child(f)),
             ),
         )
         .into_any_element()
     }
+}
+
+/// The popover's header: a PR badge when there is a PR, otherwise a
+/// branch-only "Checks" label, followed by the rollup in words.
+pub fn render_ci_checks_header(
+    summary: &git::CiCheckSummary,
+    pr_info: Option<&git::PrInfo>,
+    t: &ThemeColors,
+    cx: &App,
+) -> Div {
+    let summary_tooltip = summary.tooltip_text();
+    let row = h_flex()
+        .px(px(10.0))
+        .py(px(6.0))
+        .gap(px(6.0))
+        .items_center()
+        .border_b_1()
+        .border_color(rgb(t.border));
+    let row = match pr_info {
+        Some(pr) => row
+            .child(
+                svg()
+                    .path("icons/git-pull-request.svg")
+                    .size(px(11.0))
+                    .text_color(rgb(pr.state.color(t))),
+            )
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(format!("#{} \u{2014} {}", pr.number, pr.state.label())),
+            ),
+        None => row
+            .child(
+                svg()
+                    .path(summary.status.icon())
+                    .size(px(11.0))
+                    .text_color(rgb(summary.status.color(t))),
+            )
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child("Checks"),
+            ),
+    };
+    row.child(
+        div()
+            .flex_1()
+            .text_size(ui_text_sm(cx))
+            .text_color(rgb(t.text_muted))
+            .text_ellipsis()
+            .overflow_hidden()
+            .child(summary_tooltip),
+    )
+}
+
+/// The scrolling list of checks, one row each, opening a check's run on click.
+pub fn render_ci_checks_list(
+    summary: &git::CiCheckSummary,
+    t: &ThemeColors,
+    cx: &App,
+) -> Stateful<Div> {
+    let body = v_flex()
+        .id("ci-checks-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .py(px(4.0));
+    if summary.checks.is_empty() {
+        return body.child(
+            div()
+                .px(px(10.0))
+                .py(px(8.0))
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .child("No checks reported"),
+        );
+    }
+    body.children(
+        summary
+            .checks
+            .iter()
+            .enumerate()
+            .map(|(i, check)| render_check_row(check, format!("ci-check-{}", i), t, cx)),
+    )
+}
+
+fn render_check_row(check: &git::CiCheck, key: String, t: &ThemeColors, cx: &App) -> AnyElement {
+    let link = check.link.clone();
+    let elapsed = check.elapsed_label();
+    let workflow = check.workflow.clone();
+    let description = check.description.clone();
+    let icon_path = if check.is_skipped {
+        "icons/eye-off.svg"
+    } else {
+        check.status.icon()
+    };
+    let icon_color = if check.is_skipped {
+        t.text_muted
+    } else {
+        check.status.color(t)
+    };
+    let is_clickable = link.is_some();
+    let hover_bg = t.bg_hover;
+    let mut el = h_flex()
+        .id(ElementId::Name(key.into()))
+        .px(px(10.0))
+        .py(px(4.0))
+        .gap(px(8.0))
+        .items_center()
+        .text_size(ui_text_ms(cx))
+        .when(is_clickable, |d: Stateful<Div>| {
+            d.cursor_pointer().hover(|s| s.bg(rgb(hover_bg)))
+        })
+        .child(
+            svg()
+                .path(icon_path)
+                .size(px(10.0))
+                .text_color(rgb(icon_color)),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .text_color(rgb(t.text_primary))
+                        .text_ellipsis()
+                        .overflow_hidden()
+                        .child(check.name.clone()),
+                )
+                .when_some(workflow, |d, wf| {
+                    d.child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_muted))
+                            .text_ellipsis()
+                            .overflow_hidden()
+                            .child(wf),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .text_size(ui_text_sm(cx))
+                .text_color(rgb(t.text_muted))
+                .flex_shrink_0()
+                .child(elapsed),
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation();
+        });
+    if let Some(desc) = description {
+        el = el.tooltip(move |_window, cx| Tooltip::new(desc.clone()).build(_window, cx));
+    }
+    if let Some(url) = link {
+        el = el.on_click(move |_, _window, _cx| {
+            open_url(&url);
+        });
+    }
+    el.into_any_element()
 }

@@ -17,6 +17,7 @@ use std::sync::atomic::AtomicU64;
 
 mod branch_picker;
 mod ci_checks_popover;
+pub use ci_checks_popover::{render_ci_checks_header, render_ci_checks_list};
 mod commit_log;
 mod diff_popover;
 mod status_pill;

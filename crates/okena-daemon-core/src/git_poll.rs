@@ -19,14 +19,21 @@
 //! commit hasn't moved since its last settled result, and parks itself when
 //! GitHub reports the API rate limit as exhausted.
 //!
-//! Two exceptions widen it, both PR-only and on the settled PR cadence: a
-//! worktree linked to an agent session's task has its PR polled while hidden,
+//! Two exceptions widen it, both feeding an agent session's PRODUCED list: a
+//! worktree linked to the session's task has its PR and checks polled while
+//! hidden, on the same per-project schedule (its PR slowly once merged or closed);
 //! and an open PR whose worktree was removed is handed to that session and
-//! polled by repo and number until it is merged or closed. Both feed the
-//! session's PRODUCED list.
+//! polled PR-only, by repo and number, on the settled PR cadence until it is
+//! merged or closed.
+//!
+//! A PR's mergeability and review threads ride on the PR request itself, which
+//! runs on the settled PR cadence whatever the commit, so they cost nothing
+//! extra and a conflict or a resolved thread shows within a cadence. The checks
+//! request keeps its head-commit skip unconditionally.
 //!
 //! What that costs: each linked worktree adds one PR request per PR cadence
-//! (~60s) until it is removed, whether or not its session is still running —
+//! (~60s), plus its checks on their own cadence — none while its pushed commit
+//! holds — until it is removed, whether or not its session is still running —
 //! the poller cannot see that — dropping to one every ~10 minutes once its PR
 //! is merged or closed, in case another PR replaces it. Each open tracked PR
 //! adds one request per cadence until it closes, or until GitHub has said
@@ -373,11 +380,12 @@ fn update_head_snapshots<T: PartialEq>(
 /// someone explicitly forced — a branch switch — jumps straight out rather than
 /// waiting for that pass plus the next cadence tick.
 ///
-/// A worktree linked to an agent session (`linked_ids`) earns a PR slot even
-/// while hidden, so the session's PRODUCED list sees its PR. Once that PR is
-/// merged or closed it is only watched in case another replaces it, so the
-/// slot comes round every `FINISHED_LINKED_PR_EVERY_N_CYCLES`. Only the PR:
-/// its checks are nobody's to show until the worktree is on screen.
+/// A worktree linked to an agent session (`linked_ids`) earns a slot even
+/// while hidden, so the session's PRODUCED list sees its PR and checks. Its
+/// checks stay on their own schedule, skipped while the pushed commit holds.
+/// Once its PR is merged or closed the PR is only watched in case another
+/// replaces it, so that slot comes round every
+/// `FINISHED_LINKED_PR_EVERY_N_CYCLES`.
 ///
 /// A PR-only force (`force_pr`) asks for the PR on the next pass without
 /// making a hidden project count as shown, so it never costs a CI request.
@@ -406,7 +414,7 @@ fn select_github_polls(
             } else {
                 schedule.pr_due(id, cycle, cadence_due)
             };
-            let want_ci = shown && schedule.ci_due(id, cycle, cadence_due);
+            let want_ci = schedule.ci_due(id, cycle, cadence_due);
             (want_pr || want_ci).then(|| ProjectPoll {
                 id: id.clone(),
                 path: path.clone(),
@@ -694,6 +702,7 @@ fn apply_github_result(
     for (id, pr_info) in fetched_pr_infos {
         if is_current(&id) {
             schedule.record_pr(&id, cycle);
+            // Readiness comes with the PR: each fetch replaces it whole.
             pr_infos.insert(id, pr_info);
         }
     }
@@ -876,7 +885,10 @@ fn record_removed_pr(
     let agent = session.agent.get_or_insert_with(Default::default);
     let before = agent.tracked_prs.clone();
     match agent.tracked_prs.iter_mut().find(|t| t.url == pr.url) {
-        Some(existing) => existing.state = pr.state,
+        Some(existing) => {
+            existing.state = pr.state;
+            existing.readiness = pr.readiness;
+        }
         None => agent.tracked_prs.push(TrackedPullRequest {
             project: link.project.clone(),
             repo_path: link.repo_path.clone(),
@@ -884,6 +896,7 @@ fn record_removed_pr(
             number: pr.number,
             url: pr.url,
             state: pr.state,
+            readiness: pr.readiness,
         }),
     }
     prune_tombstones(agent);
@@ -942,6 +955,7 @@ fn apply_tracked_pr(
         let before = agent.tracked_prs.clone();
         for t in agent.tracked_prs.iter_mut().filter(|t| t.url == url) {
             t.state = pr.state.clone();
+            t.readiness = pr.readiness.clone();
         }
         prune_tombstones(agent);
         changed |= agent.tracked_prs != before;
@@ -2686,6 +2700,7 @@ mod tests {
             state,
             number,
             base: None,
+            readiness: None,
         }
     }
 
@@ -2707,6 +2722,7 @@ mod tests {
                 number,
                 url: pr(number, state.clone()).url,
                 state,
+                readiness: None,
             });
     }
 
@@ -2733,7 +2749,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_linked_worktree_polls_its_pr_but_not_its_checks() {
+    fn a_hidden_linked_worktree_polls_its_pr_and_checks() {
         let polls = select_github_polls(
             &projects(),
             &HashSet::new(),
@@ -2747,7 +2763,105 @@ mod tests {
         );
         assert_eq!(polls.len(), 1);
         assert_eq!(polls[0].id, "hidden");
-        assert!(polls[0].want_pr && !polls[0].want_ci);
+        assert!(polls[0].want_pr && polls[0].want_ci);
+    }
+
+    fn open_pr() -> git::PrInfo {
+        git::PrInfo {
+            url: "https://github.com/o/r/pull/7".into(),
+            state: git::PrState::Open,
+            number: 7,
+            base: None,
+            readiness: None,
+        }
+    }
+
+    /// An open PR with a conflict and `unresolved_threads` open threads.
+    fn with_threads(unresolved_threads: usize) -> git::PrInfo {
+        git::PrInfo {
+            readiness: Some(git::PrReadiness {
+                merge_state: git::MergeState::Conflicting,
+                review_decision: None,
+                unresolved_threads,
+                threads_truncated: false,
+            }),
+            ..open_pr()
+        }
+    }
+
+    fn readiness_of(harness: &ApplyHarness) -> Option<git::PrReadiness> {
+        harness
+            .pr_infos
+            .get("p1")
+            .cloned()
+            .flatten()
+            .and_then(|pr| pr.readiness)
+    }
+
+    #[test]
+    fn readiness_comes_with_the_pr_and_the_next_fetch_replaces_it() {
+        // Two unresolved threads, then one is resolved: the next PR fetch
+        // shows 1, with the checks skipped both times.
+        let mut harness = ApplyHarness::new();
+        let generations = HashMap::from([("p1".to_string(), 0)]);
+
+        let mut result = github_result(0, "main", CiFetch::Unchanged);
+        result.pr_infos = HashMap::from([("p1".to_string(), Some(with_threads(2)))]);
+        harness.apply(result, 5, &generations);
+        assert_eq!(
+            readiness_of(&harness).map(|r| r.unresolved_threads),
+            Some(2)
+        );
+        assert!(
+            harness.last["p1"]
+                .pr_info
+                .as_ref()
+                .is_some_and(|pr| pr.readiness.is_some()),
+            "and it is published"
+        );
+
+        let mut refresh = github_result(0, "main", CiFetch::Unchanged);
+        refresh.pr_infos = HashMap::from([("p1".to_string(), Some(with_threads(1)))]);
+        harness.apply(refresh, 17, &generations);
+        assert_eq!(
+            readiness_of(&harness).map(|r| r.unresolved_threads),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn the_checks_skip_is_armed_whatever_the_pr_says() {
+        // A conflict or open threads cost no checks requests while the pushed
+        // commit holds: readiness comes from the PR request instead.
+        let mut harness = ApplyHarness::new();
+        let generations = HashMap::from([("p1".to_string(), 0)]);
+        let mut result = github_result(0, "main", fetched("abc"));
+        result.pr_infos = HashMap::from([("p1".to_string(), Some(with_threads(2)))]);
+        harness.apply(result, 5, &generations);
+
+        assert_eq!(
+            harness.schedule.ci_skip_sha("p1", 6).as_deref(),
+            Some("abc")
+        );
+    }
+
+    #[test]
+    fn a_failed_checks_fetch_does_not_arm_the_skip() {
+        let mut harness = ApplyHarness::new();
+        let generations = HashMap::from([("p1".to_string(), 0)]);
+        harness.apply(
+            github_result(
+                0,
+                "main",
+                CiFetch::Fetched {
+                    sha: None,
+                    summary: None,
+                },
+            ),
+            5,
+            &generations,
+        );
+        assert_eq!(harness.schedule.ci_skip_sha("p1", 6), None);
     }
 
     #[test]
@@ -3034,12 +3148,13 @@ mod tests {
         };
 
         assert!(
-            select(&HashSet::new(), 13).is_empty(),
+            select(&HashSet::new(), 13).iter().all(|poll| !poll.want_pr),
             "not on the normal cadence"
         );
         let polls = select(&HashSet::new(), 1 + FINISHED_LINKED_PR_EVERY_N_CYCLES);
         assert_eq!(polls.len(), 1);
-        assert!(polls[0].want_pr && !polls[0].want_ci);
+        // Its checks follow their own schedule, skipped while the commit holds.
+        assert!(polls[0].want_pr);
         assert_eq!(
             select(&ids(&["hidden"]), 13).len(),
             1,

@@ -2,17 +2,24 @@
 //!
 //! Shared by the session's own panel and the task detail, which list the same
 //! rows and had drifted into two copies of the same markup.
+//!
+//! A PR row says whether it can merge: conflicts, the CI rollup, the review
+//! decision and unresolved threads, each a compact chip. The CI chip opens the
+//! same checks list the project header's CI popover shows.
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui_component::{h_flex, v_flex};
+use gpui_component::popover::Popover;
+use gpui_component::{Selectable, h_flex, v_flex};
+use okena_core::api::{MergeState, PrInfo, PrReadiness, PrState, ReviewDecision};
 use okena_core::session_assets::{DetectedState, SessionAsset};
+use okena_views_git::git_header::{render_ci_checks_header, render_ci_checks_list};
 
-use super::worktree_card::{PushState, chip, pr_chip_style};
-use crate::theme::theme;
+use super::worktree_card::{PushState, chip, ci_chip_style, pr_chip_style};
+use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::ui_text_ms;
 
-/// Render one produced asset on `bg`. A row with a link opens it.
+/// Render one produced asset on `bg`. The title opens the row's link.
 pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
     let t = theme(cx);
 
@@ -40,9 +47,66 @@ pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
         }
         Some(DetectedState::PullRequest { number, state }) => {
             let (color, label) = pr_chip_style(*number, state, &t);
-            chips.push(chip(label, color, cx));
+            let pr_chip = chip(label, color, cx);
+            // The PR chip opens the PR, like the title does.
+            chips.push(match asset.url.clone() {
+                Some(url) => div()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| cx.open_url(&url))
+                    .child(pr_chip)
+                    .into_any_element(),
+                None => pr_chip,
+            });
         }
         None => {}
+    }
+    if let Some(pr) = asset.pr.as_ref() {
+        for (label, tone) in pr_indicators(pr) {
+            let color = match tone {
+                Tone::Bad => t.error,
+                Tone::Warn => t.warning,
+                Tone::Good => t.success,
+                Tone::Muted => t.text_muted,
+            };
+            chips.push(chip(label, color, cx));
+        }
+    }
+    if let Some(summary) = asset.ci.clone() {
+        let (color, label) = ci_chip_style(
+            &summary.status,
+            summary.passed,
+            summary.failed,
+            summary.pending,
+            &t,
+        );
+        let pr = asset.pr.clone();
+        let key = asset
+            .url
+            .clone()
+            .or_else(|| {
+                asset
+                    .branch
+                    .as_ref()
+                    .map(|b| format!("{}:{b}", asset.project.as_deref().unwrap_or_default()))
+            })
+            .unwrap_or_else(|| asset.title.clone());
+        chips.push(
+            Popover::new(SharedString::from(format!("asset-ci-{key}")))
+                .trigger(CiTrigger {
+                    label,
+                    color,
+                    selected: false,
+                })
+                .content(move |_, _window, cx| {
+                    let t = theme(cx);
+                    v_flex()
+                        .w(px(360.0))
+                        .max_h(px(420.0))
+                        .child(render_ci_checks_header(&summary, pr.as_ref(), &t, cx))
+                        .child(render_ci_checks_list(&summary, &t, cx))
+                })
+                .into_any_element(),
+        );
     }
     if let Some(changes) = asset.uncommitted {
         chips.push(chip(
@@ -52,16 +116,12 @@ pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
         ));
     }
 
-    v_flex()
+    // Only the words open the link: the chips below hold a popover of their
+    // own, and a click on the CI chip must not also leave for GitHub.
+    let heading = v_flex()
         .w_full()
         .min_w_0()
         .gap(px(2.0))
-        .px(px(8.0))
-        .py(px(5.0))
-        .rounded(px(4.0))
-        .bg(rgb(bg))
-        .border_1()
-        .border_color(rgb(t.border))
         .child(
             div()
                 .w_full()
@@ -80,14 +140,116 @@ pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
                 .text_color(rgb(t.text_muted))
                 .child(subtitle(asset)),
         )
+        .when_some(asset.url.clone(), |heading, url| {
+            heading
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |_, _window, cx| cx.open_url(&url))
+        });
+
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap(px(2.0))
+        .px(px(8.0))
+        .py(px(5.0))
+        .rounded(px(4.0))
+        .bg(rgb(bg))
+        .border_1()
+        .border_color(rgb(t.border))
+        .child(heading)
         .when(!chips.is_empty(), |row| {
             row.child(h_flex().gap(px(4.0)).flex_wrap().children(chips))
         })
-        .when_some(asset.url.clone(), |row, url| {
-            row.cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |_, _window, cx| cx.open_url(&url))
-        })
         .into_any_element()
+}
+
+/// The CI chip, as a popover trigger: a chip that stays lit while its checks
+/// are open.
+#[derive(IntoElement)]
+struct CiTrigger {
+    label: String,
+    color: u32,
+    selected: bool,
+}
+
+impl Selectable for CiTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for CiTrigger {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        div()
+            .flex_shrink_0()
+            .cursor_pointer()
+            .px(px(5.0))
+            .py(px(1.0))
+            .rounded(px(3.0))
+            .bg(with_alpha(
+                self.color,
+                if self.selected { 0.3 } else { 0.15 },
+            ))
+            .text_size(ui_text_ms(cx))
+            .text_color(rgb(self.color))
+            .child(self.label)
+    }
+}
+
+/// How much a readiness indicator asks of you.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    Bad,
+    Warn,
+    Good,
+    Muted,
+}
+
+/// The readiness indicators a PR row shows: only while the PR is open or a
+/// draft. A merged or closed PR has nothing left in its way, and a stale
+/// "conflicts" beside "merged" would say otherwise.
+fn pr_indicators(pr: &PrInfo) -> Vec<(String, Tone)> {
+    match (&pr.state, &pr.readiness) {
+        (PrState::Open | PrState::Draft, Some(readiness)) => readiness_indicators(readiness),
+        _ => Vec::new(),
+    }
+}
+
+/// What stands between a PR and merging it, one compact label each, in the
+/// order it is shown. A clean merge says nothing, since it is not in the way.
+/// Mergeability GitHub has not worked out yet says so, rather than passing
+/// for clean.
+fn readiness_indicators(readiness: &PrReadiness) -> Vec<(String, Tone)> {
+    let mut out = Vec::new();
+    match readiness.merge_state {
+        MergeState::Conflicting => out.push(("conflicts".to_string(), Tone::Bad)),
+        MergeState::Behind => out.push(("behind base".to_string(), Tone::Warn)),
+        MergeState::Unknown => out.push(("mergeable unknown".to_string(), Tone::Muted)),
+        MergeState::Clean => {}
+    }
+    match readiness.review_decision {
+        Some(ReviewDecision::ChangesRequested) => {
+            out.push(("changes requested".to_string(), Tone::Warn))
+        }
+        Some(ReviewDecision::Approved) => out.push(("approved".to_string(), Tone::Good)),
+        Some(ReviewDecision::ReviewRequired) => {
+            out.push(("review required".to_string(), Tone::Muted))
+        }
+        Some(ReviewDecision::Other) | None => {}
+    }
+    if readiness.unresolved_threads > 0 {
+        let more = if readiness.threads_truncated { "+" } else { "" };
+        out.push((
+            format!("{}{more} unresolved", readiness.unresolved_threads),
+            Tone::Warn,
+        ));
+    }
+    out
 }
 
 /// Kind, repo and — when the title does not already say it — branch. The link
@@ -130,7 +292,8 @@ fn ahead_behind(ahead: Option<usize>, behind: Option<usize>) -> Option<String> {
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{ahead_behind, subtitle};
+    use super::{Tone, ahead_behind, pr_indicators, readiness_indicators, subtitle};
+    use okena_core::api::{MergeState, PrInfo, PrReadiness, PrState, ReviewDecision};
     use okena_core::harness::AgentAssetKind;
     use okena_core::session_assets::SessionAsset;
 
@@ -143,9 +306,120 @@ mod tests {
             branch: branch.map(Into::into),
             state: None,
             uncommitted: None,
+            pr: None,
+            ci: None,
             task: None,
             registered: true,
         }
+    }
+
+    fn readiness(
+        merge_state: MergeState,
+        review_decision: Option<ReviewDecision>,
+        unresolved_threads: usize,
+    ) -> PrReadiness {
+        PrReadiness {
+            merge_state,
+            review_decision,
+            unresolved_threads,
+            threads_truncated: false,
+        }
+    }
+
+    fn pr(state: PrState, readiness: PrReadiness) -> PrInfo {
+        PrInfo {
+            url: "https://github.com/o/r/pull/1".into(),
+            state,
+            number: 1,
+            base: None,
+            readiness: Some(readiness),
+        }
+    }
+
+    #[test]
+    fn a_merged_or_closed_pr_shows_no_readiness() {
+        let stale = readiness(MergeState::Conflicting, None, 2);
+        for state in [PrState::Merged, PrState::Closed] {
+            assert!(pr_indicators(&pr(state, stale.clone())).is_empty());
+        }
+        assert_eq!(
+            pr_indicators(&pr(PrState::Draft, stale)).len(),
+            2,
+            "a draft is still in progress"
+        );
+    }
+
+    #[test]
+    fn a_count_beyond_one_page_is_shown_as_a_floor() {
+        let mut many = readiness(MergeState::Clean, None, 100);
+        many.threads_truncated = true;
+        assert_eq!(labels(&many), ["100+ unresolved"]);
+    }
+
+    #[test]
+    fn a_review_decision_this_build_does_not_know_shows_nothing() {
+        assert!(
+            labels(&readiness(
+                MergeState::Clean,
+                Some(ReviewDecision::Other),
+                0
+            ))
+            .is_empty()
+        );
+    }
+
+    fn labels(r: &PrReadiness) -> Vec<String> {
+        readiness_indicators(r)
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect()
+    }
+
+    #[test]
+    fn a_conflicting_pr_says_so_first() {
+        let indicators = readiness_indicators(&readiness(MergeState::Conflicting, None, 0));
+        assert_eq!(indicators, [("conflicts".to_string(), Tone::Bad)]);
+    }
+
+    #[test]
+    fn mergeability_still_being_computed_is_not_shown_as_clean() {
+        assert_eq!(
+            labels(&readiness(MergeState::Unknown, None, 0)),
+            ["mergeable unknown"]
+        );
+        assert!(labels(&readiness(MergeState::Clean, None, 0)).is_empty());
+    }
+
+    #[test]
+    fn unresolved_threads_are_a_count() {
+        assert_eq!(
+            labels(&readiness(MergeState::Clean, None, 2)),
+            ["2 unresolved"]
+        );
+        assert_eq!(
+            labels(&readiness(MergeState::Clean, None, 1)),
+            ["1 unresolved"]
+        );
+    }
+
+    #[test]
+    fn every_obstacle_shows_in_order() {
+        assert_eq!(
+            labels(&readiness(
+                MergeState::Behind,
+                Some(ReviewDecision::ChangesRequested),
+                3
+            )),
+            ["behind base", "changes requested", "3 unresolved"]
+        );
+        assert_eq!(
+            readiness_indicators(&readiness(
+                MergeState::Clean,
+                Some(ReviewDecision::Approved),
+                0
+            )),
+            [("approved".to_string(), Tone::Good)]
+        );
     }
 
     #[test]
