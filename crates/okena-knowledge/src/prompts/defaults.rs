@@ -15,6 +15,7 @@ pub const fn file(flow: Flow) -> &'static str {
         Flow::TaskStart => include_str!("templates/task-start.md"),
         Flow::TaskBreakDown => include_str!("templates/break-down.md"),
         Flow::TaskCoordinate => include_str!("templates/task-coordinate.md"),
+        Flow::TasksCoordinate => include_str!("templates/tasks-coordinate.md"),
         Flow::TaskCreate => include_str!("templates/task-create.md"),
         Flow::SpecDraft => include_str!("templates/spec-draft.md"),
         Flow::KnowledgeDraft => include_str!("templates/knowledge-draft.md"),
@@ -78,6 +79,14 @@ pub const PARTIALS: &[(&str, &str)] = &[
     (
         "group-note",
         include_str!("templates/partials/group-note.md"),
+    ),
+    (
+        "picked-fan-out-note",
+        include_str!("templates/partials/picked-fan-out-note.md"),
+    ),
+    (
+        "picked-group-note",
+        include_str!("templates/partials/picked-group-note.md"),
     ),
     (
         "coordinate-child",

@@ -133,9 +133,8 @@ pub(super) fn task_ids<'a>(
     worktrees: impl Iterator<Item = &'a ProjectData>,
 ) -> HashSet<String> {
     project
-        .task_ref
-        .iter()
-        .chain(worktrees.filter_map(|w| w.task_ref.as_ref()))
+        .linked_tasks()
+        .chain(worktrees.flat_map(|w| w.linked_tasks()))
         .map(|t| t.id.external_id.clone())
         .collect()
 }
@@ -154,9 +153,8 @@ pub(super) fn sessions_working(
         .iter()
         .filter(|p| p.worktree_info.is_none() && p.is_any_agent_session())
         .filter(|p| {
-            p.task_ref
-                .as_ref()
-                .is_some_and(|t| task_ids.contains(&t.id.external_id))
+            p.linked_tasks()
+                .any(|t| task_ids.contains(&t.id.external_id))
         })
         .map(|p| p.id.clone())
         .collect()
@@ -296,5 +294,20 @@ mod tests {
         // Nothing but the task links a session to a project — a loose match
         // would list one agent under every repo.
         assert!(sessions_working(&[task_session("s1", "u1")], &ids(&[])).is_empty());
+    }
+
+    #[test]
+    fn a_session_on_several_tasks_is_listed_for_each_of_them() {
+        let mut session = task_session("s1", "u1");
+        session.also_tasks = vec![serde_json::from_value(task("u2")).unwrap()];
+        assert_eq!(sessions_working(&[session], &ids(&["u2"])), ["s1"]);
+    }
+
+    #[test]
+    fn a_repo_has_every_task_its_worktrees_cover() {
+        let repo = project(serde_json::json!({ "id": "repo", "name": "okena", "path": "/p" }));
+        let mut wt = worktree("wt1", "u1");
+        wt.also_tasks = vec![serde_json::from_value(task("u2")).unwrap()];
+        assert_eq!(task_ids(&repo, [wt].iter()), ids(&["u1", "u2"]));
     }
 }

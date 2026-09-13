@@ -995,6 +995,7 @@ pub fn execute_action(
             coordinate,
             also,
             siblings,
+            hand_picked,
         } => tasks::start_work(
             ws,
             window_id,
@@ -1008,6 +1009,7 @@ pub fn execute_action(
             coordinate,
             also,
             siblings,
+            hand_picked,
             backend,
             terminals,
             settings,
@@ -1744,6 +1746,7 @@ mod reconnect_shell_tests {
             worktree_info: None,
             worktree_ids: Vec::new(),
             task_ref: None,
+            also_tasks: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,

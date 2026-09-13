@@ -378,6 +378,41 @@ pub struct TaskRef {
     pub parent_key: Option<String>,
 }
 
+/// The branch a coordinating agent works from, given its task's own branch.
+///
+/// A coordinator changes nothing itself, so it must not hold a branch an agent
+/// it starts will need — its own task's included. Named after that task so the
+/// checkout still says what it is for. Empty when there is nothing to name it
+/// after, as the task's own branch would be.
+pub fn coordinator_branch(task_branch: &str) -> String {
+    let slug = task_branch.rsplit('/').next().unwrap_or_default().trim();
+    if slug.is_empty() {
+        String::new()
+    } else {
+        format!("coordinate/{slug}")
+    }
+}
+
+#[cfg(test)]
+mod coordinator_branch_tests {
+    use super::coordinator_branch;
+
+    #[test]
+    fn a_coordinator_branch_keeps_the_tasks_name_under_its_own_prefix() {
+        assert_eq!(
+            coordinator_branch("feat/qbl-384-start-together"),
+            "coordinate/qbl-384-start-together"
+        );
+        assert_eq!(coordinator_branch("qbl-1-thing"), "coordinate/qbl-1-thing");
+    }
+
+    #[test]
+    fn a_task_with_no_branch_gives_a_coordinator_none() {
+        assert_eq!(coordinator_branch(""), "");
+        assert_eq!(coordinator_branch("feat/"), "");
+    }
+}
+
 impl From<&Task> for TaskRef {
     fn from(t: &Task) -> Self {
         Self {

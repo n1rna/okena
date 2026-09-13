@@ -312,6 +312,7 @@ mod tests {
             worktree_info: None,
             worktree_ids: vec![],
             task_ref: None,
+            also_tasks: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,

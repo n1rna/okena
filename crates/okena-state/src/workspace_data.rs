@@ -32,6 +32,18 @@ impl ProjectData {
         self.task_ref.is_some() && self.worktree_info.is_none()
     }
 
+    /// Every task this project was started for: its own, then the others it
+    /// covers.
+    pub fn linked_tasks(&self) -> impl Iterator<Item = &okena_core::tasks::TaskRef> {
+        self.task_ref.iter().chain(self.also_tasks.iter())
+    }
+
+    /// Whether this project was started for the task with provider id
+    /// `external_id`, as its own task or one of the others it covers.
+    pub fn works_on(&self, external_id: &str) -> bool {
+        self.linked_tasks().any(|t| t.id.external_id == external_id)
+    }
+
     /// Whether this project is a spec-writing session.
     ///
     /// Stored rather than derived from the project's name: the name is a slug
@@ -351,6 +363,14 @@ pub struct ProjectData {
     /// connection — see [`okena_core::tasks::TaskRef`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_ref: Option<okena_core::tasks::TaskRef>,
+    /// Other tasks this project was started for, beside `task_ref`.
+    ///
+    /// One agent can be put on several tasks at once. `task_ref` stays the one
+    /// the branch and the session are named after — and the one a teardown or
+    /// a second run keys on — while these make the project count as work on
+    /// each of the others too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_tasks: Vec<okena_core::tasks::TaskRef>,
     /// Agent-reported state for this session: status and produced assets.
     ///
     /// Written by agents through okena's MCP server, never by the UI. Lives on
@@ -531,6 +551,7 @@ mod tests {
             worktree_info: None,
             worktree_ids: Vec::new(),
             task_ref: None,
+            also_tasks: Vec::new(),
             agent: None,
             spec_change: None,
             knowledge_root: None,
@@ -2182,6 +2203,37 @@ mod tests {
             "unlinked project should not carry a task_ref key"
         );
     }
+
+    #[test]
+    fn a_project_counts_as_work_on_every_task_it_was_started_for() {
+        use okena_core::tasks::{TaskId, TaskRef};
+
+        let task = |id: &str| TaskRef {
+            id: TaskId::new("linear", id),
+            display_key: id.to_uppercase(),
+            title: "t".into(),
+            url: String::new(),
+            parent_id: None,
+            parent_key: None,
+        };
+        let mut p = make_project("/tmp/p");
+        assert!(!p.works_on("u1"));
+        p.task_ref = Some(task("u1"));
+        p.also_tasks = vec![task("u2")];
+        assert!(p.works_on("u1"));
+        assert!(p.works_on("u2"));
+        assert!(!p.works_on("u3"));
+        // Its own task first: that is the one its branch is named after.
+        let keys: Vec<&str> = p.linked_tasks().map(|t| t.display_key.as_str()).collect();
+        assert_eq!(keys, ["U1", "U2"]);
+    }
+
+    #[test]
+    fn a_project_covering_no_other_tasks_writes_no_list_of_them() {
+        let p = make_project("/tmp/p");
+        let json = serde_json::to_value(&p).expect("serialize");
+        assert!(json.get("also_tasks").is_none(), "{json}");
+    }
 }
 
 #[cfg(test)]
@@ -2199,6 +2251,7 @@ mod agent_session_tests {
             worktree_info: None,
             worktree_ids: Vec::new(),
             task_ref: None,
+            also_tasks: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,

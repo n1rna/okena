@@ -29,6 +29,7 @@ fn new_project_row(
         worktree_info: None,
         worktree_ids: Vec::new(),
         task_ref: None,
+        also_tasks: Vec::new(),
         spec_change: None,
         knowledge_root: None,
         project_scan: None,
@@ -1405,6 +1406,7 @@ mod worktree_rename_tests {
     fn project(id: &str, path: &Path) -> okena_state::ProjectData {
         okena_state::ProjectData {
             task_ref: None,
+            also_tasks: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,
@@ -1547,6 +1549,7 @@ mod tests {
             worktree_info: None,
             worktree_ids: Vec::new(),
             task_ref: None,
+            also_tasks: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,
@@ -1885,6 +1888,7 @@ mod gpui_tests {
             worktree_info: None,
             worktree_ids: Vec::new(),
             task_ref: None,
+            also_tasks: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,

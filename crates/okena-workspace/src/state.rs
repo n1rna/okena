@@ -2887,6 +2887,7 @@ mod workspace_tests {
             worktree_info: None,
             worktree_ids: Vec::new(),
             task_ref: None,
+            also_tasks: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,
@@ -3941,6 +3942,7 @@ mod gpui_tests {
             worktree_info: None,
             worktree_ids: Vec::new(),
             task_ref: None,
+            also_tasks: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,
@@ -4120,6 +4122,7 @@ mod gpui_tests {
                 state_version: 1,
                 projects: vec![ApiProject {
                     task_ref: None,
+                    also_tasks: Vec::new(),
                     agent: None,
                     spec_change: None,
                     knowledge_root: None,
