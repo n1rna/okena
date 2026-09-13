@@ -227,7 +227,7 @@ mod tests {
         // The instruction lives once, in a partial; this pins that no flow
         // quietly stops including it.
         let reporting = super::defaults::partial_body("reporting").expect("reporting partial");
-        for flow in Flow::all() {
+        for flow in Flow::all().iter().filter(|f| f.sent_within().is_none()) {
             let filled: Vars = flow
                 .variables()
                 .iter()
@@ -238,6 +238,20 @@ mod tests {
                 text.contains(&reporting),
                 "{flow} does not tell the agent to report"
             );
+        }
+    }
+
+    #[test]
+    fn a_flow_sent_within_another_leaves_reporting_to_its_host() {
+        // Its host tells the agent once; the embedded brief must not repeat it.
+        let reporting = super::defaults::partial_body("reporting").expect("reporting partial");
+        for flow in Flow::all() {
+            let Some(host) = flow.sent_within() else {
+                continue;
+            };
+            assert!(!builtin(*flow).contains("{>reporting}"), "{flow}");
+            assert!(builtin(host).contains("{>reporting}"), "{host}");
+            assert!(!builtin(*flow).contains(&reporting), "{flow}");
         }
     }
 

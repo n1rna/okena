@@ -16,6 +16,11 @@ use std::fmt;
 pub enum Flow {
     /// Starting work on a task, with worktrees.
     TaskStart,
+    /// How an agent working on a task plans its steps and proves each one
+    /// through okena's verification tools. Never sent alone: it is rendered
+    /// into [`Flow::TaskStart`]'s `verify`, and is a flow of its own so a team
+    /// can rewrite how its agents verify without touching how they start.
+    TaskVerify,
     /// Breaking a task into sub-tasks. Reads and writes through okena's MCP
     /// tools rather than doing the work.
     TaskBreakDown,
@@ -57,6 +62,7 @@ impl Flow {
     pub const fn id(self) -> &'static str {
         match self {
             Flow::TaskStart => "task-start",
+            Flow::TaskVerify => "task-verify",
             Flow::TaskBreakDown => "break-down",
             Flow::TaskCoordinate => "task-coordinate",
             Flow::TasksCoordinate => "tasks-coordinate",
@@ -75,6 +81,7 @@ impl Flow {
     pub const fn label(self) -> &'static str {
         match self {
             Flow::TaskStart => "Start work on a task",
+            Flow::TaskVerify => "Plan and verify a task",
             Flow::TaskBreakDown => "Break a task down",
             Flow::TaskCoordinate => "Split a task among agents",
             Flow::TasksCoordinate => "Split picked tasks among agents",
@@ -122,7 +129,11 @@ impl Flow {
                 // What a coordinating agent said this share of the work is.
                 // Empty for a session somebody started themselves.
                 "note",
+                // The rendered `task-verify` brief, resolved on its own so a
+                // store can override either without the other.
+                "verify",
             ],
+            Flow::TaskVerify => &["key", "title"],
             Flow::TaskCoordinate => &[
                 "key",
                 "title",
@@ -191,6 +202,7 @@ impl Flow {
     pub const fn all() -> &'static [Flow] {
         &[
             Flow::TaskStart,
+            Flow::TaskVerify,
             Flow::TaskBreakDown,
             Flow::TaskCoordinate,
             Flow::TasksCoordinate,
@@ -203,6 +215,16 @@ impl Flow {
             Flow::ProjectScan,
             Flow::ProjectsScan,
         ]
+    }
+
+    /// The flow whose brief this one is rendered into, when it is never sent
+    /// on its own. Such a flow leaves the reporting rule to its host, so the
+    /// agent is not told it twice.
+    pub const fn sent_within(self) -> Option<Flow> {
+        match self {
+            Flow::TaskVerify => Some(Flow::TaskStart),
+            _ => None,
+        }
     }
 
     /// Read a `for:` value back. Case- and separator-insensitive, because

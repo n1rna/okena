@@ -13,6 +13,7 @@ use std::path::Path;
 pub const fn file(flow: Flow) -> &'static str {
     match flow {
         Flow::TaskStart => include_str!("templates/task-start.md"),
+        Flow::TaskVerify => include_str!("templates/task-verify.md"),
         Flow::TaskBreakDown => include_str!("templates/break-down.md"),
         Flow::TaskCoordinate => include_str!("templates/task-coordinate.md"),
         Flow::TasksCoordinate => include_str!("templates/tasks-coordinate.md"),
@@ -465,6 +466,35 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join(&rel)).expect("read"),
             file(Flow::TaskStart)
+        );
+    }
+
+    #[test]
+    fn a_flow_added_later_appears_without_touching_the_rest() {
+        // What an upgrade that adds a flow looks like: a defaults folder from
+        // before `task-verify` existed, with one of its files edited since.
+        let dir = tempfile::tempdir().expect("tempdir");
+        materialize(dir.path()).expect("write");
+        let added = Flow::TaskVerify.template_path();
+        std::fs::remove_file(dir.path().join(&added)).expect("predate the flow");
+        let record_path = dir.path().join(super::RECORD_PATH);
+        let record = std::fs::read_to_string(&record_path).expect("record");
+        let older: String = record
+            .lines()
+            .filter(|line| !line.ends_with(&format!(" {added}")))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(&record_path, older).expect("record without it");
+        let edited = dir.path().join(Flow::SpecDraft.template_path());
+        std::fs::write(&edited, "our own words").expect("edit");
+
+        let report = materialize(dir.path()).expect("upgrade");
+        assert_eq!(report.written, std::slice::from_ref(&added));
+        assert!(report.updated.is_empty(), "{report:?}");
+        assert_eq!(report.customized, [Flow::SpecDraft.template_path()]);
+        assert_eq!(
+            std::fs::read_to_string(&edited).expect("read"),
+            "our own words"
         );
     }
 
