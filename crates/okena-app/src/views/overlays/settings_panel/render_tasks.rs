@@ -11,7 +11,7 @@ use crate::settings::{SettingsState, settings_entity};
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
 use crate::views::components::SimpleInput;
-use crate::views::harness::{AZURE_DEVOPS, provider_hint};
+use crate::views::harness::{AZURE_DEVOPS, notify_task_auth_changed, provider_hint};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -97,6 +97,9 @@ impl SettingsPanel {
                             this.tasks_api_key_input
                                 .update(cx, |i, cx| i.set_value("", cx));
                             this.refresh_task_providers(cx);
+                            // So an open Tasks view loads without being
+                            // reopened, even if Settings has closed by now.
+                            notify_task_auth_changed(cx);
                         }
                         Err(e) => this.tasks_error = Some(e),
                     }
@@ -121,8 +124,9 @@ impl SettingsPanel {
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     this.tasks_busy = false;
-                    if let Err(e) = result {
-                        this.tasks_error = Some(e);
+                    match result {
+                        Err(e) => this.tasks_error = Some(e),
+                        Ok(_) => notify_task_auth_changed(cx),
                     }
                     this.refresh_task_providers(cx);
                     cx.notify();
