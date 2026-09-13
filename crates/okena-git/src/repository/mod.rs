@@ -42,14 +42,14 @@ pub use branch::{
     resolve_review_base, stage_file, stash_changes, stash_pop, unstage_file,
 };
 pub use ci::{
-    CiFetch, PrFetch, fetch_ci_checks, fetch_pr_by_branch, fetch_pr_by_number, fetch_pr_info,
-    list_pull_requests,
+    CiFetch, PrFetch, fetch_ci_checks, fetch_pr_by_branch, fetch_pr_by_number,
+    fetch_pr_by_number_with_head, fetch_pr_info, list_pull_requests,
 };
 pub use clone::{
     CloneProgress, clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,
     parse_clone_progress, start_clone_repository, validate_clone_url,
 };
-pub use github::has_github_remote;
+pub use github::{github_repo_slug, has_github_remote};
 pub use paths::{
     compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path,
     project_path_in_worktree, resolve_git_root_and_subdir,

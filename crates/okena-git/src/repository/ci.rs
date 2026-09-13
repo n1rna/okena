@@ -136,6 +136,8 @@ struct PrNode {
     number: u32,
     base_ref_name: Option<String>,
     head_ref_oid: Option<String>,
+    /// Only asked for by number, where the branch is not already known.
+    head_ref_name: Option<String>,
 }
 
 /// Get PR info for the current branch (if any PR exists).
@@ -160,6 +162,8 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
     match client.graphql(PR_LOOKUP_QUERY, variables) {
         Err(ApiError::RateLimited) => PrFetch::RateLimited,
         Err(ApiError::Failed) => PrFetch::Failed,
+        // The repository is gone, or this token can no longer see it.
+        Err(ApiError::NotFound) => PrFetch::Fetched(None),
         Ok(data) => {
             let node = data
                 .pointer("/repository/pullRequests/nodes/0")
@@ -176,7 +180,7 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
 const PR_BY_NUMBER_QUERY: &str = r#"
 query PullRequestByNumber($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) { url state isDraft number baseRefName headRefOid }
+    pullRequest(number: $number) { url state isDraft number baseRefName headRefOid headRefName }
   }
 }"#;
 
@@ -187,27 +191,47 @@ query PullRequestByNumber($owner: String!, $repo: String!, $number: Int!) {
 /// [`fetch_pr_info`], a merged or closed PR is reported as such, since that is
 /// exactly what the caller is waiting to hear.
 pub fn fetch_pr_by_number(repo_path: &Path, number: u32) -> PrFetch {
+    fetch_pr_by_number_with_head(repo_path, number).0
+}
+
+/// [`fetch_pr_by_number`], plus the branch the PR was opened from.
+///
+/// For a PR an agent registered by its link: whether one of the session's
+/// live worktrees is on that branch decides whether its own detection already
+/// covers the PR.
+pub fn fetch_pr_by_number_with_head(repo_path: &Path, number: u32) -> (PrFetch, Option<String>) {
     // No request goes out, so nothing is learned — not even that it's gone.
     let Some((mut client, repo)) = github_client(repo_path) else {
-        return PrFetch::Failed;
+        return (PrFetch::Failed, None);
     };
     let variables = json!({ "owner": repo.owner, "repo": repo.name, "number": number });
     match client.graphql(PR_BY_NUMBER_QUERY, variables) {
-        Err(ApiError::RateLimited) => PrFetch::RateLimited,
-        Err(ApiError::Failed) => PrFetch::Failed,
-        Ok(data) => PrFetch::Fetched(
-            data.pointer("/repository/pullRequest")
+        Err(ApiError::RateLimited) => (PrFetch::RateLimited, None),
+        Err(ApiError::Failed) => (PrFetch::Failed, None),
+        // GitHub's answer for a deleted PR or repository, or one this token
+        // can no longer see: it is gone, as far as anyone here can tell.
+        Err(ApiError::NotFound) => (PrFetch::Fetched(None), None),
+        Ok(data) => {
+            let node = data
+                .pointer("/repository/pullRequest")
                 .cloned()
-                .and_then(|node| serde_json::from_value::<PrNode>(node).ok())
-                .and_then(pr_info_of),
-        ),
+                .and_then(|node| serde_json::from_value::<PrNode>(node).ok());
+            let head = node
+                .as_ref()
+                .and_then(|node| node.head_ref_name.clone())
+                .filter(|branch| !branch.is_empty());
+            (PrFetch::Fetched(node.and_then(pr_info_of)), head)
+        }
     }
 }
 
-/// Like [`PR_LOOKUP_QUERY`], but a few PRs, each with its head repository: a
-/// branch name alone does not say whose branch it is.
+/// Like [`PR_LOOKUP_QUERY`], but a few PRs, each with its head repository and
+/// its recent commits: a branch name alone does not say whose branch it is.
+/// `origin` is the checkout's push remote as GitHub names it today, which
+/// follows a rename or transfer the remote URL still predates.
 const PR_BRANCH_LOOKUP_QUERY: &str = r#"
-query PullRequestsByHead($owner: String!, $repo: String!, $headBranch: String!) {
+query PullRequestsByHead($owner: String!, $repo: String!, $headBranch: String!, $originOwner: String!, $originName: String!) {
+  origin: repository(owner: $originOwner, name: $originName) { owner { login } name }
   repository(owner: $owner, name: $repo) {
     pullRequests(
       states: [OPEN, CLOSED, MERGED],
@@ -219,6 +243,7 @@ query PullRequestsByHead($owner: String!, $repo: String!, $headBranch: String!) 
         url state isDraft number baseRefName headRefOid
         headRepositoryOwner { login }
         headRepository { name }
+        commits(last: 100) { nodes { commit { oid } } }
       }
     }
   }
@@ -232,6 +257,58 @@ struct BranchPrNode {
     pr: PrNode,
     head_repository_owner: Option<HeadOwner>,
     head_repository: Option<HeadRepository>,
+    commits: Option<PrCommits>,
+}
+
+/// A PR's most recent commits, newest last.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct PrCommits {
+    nodes: Vec<PrCommitNode>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct PrCommitNode {
+    commit: Option<CommitOid>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct CommitOid {
+    oid: String,
+}
+
+impl BranchPrNode {
+    /// Whether the PR holds any of `tips` — at its head, or among its recent
+    /// commits when GitHub has moved on since the local refs were fetched.
+    fn holds_any(&self, tips: &[String]) -> bool {
+        let head = self.pr.head_ref_oid.as_deref().map(str::trim);
+        let recent = self
+            .commits
+            .iter()
+            .flat_map(|commits| &commits.nodes)
+            .filter_map(|node| node.commit.as_ref())
+            .map(|commit| commit.oid.as_str());
+        head.into_iter()
+            .chain(recent)
+            .any(|oid| tips.iter().any(|tip| tip == oid))
+    }
+}
+
+/// `origin` as GitHub names it today, from [`PR_BRANCH_LOOKUP_QUERY`]'s
+/// `origin` field, or the remote URL's own reading when GitHub gave none.
+fn origin_as_github_sees_it(data: &Value, origin: GithubRepo) -> GithubRepo {
+    let owner = data.pointer("/origin/owner/login").and_then(Value::as_str);
+    let name = data.pointer("/origin/name").and_then(Value::as_str);
+    match (owner, name) {
+        (Some(owner), Some(name)) if !owner.is_empty() && !name.is_empty() => GithubRepo {
+            host: origin.host,
+            owner: owner.to_string(),
+            name: name.to_string(),
+        },
+        _ => origin,
+    }
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -251,9 +328,12 @@ struct HeadRepository {
 ///
 /// For a worktree removed before its PR was ever polled: the branch name is
 /// all that is left of it, and a name is not an identity. So the PR's head
-/// must live in `origin` — not a fork's branch that happens to share the name
-/// — and, while the branch still exists locally or on origin, point at its
-/// tip. The default branch is never looked up: every fork has one.
+/// must live in `origin` — as GitHub names it today, not a fork's branch that
+/// happens to share the name — and, while the branch still exists locally or
+/// on origin, hold its tip: at its head, or among its last 100 commits when
+/// GitHub is ahead of the local refs ("Update branch", an applied suggestion,
+/// a push from elsewhere). The default branch is never looked up: every fork
+/// has one.
 pub fn fetch_pr_by_branch(repo_path: &Path, branch: &str) -> PrFetch {
     let default_branch = super::branch::get_default_branch(repo_path);
     if !branch_lookup_allowed(branch, default_branch.as_deref()) {
@@ -261,18 +341,27 @@ pub fn fetch_pr_by_branch(repo_path: &Path, branch: &str) -> PrFetch {
     }
     // Without knowing where this checkout pushes, its PR cannot be told apart
     // from anyone else's on the same name.
-    let Some(head) = origin_repo(repo_path) else {
+    let Some(origin) = origin_repo(repo_path) else {
         return PrFetch::Fetched(None);
     };
     let Some((mut client, repo)) = github_client(repo_path) else {
         return PrFetch::Failed;
     };
     let tips = branch_tips(repo_path, branch);
-    let variables = json!({ "owner": repo.owner, "repo": repo.name, "headBranch": branch });
+    let variables = json!({
+        "owner": repo.owner,
+        "repo": repo.name,
+        "headBranch": branch,
+        "originOwner": origin.owner,
+        "originName": origin.name,
+    });
     match client.graphql(PR_BRANCH_LOOKUP_QUERY, variables) {
         Err(ApiError::RateLimited) => PrFetch::RateLimited,
         Err(ApiError::Failed) => PrFetch::Failed,
+        // The repository, or origin itself, is gone: no PR of ours is there.
+        Err(ApiError::NotFound) => PrFetch::Fetched(None),
         Ok(data) => {
+            let head = origin_as_github_sees_it(&data, origin);
             let nodes = data
                 .pointer("/repository/pullRequests/nodes")
                 .cloned()
@@ -291,7 +380,7 @@ fn branch_lookup_allowed(branch: &str, default_branch: Option<&str>) -> bool {
 }
 
 /// The newest PR that is this checkout's: its head lives in `head` (origin),
-/// and — when the branch's tip is still known — points at that tip.
+/// and — when the branch's tip is still known — it holds that tip.
 fn pick_branch_pr(nodes: Vec<BranchPrNode>, head: &GithubRepo, tips: &[String]) -> Option<PrNode> {
     nodes
         .into_iter()
@@ -304,14 +393,7 @@ fn pick_branch_pr(nodes: Vec<BranchPrNode>, head: &GithubRepo, tips: &[String]) 
                 .head_repository
                 .as_ref()
                 .is_some_and(|repo| repo.name.eq_ignore_ascii_case(&head.name));
-            let tip_matches = tips.is_empty()
-                || node
-                    .pr
-                    .head_ref_oid
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|oid| tips.iter().any(|tip| tip == oid));
-            owner_matches && repo_matches && tip_matches
+            owner_matches && repo_matches && (tips.is_empty() || node.holds_any(tips))
         })
         .map(|node| node.pr)
 }
@@ -633,7 +715,9 @@ fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch 
         let data = match client.graphql(PR_CHECKS_QUERY, variables) {
             Ok(data) => data,
             Err(ApiError::RateLimited) => return CiFetch::RateLimited,
-            Err(ApiError::Failed) => return CiFetch::Fetched { sha, summary: None },
+            Err(ApiError::Failed | ApiError::NotFound) => {
+                return CiFetch::Fetched { sha, summary: None };
+            }
         };
         // A commit with no checks has a null rollup — nothing to read.
         let Some(page) = data
@@ -791,7 +875,7 @@ fn fetch_branch_checks(path: &Path, sha: Option<String>) -> CiFetch {
         match client.rest_get_all(&format!("{commit}/check-runs?per_page=100"), "check_runs") {
             Ok(runs) => Some(runs),
             Err(ApiError::RateLimited) => return CiFetch::RateLimited,
-            Err(ApiError::Failed) => None,
+            Err(ApiError::Failed | ApiError::NotFound) => None,
         };
     let statuses = match client.rest_get_json(&format!("{commit}/status")) {
         Ok(combined) => Some(
@@ -802,7 +886,7 @@ fn fetch_branch_checks(path: &Path, sha: Option<String>) -> CiFetch {
                 .unwrap_or_default(),
         ),
         Err(ApiError::RateLimited) => return CiFetch::RateLimited,
-        Err(ApiError::Failed) => None,
+        Err(ApiError::Failed | ApiError::NotFound) => None,
     };
 
     if check_runs.is_none() && statuses.is_none() {
@@ -1503,5 +1587,51 @@ mod tests {
         let (_tmp, repo) = super::super::test_support::init_temp_repo();
         assert!(super::branch_tips(&repo, "never-existed").is_empty());
         assert_eq!(super::branch_tips(&repo, "main").len(), 1);
+    }
+
+    fn with_commits(mut node: super::BranchPrNode, oids: &[&str]) -> super::BranchPrNode {
+        let nodes: Vec<_> = oids
+            .iter()
+            .map(|oid| serde_json::json!({ "commit": { "oid": oid } }))
+            .collect();
+        node.commits =
+            Some(serde_json::from_value(serde_json::json!({ "nodes": nodes })).expect("commits"));
+        node
+    }
+
+    #[test]
+    fn a_pr_github_moved_ahead_of_the_local_tip_is_still_claimed() {
+        // "Update branch", an applied suggestion, a bot push: GitHub's head is
+        // newer than anything fetched locally, but it still holds the tip.
+        let tips = vec!["def".to_string()];
+        let ahead = with_commits(branch_node("me", "okena", "zzz", 7), &["abc", "def", "zzz"]);
+        assert_eq!(
+            super::pick_branch_pr(vec![ahead], &origin(), &tips).map(|pr| pr.number),
+            Some(7)
+        );
+
+        // A reused branch name: an old PR never held the tip at all.
+        let old = with_commits(branch_node("me", "okena", "yyy", 3), &["xxx", "yyy"]);
+        assert!(super::pick_branch_pr(vec![old], &origin(), &tips).is_none());
+    }
+
+    #[test]
+    fn a_renamed_or_transferred_origin_is_compared_as_github_names_it() {
+        let data = serde_json::json!({
+            "origin": { "owner": { "login": "new-owner" }, "name": "okena-renamed" },
+        });
+        let resolved = super::origin_as_github_sees_it(&data, origin());
+        assert_eq!(resolved.owner, "new-owner");
+        assert_eq!(resolved.name, "okena-renamed");
+        assert_eq!(resolved.host, "github.com");
+
+        let moved = vec![branch_node("new-owner", "okena-renamed", "abc", 7)];
+        assert!(super::pick_branch_pr(moved, &resolved, &[]).is_some());
+
+        // Nothing resolved: the remote URL's own reading stands.
+        assert_eq!(
+            super::origin_as_github_sees_it(&serde_json::json!({ "origin": null }), origin()),
+            origin()
+        );
     }
 }

@@ -186,6 +186,12 @@ pub(crate) fn resolve_base_repo(path: &Path) -> Option<GithubRepo> {
     select_base_repo(remote_candidates(&repo), &host_filter())
 }
 
+/// `owner/name` of the GitHub repository `gh` would run against for this
+/// checkout — the repository its pull request links name.
+pub fn github_repo_slug(path: &Path) -> Option<(String, String)> {
+    resolve_base_repo(path).map(|repo| (repo.owner, repo.name))
+}
+
 /// The GitHub repository behind `origin`, where this checkout's own branches
 /// are pushed. A PR whose head lives anywhere else — a fork's branch that
 /// happens to share a name — is not this checkout's.
@@ -302,6 +308,10 @@ fn graphql_endpoint(host: &str) -> String {
 pub(crate) enum ApiError {
     RateLimited,
     Failed,
+    /// GitHub answered that what was asked for does not exist — a deleted PR
+    /// or repository, or one this token can no longer see. An answer, unlike
+    /// `Failed`: a caller waiting to learn something is gone has learned it.
+    NotFound,
 }
 
 /// GitHub refuses with 403/429 for both the primary hourly limit
@@ -318,6 +328,12 @@ fn is_rate_limited(resp: &HttpResponse) -> bool {
         .ok()
         .and_then(|body| body.get("message")?.as_str().map(str::to_lowercase))
         .is_some_and(|message| message.contains("rate limit"))
+}
+
+/// A missing PR or repository arrives as a 200 with a `NOT_FOUND` error and a
+/// null node — never as a clean null.
+fn is_graphql_not_found(error: &Value) -> bool {
+    error.get("type").and_then(Value::as_str) == Some("NOT_FOUND")
 }
 
 /// The primary limit on GraphQL arrives as a 200 with a typed error.
@@ -433,6 +449,8 @@ impl GithubClient {
         {
             return Err(if errors.iter().any(is_graphql_rate_limit) {
                 ApiError::RateLimited
+            } else if errors.iter().all(is_graphql_not_found) {
+                ApiError::NotFound
             } else {
                 ApiError::Failed
             });
@@ -760,6 +778,49 @@ mod tests {
     }
 
     #[test]
+    fn github_saying_a_pr_or_repo_does_not_exist_is_not_found_not_a_failure() {
+        // Verbatim from GitHub: a missing PR number in a real repo, and a
+        // missing repository. Neither comes back as a clean null.
+        const MISSING_PR: &str = r#"{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","path":["repository","pullRequest"],"locations":[{"line":1,"column":45}],"message":"Could not resolve to a PullRequest with the number of 999999."}]}"#;
+        const MISSING_REPO: &str = r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],"locations":[{"line":1,"column":3}],"message":"Could not resolve to a Repository with the name 'n1rna/does-not-exist-qbl372'."}]}"#;
+        const NOT_FOUND_AND_MORE: &str = r#"{"data":null,"errors":[{"type":"NOT_FOUND","message":"Could not resolve"},{"type":"FORBIDDEN","message":"Resource not accessible"}]}"#;
+
+        let _guard = mock_guard();
+        let _mock = testing::mock(|req| {
+            let query = req
+                .json_body()
+                .and_then(|b| b["query"].as_str())
+                .unwrap_or("");
+            Ok(response(
+                200,
+                &[],
+                if query.contains("pr") {
+                    MISSING_PR
+                } else if query.contains("repo") {
+                    MISSING_REPO
+                } else {
+                    NOT_FOUND_AND_MORE
+                },
+            ))
+        });
+
+        let mut client = GithubClient::with_token("github.com", "tok");
+        assert_eq!(
+            client.graphql("query pr", Value::Null),
+            Err(ApiError::NotFound)
+        );
+        assert_eq!(
+            client.graphql("query repo", Value::Null),
+            Err(ApiError::NotFound)
+        );
+        // Anything besides NOT_FOUND among the errors is still a failure.
+        assert_eq!(
+            client.graphql("query mixed", Value::Null),
+            Err(ApiError::Failed)
+        );
+    }
+
+    #[test]
     fn paginated_rest_collections_follow_the_link_header() {
         let _guard = mock_guard();
         let seen = Arc::new(StdMutex::new(Vec::new()));
@@ -861,7 +922,7 @@ mod tests {
         );
         assert_eq!(
             client.graphql("query missing", Value::Null),
-            Err(ApiError::Failed)
+            Err(ApiError::NotFound)
         );
         assert_eq!(
             client.graphql("query fine", Value::Null),
