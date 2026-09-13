@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn a_card_on_several_picked_tasks_counts_the_others_beside_the_key() {
-        let mut s = info(true, false, "");
+        let mut s = info(true, None, "");
         s.kind = AgentSessionKind::Task(task("u1", "QBL-1"));
         s.tasks = vec![
             task("u1", "QBL-1"),
@@ -721,7 +721,7 @@ mod tests {
 
     #[test]
     fn a_card_on_one_task_reads_as_it_did() {
-        let mut s = info(true, false, "");
+        let mut s = info(true, None, "");
         s.kind = AgentSessionKind::Task(task("u1", "QBL-1"));
         s.tasks = vec![task("u1", "QBL-1")];
         assert_eq!(s.subject(), s.kind.subject());
@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn a_card_not_on_a_task_keeps_its_kind_subject() {
-        let mut s = info(true, false, "");
+        let mut s = info(true, None, "");
         s.kind = AgentSessionKind::Spec {
             change: "add-login".into(),
         };
