@@ -1546,34 +1546,20 @@ impl HarnessPane {
                     let Some(terminal) = terminals.get(&id) else {
                         continue;
                     };
-                    if terminal.is_waiting_for_input() {
-                        links.signals.waiting = true;
-                    }
-                    // Same detection the Agents view uses, resolved the same
-                    // way, so the two never disagree about what is running.
-                    let node_shell = layout
-                        .find_terminal_path(&id)
-                        .and_then(|path| layout.get_at_path(&path).cloned())
-                        .and_then(|node| match node {
-                            crate::workspace::state::LayoutNode::Terminal {
-                                shell_type, ..
-                            } => Some(shell_type),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    let shell = match node_shell {
-                        okena_terminal::shell_config::ShellType::Default => {
-                            project.default_shell.clone().unwrap_or_default()
-                        }
-                        explicit => explicit,
+                    // Same detection the Agents view uses, so the two never
+                    // disagree about what is running.
+                    let agent = project.terminal_agent(&id, terminal.title().as_deref());
+                    has_agent |= agent.is_some();
+                    // An agent is waiting when the daemon says so; a plain
+                    // shell when its idle loop does.
+                    let waiting = match agent {
+                        Some(_) => ws
+                            .agent_activity(&project.id, &id)
+                            .is_some_and(|a| a.is_idle()),
+                        None => terminal.is_waiting_for_input(),
                     };
-                    if crate::views::agent_session::detect_agent(
-                        &shell,
-                        terminal.title().as_deref(),
-                    )
-                    .is_some()
-                    {
-                        has_agent = true;
+                    if waiting {
+                        links.signals.waiting = true;
                     }
                 }
                 if has_agent {

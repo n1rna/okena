@@ -18,6 +18,9 @@ pub struct RemoteProjectSnapshot {
     pub host: Option<String>,
     /// Last-known git status.
     pub git_status: Option<ApiGitStatus>,
+    /// What the agent in each terminal is doing, keyed by (prefixed) terminal
+    /// id, as the daemon decided it.
+    pub agent_activity: HashMap<String, okena_core::agent_activity::AgentActivity>,
 }
 
 /// Transient remote-sync state that lives alongside persistent workspace data.

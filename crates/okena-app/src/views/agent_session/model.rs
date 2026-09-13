@@ -5,6 +5,7 @@
 //! they were separately written and had already started to.
 
 use crate::workspace::state::Workspace;
+use okena_core::agent_activity::AgentActivity;
 use okena_core::harness::{AgentState, AgentSuggestion};
 use okena_core::session_assets::{LinkedCheckout, SessionAsset, derive_session_assets};
 use okena_core::tasks::TaskRef;
@@ -100,8 +101,9 @@ pub struct AgentSessionInfo {
     /// Whether a restart can bring back this session's conversation, rather
     /// than only start a new one.
     pub resumable: bool,
-    /// Whether its terminal is sitting at a prompt waiting for input.
-    pub waiting: bool,
+    /// What the agent is doing, as the daemon decided it from the agent's own
+    /// signals. `None` from a daemon that predates agent activity.
+    pub live: Option<AgentActivity>,
     /// How long it has been idle, pre-formatted.
     pub idle: String,
     /// The last status the agent reported over MCP.
@@ -132,11 +134,11 @@ pub struct RelatedAgent {
     pub activity: SessionActivity,
 }
 
-/// What a session is doing right now, as its terminal shows it.
+/// What a session is doing right now, as the panel shows it.
 ///
-/// The terminal's word rather than the agent's: an agent that stopped reporting
-/// still shows as waiting when its prompt is waiting, which is the state you
-/// actually need to act on.
+/// Decided by the daemon from the agent's own signals — its hooks, its
+/// terminal, and only then its report — so an agent that never reports still
+/// shows as waiting, or as needing you on a permission prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionActivity {
     /// No agent running — the session is on a bare shell, or has no terminal.
@@ -184,27 +186,27 @@ impl SessionActivity {
     }
 }
 
-/// Combine what the terminal shows with what the agent says.
+/// The panel's view of what the daemon says the agent is doing.
 ///
-/// The agent's reason only counts while its prompt is actually waiting. An
-/// agent that reported "ready for review" and was then told to carry on is
-/// working again the moment output resumes, and flagging it until it next
-/// reports would cry wolf on exactly the sessions you have just answered.
+/// A running agent the daemon has not described — one on a daemon from before
+/// agent activity — shows as running, which is what it was always shown as.
 pub(super) fn activity_of(
     running: bool,
-    waiting: bool,
+    live: Option<AgentActivity>,
     idle: String,
-    reported: Option<AgentState>,
 ) -> SessionActivity {
     if !running {
         return SessionActivity::Stopped;
     }
-    if !waiting {
-        return SessionActivity::Running;
-    }
-    match reported {
-        Some(reason) if reason.wants_attention() => SessionActivity::NeedsAttention { reason },
-        _ => SessionActivity::Waiting { idle },
+    let reason = |reason| SessionActivity::NeedsAttention { reason };
+    match live.unwrap_or(AgentActivity::Working) {
+        AgentActivity::Working => SessionActivity::Running,
+        AgentActivity::Stopped => SessionActivity::Stopped,
+        AgentActivity::NeedsInput => reason(AgentState::NeedsInput),
+        AgentActivity::ReadyForReview => reason(AgentState::ReadyForReview),
+        AgentActivity::Blocked => reason(AgentState::Blocked),
+        AgentActivity::Unknown => reason(AgentState::Unknown),
+        AgentActivity::Waiting | AgentActivity::Done => SessionActivity::Waiting { idle },
     }
 }
 
@@ -306,7 +308,7 @@ impl AgentSessionInfo {
             _ => Vec::new(),
         };
 
-        let (agent, mcp, waiting, idle) = Self::terminal_facts(ws, terminals, project);
+        let (agent, mcp, live, idle) = Self::terminal_facts(ws, terminals, project);
         let reported = project.agent.as_ref().and_then(|a| a.state);
 
         // What it produced. Derived here, each time it is read, from the same
@@ -385,7 +387,7 @@ impl AgentSessionInfo {
             }),
             agent,
             mcp,
-            waiting,
+            live,
             idle,
             status: project.agent.as_ref().and_then(|a| a.status.clone()),
             reported,
@@ -408,61 +410,40 @@ impl AgentSessionInfo {
         terminals: &okena_terminal::TerminalsRegistry,
         project: &crate::workspace::state::ProjectData,
     ) -> RelatedAgent {
-        let (agent, _, waiting, idle) = Self::terminal_facts(ws, terminals, project);
+        let (agent, _, live, idle) = Self::terminal_facts(ws, terminals, project);
         RelatedAgent {
             project_id: project.id.clone(),
             name: project.name.clone(),
             key: tasks_key(project),
-            activity: activity_of(
-                agent.is_some(),
-                waiting,
-                idle,
-                project.agent.as_ref().and_then(|a| a.state),
-            ),
+            activity: activity_of(agent.is_some(), live, idle),
         }
     }
 
     /// Read the session's terminals: which agent is running, whether okena's
-    /// MCP was wired in, and how the prompt is doing.
+    /// MCP was wired in, and what the daemon says it is doing.
     ///
     /// "A terminal is alive" is deliberately not the question — a session left
     /// on a bare shell has a live terminal and no agent, which is exactly the
     /// case worth offering a restart for.
     fn terminal_facts(
-        _ws: &Workspace,
+        ws: &Workspace,
         terminals: &okena_terminal::TerminalsRegistry,
         project: &crate::workspace::state::ProjectData,
-    ) -> (Option<String>, bool, bool, String) {
+    ) -> (Option<String>, bool, Option<AgentActivity>, String) {
         use okena_terminal::shell_config::ShellType;
 
         let Some(layout) = project.layout.as_ref() else {
-            return (None, false, false, String::new());
+            return (None, false, None, String::new());
         };
         let registry = terminals.lock();
 
         for id in layout.collect_terminal_ids() {
-            // Resolve the pane's shell the way the spawn does: an unset pane
-            // inherits the project's configured agent.
-            let node_shell = layout
-                .find_terminal_path(&id)
-                .and_then(|path| layout.get_at_path(&path).cloned())
-                .and_then(|node| match node {
-                    okena_workspace::state::LayoutNode::Terminal { shell_type, .. } => {
-                        Some(shell_type)
-                    }
-                    _ => None,
-                })
-                .unwrap_or_default();
-            let shell = match node_shell {
-                ShellType::Default => project.default_shell.clone().unwrap_or_default(),
-                explicit => explicit,
-            };
             let terminal = registry.get(&id);
             let title = terminal.and_then(|t| t.title());
-            let Some(agent) = crate::views::agent_session::detect_agent(&shell, title.as_deref())
-            else {
+            let Some(agent) = project.terminal_agent(&id, title.as_deref()) else {
                 continue;
             };
+            let shell = project.terminal_shell(&id);
             let mcp = match &shell {
                 ShellType::Custom { args, .. } => {
                     okena_app_core::workspace::actions::execute::agent_mcp::args_have_mcp(args)
@@ -474,19 +455,19 @@ impl AgentSessionInfo {
             return (
                 Some(agent),
                 mcp,
-                terminal.is_some_and(|t| t.is_waiting_for_input()),
+                terminal.and(ws.agent_activity(&project.id, &id)),
                 terminal
                     .map(|t| t.idle_duration_display())
                     .unwrap_or_default(),
             );
         }
-        (None, false, false, String::new())
+        (None, false, None, String::new())
     }
 
     /// What the session is doing right now. Stopped wins over waiting: a
     /// prompt with no agent behind it is a shell, not an agent waiting on you.
     pub fn activity(&self) -> SessionActivity {
-        activity_of(self.running, self.waiting, self.idle.clone(), self.reported)
+        activity_of(self.running, self.live, self.idle.clone())
     }
 
     /// The terminal to show for this session, if any.
@@ -517,10 +498,11 @@ mod tests {
         AgentSessionInfo, AgentSessionKind, SessionActivity, activity_of, is_related, session_kind,
         session_tasks, short_path, tasks_key,
     };
+    use okena_core::agent_activity::AgentActivity;
     use okena_core::harness::AgentState;
     use okena_core::tasks::{TaskId, TaskRef};
 
-    fn info(running: bool, waiting: bool, idle: &str) -> AgentSessionInfo {
+    fn info(running: bool, live: Option<AgentActivity>, idle: &str) -> AgentSessionInfo {
         AgentSessionInfo {
             project_id: "s1".into(),
             name: "s".into(),
@@ -531,7 +513,7 @@ mod tests {
             mcp: false,
             running,
             resumable: false,
-            waiting,
+            live,
             idle: idle.into(),
             status: None,
             reported: None,
@@ -545,21 +527,25 @@ mod tests {
     }
 
     #[test]
-    fn a_waiting_agent_that_says_why_needs_attention() {
+    fn an_agent_that_stopped_for_a_reason_needs_attention() {
         assert_eq!(
-            activity_of(true, true, "2m".into(), Some(AgentState::ReadyForReview)),
+            activity_of(true, Some(AgentActivity::ReadyForReview), "2m".into()),
             SessionActivity::NeedsAttention {
                 reason: AgentState::ReadyForReview
+            }
+        );
+        assert_eq!(
+            activity_of(true, Some(AgentActivity::NeedsInput), String::new()),
+            SessionActivity::NeedsAttention {
+                reason: AgentState::NeedsInput
             }
         );
     }
 
     #[test]
-    fn a_stale_reason_does_not_flag_an_agent_that_is_working_again() {
-        // Told to carry on, it produces output before it reports again. The
-        // old "ready for review" must not keep it flagged in the meantime.
+    fn a_working_agent_is_running() {
         assert_eq!(
-            activity_of(true, false, String::new(), Some(AgentState::ReadyForReview)),
+            activity_of(true, Some(AgentActivity::Working), String::new()),
             SessionActivity::Running
         );
     }
@@ -567,30 +553,34 @@ mod tests {
     #[test]
     fn a_waiting_agent_with_no_reason_is_only_waiting() {
         assert_eq!(
-            activity_of(true, true, "1m".into(), Some(AgentState::Working)).label(),
+            activity_of(true, Some(AgentActivity::Waiting), "1m".into()).label(),
             "waiting · 1m"
         );
-        assert!(!activity_of(true, true, String::new(), None).wants_attention());
+        assert!(!activity_of(true, Some(AgentActivity::Done), String::new()).wants_attention());
     }
 
     #[test]
     fn no_agent_means_stopped_whatever_it_last_said() {
         assert_eq!(
-            activity_of(false, true, String::new(), Some(AgentState::NeedsInput)),
+            activity_of(false, Some(AgentActivity::NeedsInput), String::new()),
             SessionActivity::Stopped
         );
     }
 
     #[test]
     fn a_prompt_with_no_agent_behind_it_is_stopped_not_waiting() {
-        assert_eq!(info(false, true, "3m").activity(), SessionActivity::Stopped);
+        assert_eq!(
+            info(false, Some(AgentActivity::Waiting), "3m").activity(),
+            SessionActivity::Stopped
+        );
     }
 
     #[test]
     fn a_waiting_agent_says_how_long_it_has_waited() {
-        assert_eq!(info(true, true, "3m").activity().label(), "waiting · 3m");
-        assert_eq!(info(true, true, "").activity().label(), "waiting");
-        assert_eq!(info(true, false, "").activity(), SessionActivity::Running);
+        let waiting = Some(AgentActivity::Waiting);
+        assert_eq!(info(true, waiting, "3m").activity().label(), "waiting · 3m");
+        assert_eq!(info(true, waiting, "").activity().label(), "waiting");
+        assert_eq!(info(true, None, "").activity(), SessionActivity::Running);
     }
 
     fn task(external: &str, key: &str) -> TaskRef {

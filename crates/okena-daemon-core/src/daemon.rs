@@ -540,6 +540,10 @@ impl DaemonCore {
         let shutdown_terminals = terminals.clone();
         let shutdown_pty_manager = pty_manager.clone();
         let shutdown_autosaves = reactor.autosave_tracker.clone();
+        // What each agent terminal is doing: fed by the PTY loop (bells,
+        // notifications) and the command loop (native hook events), resolved by
+        // its own poll, read by `GetState`.
+        let agent_activity = Arc::new(crate::agent_activity::AgentActivityTracker::default());
         local.block_on(&runtime, async move {
             // Observers MUST be spawned inside the LocalSet (they `spawn_local`).
             reactor.spawn_observers();
@@ -560,7 +564,17 @@ impl DaemonCore {
                     hook_monitor: reactor.hook_monitor.clone(),
                     workspace_tick: reactor.workspace_tick.clone(),
                     settings: settings.clone(),
+                    agent_activity: agent_activity.clone(),
                 },
+                reactor.state_version.clone(),
+            ));
+            tokio::task::spawn_local(crate::agent_activity::run_agent_activity_poll(
+                agent_activity.clone(),
+                reactor.workspace.clone(),
+                terminals.clone(),
+                reactor.workspace_tick.clone(),
+                reactor.hook_runner.clone(),
+                reactor.hook_monitor.clone(),
                 reactor.state_version.clone(),
             ));
             tokio::task::spawn_local(crate::git_poll::run_git_poll(
@@ -662,6 +676,7 @@ impl DaemonCore {
                 daemon_config,
                 soft_close_deadlines,
                 git_poll_trigger_tx,
+                agent_activity,
             );
             tokio::pin!(cmd);
             let interrupted = tokio::select! {

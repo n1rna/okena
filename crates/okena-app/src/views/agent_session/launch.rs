@@ -33,6 +33,12 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
         icon: "icons/agent-copilot.svg",
         accent: 0x8B7CF6,
     },
+    KnownAgent {
+        command: "codex",
+        label: "Codex",
+        icon: "icons/terminal.svg",
+        accent: 0x10A37F,
+    },
 ];
 
 /// The option for `command`: the known agent's look, or a terminal for a
@@ -122,20 +128,23 @@ mod tests {
 
     #[test]
     fn the_configured_agent_leads() {
-        assert_eq!(offered_commands(Some("copilot")), ["copilot", "claude"]);
+        assert_eq!(
+            offered_commands(Some("copilot")),
+            ["copilot", "claude", "codex"]
+        );
     }
 
     #[test]
     fn an_unknown_configured_agent_is_still_offered() {
         assert_eq!(
-            offered_commands(Some("codex")),
-            ["codex", "claude", "copilot"]
+            offered_commands(Some("aider")),
+            ["aider", "claude", "copilot", "codex"]
         );
     }
 
     #[test]
     fn a_blank_configured_agent_offers_the_known_ones() {
-        assert_eq!(offered_commands(Some("  ")), ["claude", "copilot"]);
-        assert_eq!(offered_commands(None), ["claude", "copilot"]);
+        assert_eq!(offered_commands(Some("  ")), ["claude", "copilot", "codex"]);
+        assert_eq!(offered_commands(None), ["claude", "copilot", "codex"]);
     }
 }

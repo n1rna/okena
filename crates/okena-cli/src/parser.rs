@@ -44,6 +44,17 @@ pub enum Command {
     /// Point an agent at it with:
     /// `{"mcpServers":{"okena":{"command":"okena","args":["mcp"]}}}`
     Mcp,
+    /// Report an agent lifecycle event for this terminal (run by agent hooks)
+    ///
+    /// okena injects this into the agents it launches; it is not meant to be
+    /// run by hand.
+    #[command(name = "agent-event", hide = true)]
+    AgentEvent {
+        /// turn-started, tool, needs-input, turn-ended, or codex-notify
+        signal: String,
+        /// The JSON event Codex passes to its notify program
+        payload: Option<String>,
+    },
     /// Execute a raw action (JSON ActionRequest)
     ///
     /// Escape hatch for actions without a dedicated subcommand. The body is a
@@ -508,9 +519,29 @@ pub enum TermCmd {
 /// control back to GUI/profile launch.
 pub fn subcommand_names() -> &'static [&'static str] {
     &[
-        "pair", "health", "state", "mcp", "action", "services", "service", "whoami", "ls",
-        "project", "worktree", "folder", "term", "send", "run", "key", "read", "skill", "settings",
-        "theme", "command", "update",
+        "pair",
+        "health",
+        "state",
+        "mcp",
+        "agent-event",
+        "action",
+        "services",
+        "service",
+        "whoami",
+        "ls",
+        "project",
+        "worktree",
+        "folder",
+        "term",
+        "send",
+        "run",
+        "key",
+        "read",
+        "skill",
+        "settings",
+        "theme",
+        "command",
+        "update",
     ]
 }
 

@@ -21,6 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use okena_core::agent_activity::AgentActivity;
 use okena_core::api::{
     ApiFolder, ApiFullscreen, ApiGitStatus, ApiHookExecution, ApiProject, ApiServiceInfo,
     ApiWindow, ApiWorktreeMetadata, StateResponse,
@@ -42,14 +43,27 @@ pub fn api_project_visibility(project_id: &str, hidden_project_ids: &HashSet<Str
 ///   caller's `ServiceManager`; absent ⇒ no services).
 /// * `hidden_project_ids` — per-window hidden set driving `show_in_overview`.
 /// * `size_map` — terminal id → `(cols, rows)` for `layout.to_api_with_sizes`.
+/// * `agent_activity` — terminal id → what the agent in it is doing.
 pub fn build_api_project(
     p: &ProjectData,
     git_statuses: &HashMap<String, ApiGitStatus>,
     services_by_project: &HashMap<String, Vec<ApiServiceInfo>>,
     hidden_project_ids: &HashSet<String>,
     size_map: &HashMap<String, (u16, u16)>,
+    agent_activity: &HashMap<String, AgentActivity>,
 ) -> ApiProject {
     ApiProject {
+        agent_activity: p
+            .layout
+            .as_ref()
+            .map(|layout| {
+                layout
+                    .collect_terminal_ids()
+                    .into_iter()
+                    .filter_map(|tid| agent_activity.get(&tid).map(|a| (tid, *a)))
+                    .collect()
+            })
+            .unwrap_or_default(),
         id: p.id.clone(),
         name: p.name.clone(),
         path: p.path.clone(),
@@ -102,6 +116,7 @@ pub fn build_api_projects(
     services_by_project: &HashMap<String, Vec<ApiServiceInfo>>,
     hidden_project_ids: &HashSet<String>,
     size_map: &HashMap<String, (u16, u16)>,
+    agent_activity: &HashMap<String, AgentActivity>,
 ) -> Vec<ApiProject> {
     let project_map: HashMap<&str, &ProjectData> =
         data.projects.iter().map(|p| (p.id.as_str(), p)).collect();
@@ -116,6 +131,7 @@ pub fn build_api_projects(
             services_by_project,
             hidden_project_ids,
             size_map,
+            agent_activity,
         ));
     };
 
@@ -173,6 +189,7 @@ pub fn build_state_response(
     services_by_project: &HashMap<String, Vec<ApiServiceInfo>>,
     hidden_project_ids: &HashSet<String>,
     size_map: &HashMap<String, (u16, u16)>,
+    agent_activity: &HashMap<String, AgentActivity>,
     windows: Vec<ApiWindow>,
     hooks: Vec<ApiHookExecution>,
 ) -> StateResponse {
@@ -182,6 +199,7 @@ pub fn build_state_response(
         services_by_project,
         hidden_project_ids,
         size_map,
+        agent_activity,
     );
     let folders = build_folders(&data.folders);
 
@@ -235,6 +253,7 @@ mod worktree_wire_tests {
         let p = worktree("feat/x");
         let api = super::build_api_project(
             &p,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),

@@ -156,6 +156,37 @@ impl ProjectData {
             || self.is_knowledge_session()
             || self.is_task_draft_session()
     }
+
+    /// The shell `terminal_id` runs: its pane's own, or the project's default
+    /// for a pane that inherits — resolved the way the spawn resolves it.
+    pub fn terminal_shell(&self, terminal_id: &str) -> ShellType {
+        let node_shell = self
+            .layout
+            .as_ref()
+            .and_then(|layout| {
+                let path = layout.find_terminal_path(terminal_id)?;
+                layout.get_at_path(&path).cloned()
+            })
+            .and_then(|node| match node {
+                LayoutNode::Terminal { shell_type, .. } => Some(shell_type),
+                _ => None,
+            })
+            .unwrap_or_default();
+        match node_shell {
+            ShellType::Default => self.default_shell.clone().unwrap_or_default(),
+            explicit => explicit,
+        }
+    }
+
+    /// The agent `terminal_id` runs, if okena can tell: a known agent by its
+    /// command or title, or in an agent session whatever command it launched.
+    pub fn terminal_agent(&self, terminal_id: &str, title: Option<&str>) -> Option<String> {
+        okena_core::agents::detect_session_agent(
+            &self.terminal_shell(terminal_id),
+            title,
+            self.is_any_agent_session(),
+        )
+    }
 }
 
 /// What an agent session was started to do.

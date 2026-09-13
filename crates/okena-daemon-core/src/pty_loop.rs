@@ -109,6 +109,9 @@ pub struct PtyLoopReactor {
     /// App settings (read for the global `terminal.on_close` hook + the
     /// global-hooks arg passed into project deletion / hook firing).
     pub settings: Arc<Mutex<AppSettings>>,
+    /// Agent activity: a bell or notification from an agent's terminal is one
+    /// of the signals it is decided from.
+    pub agent_activity: Arc<crate::agent_activity::AgentActivityTracker>,
 }
 
 impl PtyLoopReactor {
@@ -485,10 +488,15 @@ fn process_activity_edges(
             .iter()
             .filter(|tid| {
                 reg.get(*tid).is_some_and(|t| {
-                    let mut a = t.take_pending_command_finished();
-                    a |= t.take_pending_bell();
-                    a |= !t.take_pending_notifications().is_empty();
-                    a
+                    let finished = t.take_pending_command_finished();
+                    let rang = t.take_pending_bell();
+                    let notified = !t.take_pending_notifications().is_empty();
+                    // Ignored unless the terminal runs an agent, where it is
+                    // the agent asking for you.
+                    if rang || notified {
+                        reactor.agent_activity.record_attention(tid);
+                    }
+                    finished || rang || notified
                 })
             })
             .cloned()
@@ -991,6 +999,7 @@ mod tests {
             hook_monitor: Some(HookMonitor::new()),
             workspace_tick,
             settings: Arc::new(Mutex::new(settings)),
+            agent_activity: Default::default(),
         }
     }
 

@@ -395,6 +395,12 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
         let workspace_reader = self.workspace.read(cx);
         let project = workspace_reader.project(&self.project_id);
         let project_for_names = project.cloned();
+        // What each tab's agent is doing, as the daemon decided it. A tab
+        // running an agent shows that instead of the idle loop's guess.
+        let agent_activity = workspace_reader
+            .remote_snapshot(&self.project_id)
+            .map(|s| s.agent_activity.clone())
+            .unwrap_or_default();
 
         let is_pane_focused = self
             .focus_manager
@@ -426,7 +432,11 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                     // An inactive tab hides its pane, so the tab stands in for the
                     // pane's attention border and reports the same two signals.
                     let bell = t.has_bell() || t.has_notification();
-                    if t.is_waiting_for_input() {
+                    let waiting = match agent_activity.get(tid) {
+                        Some(activity) => activity.is_idle(),
+                        None => t.is_waiting_for_input(),
+                    };
+                    if waiting {
                         (true, Some(t.idle_duration_display()), progress, bell)
                     } else {
                         (false, None, progress, bell)

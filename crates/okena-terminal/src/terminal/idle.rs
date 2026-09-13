@@ -8,6 +8,49 @@ fn can_rewrite_shell_input(shell_pid: Option<u32>, has_children: impl FnOnce(u32
     shell_pid.is_some_and(|pid| !has_children(pid))
 }
 
+/// Current time as Unix millis.
+pub(super) fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Whether `bytes` is something someone sent on purpose, rather than a report
+/// the terminal makes on their behalf.
+///
+/// Focusing a pane sends a focus-in report and scrolling over a mouse-aware
+/// app sends mouse reports. Neither is an answer to an agent, so neither may
+/// outdate what it asked.
+pub(super) fn is_deliberate_input(bytes: &[u8]) -> bool {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        if let Some(after) = rest
+            .strip_prefix(b"\x1b[I")
+            .or_else(|| rest.strip_prefix(b"\x1b[O"))
+        {
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix(b"\x1b[<") {
+            // SGR mouse report: `ESC [ < button ; col ; row (M|m)`.
+            match after
+                .iter()
+                .position(|b| !(b.is_ascii_digit() || *b == b';'))
+            {
+                Some(end) if matches!(after[end], b'M' | b'm') => rest = &after[end + 1..],
+                _ => return true,
+            }
+        } else if let Some(after) = rest.strip_prefix(b"\x1b[M")
+            && after.len() >= 3
+        {
+            // X10 mouse report: `ESC [ M` and three encoded bytes.
+            rest = &after[3..];
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
 impl Terminal {
     /// Set the shell process PID (for foreground process checking)
     pub fn set_shell_pid(&self, pid: u32) {
@@ -49,6 +92,15 @@ impl Terminal {
         self.had_user_input.load(Ordering::Relaxed)
     }
 
+    /// Unix millis of the last input someone deliberately sent, if any. Focus
+    /// and mouse reports are not counted.
+    pub fn last_input_at(&self) -> Option<u64> {
+        match self.last_input_at.load(Ordering::Relaxed) {
+            0 => None,
+            at => Some(at),
+        }
+    }
+
     /// Update the cached waiting state (called from background thread only)
     pub fn set_waiting_for_input(&self, waiting: bool) {
         self.waiting_for_input.store(waiting, Ordering::Relaxed);
@@ -88,7 +140,24 @@ impl Terminal {
 
 #[cfg(test)]
 mod tests {
-    use super::can_rewrite_shell_input;
+    use super::{can_rewrite_shell_input, is_deliberate_input};
+
+    #[test]
+    fn typing_is_deliberate_input() {
+        assert!(is_deliberate_input(b"y"));
+        assert!(is_deliberate_input(b"\r"));
+        assert!(is_deliberate_input(b"\x1b[A"));
+        assert!(is_deliberate_input(b"\x1b[I1"));
+    }
+
+    #[test]
+    fn focus_and_mouse_reports_are_not_input() {
+        assert!(!is_deliberate_input(b"\x1b[I"));
+        assert!(!is_deliberate_input(b"\x1b[O\x1b[I"));
+        assert!(!is_deliberate_input(b"\x1b[<64;10;5M\x1b[<65;10;5M"));
+        assert!(!is_deliberate_input(b"\x1b[<0;3;4m"));
+        assert!(!is_deliberate_input(b"\x1b[M !!"));
+    }
 
     #[test]
     fn unknown_shell_pid_blocks_input_rewriting() {

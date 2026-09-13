@@ -54,6 +54,7 @@ The two reactor trait families are what make the logic crates reactor-agnostic:
 | `observers.rs` | The observer tasks: autosave, state snapshot, service sync. Re-entrancy guards live here. |
 | `pty_loop.rs` | PTY event loop — drains `PtyEvent::Data`, hook-terminal exits, OSC hook-exit titles, activity bumps. |
 | `git_poll.rs` | Background git-status poller. |
+| `agent_activity.rs` | What each agent terminal is doing (`ApiProject::agent_activity`). Collects native hook events (command loop), bells/OSC notifications (PTY loop) and terminal input/output, resolves them with `okena_core::agent_activity::resolve`, clears a report's question once input answers it, and bumps `state_version` only on change. Clients never compute this. |
 | `workspace_cx.rs` / `service_cx.rs` | Tokio impls of the reactor traits. |
 | `daemon_config.rs` | Gpui-free settings/theme handlers. |
 | `soft_close.rs` | Soft-close deadline poll (grace window before killing a session). |

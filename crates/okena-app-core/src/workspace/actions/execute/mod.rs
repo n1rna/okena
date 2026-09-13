@@ -779,6 +779,11 @@ pub fn execute_action(
         ActionRequest::AgentSendInstruction { project_id, text } => {
             tasks::send_instruction(ws, project_id, text, backend, terminals, settings, cx)
         }
+        // Agent activity is runtime state the daemon's command loop keeps next
+        // to the PTYs, not workspace data; it answers these before this point.
+        ActionRequest::AgentHookEvent { .. } => {
+            ActionResult::Err("agent hook events are handled by the daemon".into())
+        }
         ActionRequest::AgentRestart { project_id } => terminal::restart_agent(
             ws,
             focus_manager,

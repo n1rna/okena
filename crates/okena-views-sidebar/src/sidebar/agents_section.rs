@@ -99,7 +99,7 @@ impl Sidebar {
     /// recede so the ones that need you are the ones you see.
     fn card_color(state: CardState, t: &okena_ui::theme::ThemeColors) -> u32 {
         match state {
-            CardState::NeedsInput | CardState::ReadyForReview => t.warning,
+            CardState::NeedsInput | CardState::ReadyForReview | CardState::Unknown => t.warning,
             CardState::Blocked => t.error,
             CardState::Working => t.success,
             CardState::Waiting | CardState::Done | CardState::Stopped => t.text_muted,
@@ -363,20 +363,21 @@ impl Sidebar {
                 info.name = trimmed.to_string();
             }
             let subtitle = subtitle.filter(|s| s != &info.name);
-            // Live from the registry, the same signal the project rows use.
-            let (running, waiting) = {
+            // Whether anything runs, live from the registry like the project
+            // rows; what the agent is doing, from the daemon.
+            let (running, activity) = {
                 let registry = self.terminals.lock();
-                let live: Vec<_> = info
+                let live: Vec<&String> = info
                     .terminal_ids
                     .iter()
-                    .filter_map(|tid| registry.get(tid))
+                    .filter(|tid| registry.contains_key(*tid))
                     .collect();
                 (
                     !live.is_empty(),
-                    live.iter().any(|t| t.is_waiting_for_input()),
+                    live.iter()
+                        .find_map(|tid| workspace.agent_activity(&p.id, tid)),
                 )
             };
-            let reported = p.agent.as_ref().and_then(|a| a.state);
             let status = p
                 .agent
                 .as_ref()
@@ -391,7 +392,7 @@ impl Sidebar {
                 focused: focused_id.as_deref() == Some(p.id.as_str()),
                 subtitle,
                 last_activity_at: p.last_activity_at,
-                card: card_state(running, waiting, reported),
+                card: card_state(running, activity),
                 status,
             });
         }

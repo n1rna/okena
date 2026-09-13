@@ -17,6 +17,8 @@ handling untouched.
 | `commands.rs` | Command implementations — build an `ActionRequest` JSON body, POST it, render the result. |
 | `skill.md` | The agent skill, `include_str!`-embedded into `commands.rs` and emitted by `skill show` / written by `skill install`. Keep it concise — it's a reference, not a manual. |
 | `register.rs` | First-use token registration (reads the local `remote_secret`). |
+| `mcp.rs` | `okena mcp` — stdio MCP server for agents okena runs; identity from `$OKENA_TERMINAL_ID`. |
+| `agent_event.rs` | `okena agent-event <signal>` (hidden) — run by the hooks okena injects into agents (Claude Code `--settings` hooks, Codex `notify`). Maps a hook to an `AgentHookEvent` and posts it for `$OKENA_TERMINAL_ID`. Always exits 0 and never writes stdout: it runs inside the agent's own turn. |
 
 ## Addressing (agent-friendly)
 
