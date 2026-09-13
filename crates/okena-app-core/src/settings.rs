@@ -508,6 +508,17 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Which task manager the harness reads. Blank leaves it as it was: there
+    /// is always exactly one active provider.
+    pub fn set_harness_task_provider(&mut self, value: String, cx: &mut Context<Self>) {
+        let value = value.trim();
+        if value.is_empty() || self.settings.harness.task_provider == value {
+            return;
+        }
+        self.settings.harness.task_provider = value.to_string();
+        self.save_and_notify(cx);
+    }
+
     pub fn set_harness_agent_mcp_injection(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.harness.agent_mcp_injection = value;
         self.save_and_notify(cx);

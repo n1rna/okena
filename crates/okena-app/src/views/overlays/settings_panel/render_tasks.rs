@@ -7,9 +7,11 @@
 
 use super::SettingsPanel;
 use super::components::{section_container, section_header, settings_input_row};
+use crate::settings::{SettingsState, settings_entity};
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
 use crate::views::components::SimpleInput;
+use crate::views::harness::{AZURE_DEVOPS, provider_hint};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -55,7 +57,14 @@ impl SettingsPanel {
         }
         let key = self.tasks_api_key_input.read(cx).value().trim().to_string();
         if key.is_empty() {
-            self.tasks_error = Some("Paste an API key first.".into());
+            self.tasks_error = Some("Paste an API key or token first.".into());
+            cx.notify();
+            return;
+        }
+        let organization_url = (provider == AZURE_DEVOPS)
+            .then(|| self.tasks_org_url_input.read(cx).value().trim().to_string());
+        if organization_url.as_deref() == Some("") {
+            self.tasks_error = Some("Enter your organization URL first.".into());
             cx.notify();
             return;
         }
@@ -73,6 +82,7 @@ impl SettingsPanel {
                 client.post_action(ActionRequest::TasksConnectApiKey {
                     provider,
                     api_key: key,
+                    organization_url,
                 })
             })
             .await;
@@ -122,7 +132,102 @@ impl SettingsPanel {
         .detach();
     }
 
-    fn render_provider(&self, p: &TaskProviderStatus, cx: &mut Context<Self>) -> AnyElement {
+    /// Chips choosing the one provider the harness reads.
+    fn render_provider_choice(
+        &self,
+        providers: &[TaskProviderStatus],
+        active: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        // Before the daemon answers, offer the providers this build ships, so
+        // the choice is not blank for the first frame.
+        let choices: Vec<(String, String)> = if providers.is_empty() {
+            vec![
+                ("linear".into(), "Linear".into()),
+                (AZURE_DEVOPS.into(), "Azure DevOps".into()),
+            ]
+        } else {
+            providers
+                .iter()
+                .map(|p| (p.provider.clone(), p.display_name.clone()))
+                .collect()
+        };
+
+        let chips: Vec<AnyElement> = choices
+            .into_iter()
+            .map(|(id, name)| {
+                let is_selected = id == active;
+                div()
+                    .id(SharedString::from(format!("tasks-provider-{id}")))
+                    .cursor_pointer()
+                    .px(px(10.0))
+                    .py(px(3.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(rgb(if is_selected {
+                        t.border_active
+                    } else {
+                        t.border
+                    }))
+                    .when(is_selected, |d| d.bg(with_alpha(t.button_primary_bg, 0.15)))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(if is_selected {
+                        t.text_primary
+                    } else {
+                        t.text_secondary
+                    }))
+                    .child(name)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            let id = id.clone();
+                            // A key typed for one provider is not the other's.
+                            this.tasks_api_key_input
+                                .update(cx, |i, cx| i.set_value("", cx));
+                            this.tasks_error = None;
+                            settings_entity(cx).update(cx, |state: &mut SettingsState, cx| {
+                                state.set_harness_task_provider(id, cx);
+                            });
+                        }),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        v_flex()
+            .px(px(12.0))
+            .py(px(8.0))
+            .gap(px(6.0))
+            .child(
+                v_flex()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(ui_text(13.0, cx))
+                            .text_color(rgb(t.text_primary))
+                            .child("Active provider"),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(
+                                "The harness shows tasks from this one. Another provider \
+                                 stays connected, but its tasks are not shown.",
+                            ),
+                    ),
+            )
+            .child(h_flex().gap(px(6.0)).flex_wrap().children(chips))
+            .into_any_element()
+    }
+
+    fn render_provider(
+        &self,
+        p: &TaskProviderStatus,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
         let (color, status) = match &p.auth {
             TaskAuthState::Connected { account } => (
@@ -194,10 +299,29 @@ impl SettingsPanel {
                     }),
             )
             // The key field is only offered where it would do something: a
-            // connected provider needs a disconnect, not a second key.
-            .when(!connected, |d| {
+            // connected provider needs a disconnect, not a second key, and only
+            // the active provider is worth connecting from here.
+            .when(!connected && active, |d| {
                 let id = id.clone();
                 d.child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .child(provider_hint(&id)),
+                )
+                .when(id == AZURE_DEVOPS, |d| {
+                    d.child(
+                        okena_ui::input::input_container(&t, None)
+                            .w_full()
+                            .px(px(8.0))
+                            .py(px(5.0))
+                            .child(
+                                SimpleInput::new(&self.tasks_org_url_input)
+                                    .text_size(ui_text(13.0, cx)),
+                            ),
+                    )
+                })
+                .child(
                     h_flex()
                         .gap(px(8.0))
                         .items_center()
@@ -264,6 +388,16 @@ impl SettingsPanel {
                 false,
             ));
 
+        let active = settings_entity(cx)
+            .read(cx)
+            .settings
+            .harness
+            .task_provider
+            .clone();
+        body = body.child(
+            section_container(&t).child(self.render_provider_choice(&providers, &active, cx)),
+        );
+
         let mut container = section_container(&t);
         if providers.is_empty() {
             container = container.child(
@@ -280,7 +414,7 @@ impl SettingsPanel {
             );
         }
         for p in &providers {
-            container = container.child(self.render_provider(p, cx));
+            container = container.child(self.render_provider(p, p.provider == active, cx));
         }
         body = body.child(container);
 

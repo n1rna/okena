@@ -803,9 +803,11 @@ pub fn execute_action(
             cx,
         ),
         ActionRequest::TasksAuthStatus => tasks::auth_status(),
-        ActionRequest::TasksConnectApiKey { provider, api_key } => {
-            tasks::connect_api_key(provider, api_key)
-        }
+        ActionRequest::TasksConnectApiKey {
+            provider,
+            api_key,
+            organization_url,
+        } => tasks::connect_api_key(provider, api_key, organization_url),
         ActionRequest::TasksDisconnect { provider } => tasks::disconnect(provider),
         ActionRequest::TasksList { provider } => tasks::list(provider),
         ActionRequest::TaskContainers { provider } => tasks::containers(provider),

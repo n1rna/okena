@@ -35,12 +35,29 @@ enum StoredCredential {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at: Option<u64>,
     },
+    /// A new tag rather than a field on `ApiKey`, so a file written before it
+    /// existed still reads exactly as it did.
+    PersonalAccessToken {
+        token: String,
+        organization_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
 }
 
 impl From<&Credential> for StoredCredential {
     fn from(c: &Credential) -> Self {
         match c {
             Credential::ApiKey(key) => StoredCredential::ApiKey { key: key.clone() },
+            Credential::PersonalAccessToken {
+                token,
+                organization_url,
+                account,
+            } => StoredCredential::PersonalAccessToken {
+                token: token.clone(),
+                organization_url: organization_url.clone(),
+                account: account.clone(),
+            },
             Credential::OAuth {
                 access_token,
                 refresh_token,
@@ -58,6 +75,15 @@ impl From<StoredCredential> for Credential {
     fn from(s: StoredCredential) -> Self {
         match s {
             StoredCredential::ApiKey { key } => Credential::ApiKey(key),
+            StoredCredential::PersonalAccessToken {
+                token,
+                organization_url,
+                account,
+            } => Credential::PersonalAccessToken {
+                token,
+                organization_url,
+                account,
+            },
             StoredCredential::OAuth {
                 access_token,
                 refresh_token,
@@ -157,6 +183,51 @@ mod tests {
         };
         let back: Credential = StoredCredential::from(&c).into();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn personal_access_token_round_trips_with_its_organization() {
+        let c = Credential::PersonalAccessToken {
+            token: "pat".into(),
+            organization_url: "https://dev.azure.com/contoso".into(),
+            account: Some("Nima".into()),
+        };
+        let back: Credential = StoredCredential::from(&c).into();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn a_file_written_before_azure_devops_still_reads() {
+        // The exact shape older builds wrote. Adding a provider must not cost
+        // anyone their stored Linear key.
+        let json = r#"{"providers":{"linear":{"kind":"api_key","key":"lin_api_1"}}}"#;
+        let mut file: CredentialFile = serde_json::from_str(json).expect("old file decodes");
+        let linear = file.providers.remove("linear").map(Credential::from);
+        assert_eq!(linear, Some(Credential::ApiKey("lin_api_1".into())));
+    }
+
+    #[test]
+    fn both_providers_live_side_by_side_in_one_file() {
+        let mut f = CredentialFile::default();
+        f.providers.insert(
+            "linear".into(),
+            StoredCredential::from(&Credential::ApiKey("k".into())),
+        );
+        f.providers.insert(
+            "azure_devops".into(),
+            StoredCredential::from(&Credential::PersonalAccessToken {
+                token: "pat".into(),
+                organization_url: "https://dev.azure.com/contoso".into(),
+                account: None,
+            }),
+        );
+        let json = serde_json::to_string(&f).expect("serialize");
+        assert!(
+            json.contains("\"kind\":\"personal_access_token\""),
+            "got {json}"
+        );
+        let back: CredentialFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.providers.len(), 2);
     }
 
     #[test]

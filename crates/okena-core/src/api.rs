@@ -1116,18 +1116,22 @@ pub enum ActionRequest {
     },
     // ─── Engineering harness: task-manager integration ────────────────────
     //
-    // `provider` is a provider id (`"linear"`). An unknown id is an error
-    // rather than a silent no-op, so a newer client asking an older daemon for
-    // a provider it lacks says so plainly.
+    // `provider` is a provider id (`"linear"`, `"azure_devops"`). An unknown id
+    // is an error rather than a silent no-op, so a newer client asking an older
+    // daemon for a provider it lacks says so plainly.
     /// Auth state for every known provider. Cheap and local — reads the stored
     /// credential, makes no network call.
     TasksAuthStatus,
-    /// Store a personal API key for `provider` and verify it with one live
-    /// call. The key is written only if that call succeeds, so a typo can't
-    /// leave a permanently-failing credential on disk.
+    /// Store a personal API key or access token for `provider` and verify it
+    /// with one live call. The key is written only if that call succeeds, so a
+    /// typo can't leave a permanently-failing credential on disk.
     TasksConnectApiKey {
         provider: String,
         api_key: String,
+        /// Where the token is valid. Required by Azure DevOps, whose tokens
+        /// belong to one organization; ignored by Linear.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        organization_url: Option<String>,
     },
     /// Forget the stored credential for `provider`.
     TasksDisconnect {

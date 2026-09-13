@@ -376,15 +376,13 @@ fn target_task(args: &Value) -> Result<(String, String), String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        // An explicit id still needs a provider; this session's is the only
-        // one okena has a credential for.
+        // An explicit id still needs a provider: this session's own, or else
+        // the one the harness is set to.
         let session = current_session()?;
-        let provider = session
-            .project
-            .task_ref
-            .as_ref()
-            .map(|t| t.id.provider.clone())
-            .unwrap_or_else(|| "linear".to_string());
+        let provider = match session.project.task_ref.as_ref() {
+            Some(t) => t.id.provider.clone(),
+            None => active_provider()?,
+        };
         return Ok((provider, explicit.to_string()));
     }
     let session = current_session()?;
@@ -392,6 +390,28 @@ fn target_task(args: &Value) -> Result<(String, String), String> {
         "this session is not linked to a task — pass `parent` to say which task to work under",
     )?;
     Ok((task.id.provider.clone(), task.id.external_id.clone()))
+}
+
+/// The task provider the harness is set to, from the daemon's settings.
+fn active_provider() -> Result<String, String> {
+    let token = super::ensure_token()?;
+    let response = super::api_action(&token, &json!({ "action": "get_settings" }).to_string())?;
+    let settings: Value =
+        serde_json::from_str(&response).map_err(|e| format!("could not read settings: {e}"))?;
+    Ok(provider_from_settings(&settings))
+}
+
+/// `harness.task_provider`, or Linear for a daemon that predates the setting —
+/// Linear was the only provider such a daemon had.
+fn provider_from_settings(settings: &Value) -> String {
+    settings
+        .get("harness")
+        .and_then(|h| h.get("task_provider"))
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .unwrap_or("linear")
+        .to_string()
 }
 
 fn list_subtasks(args: &Value) -> Result<Value, String> {
@@ -488,6 +508,18 @@ mod tests {
             cols: None,
             rows: None,
         }
+    }
+
+    #[test]
+    fn the_active_provider_comes_from_harness_settings() {
+        use super::provider_from_settings;
+        assert_eq!(
+            provider_from_settings(&json!({ "harness": { "task_provider": "azure_devops" } })),
+            "azure_devops"
+        );
+        // A daemon from before the setting only ever had Linear.
+        assert_eq!(provider_from_settings(&json!({ "harness": {} })), "linear");
+        assert_eq!(provider_from_settings(&json!({})), "linear");
     }
 
     #[test]

@@ -44,6 +44,9 @@ pub(crate) struct TasksState {
     pub(crate) error: Option<String>,
     pub(crate) status: Option<String>,
     pub(crate) api_key_input: Entity<SimpleInputState>,
+    /// Organization URL, asked for only by providers whose tokens belong to
+    /// one organization (Azure DevOps).
+    pub(crate) org_url_input: Entity<SimpleInputState>,
     /// Share of the board width given to the Todo lane, 0..1.
     pub(crate) lane_fraction: f32,
     /// Task ids whose sub-tasks are hidden. Collapsed rather than expanded
@@ -180,6 +183,21 @@ pub(crate) struct StartWorkForm {
 /// one entirely and strand its tasks.
 pub(crate) const MIN_LANE_FRACTION: f32 = 0.15;
 
+/// Provider id of Azure DevOps, the one provider that needs an organization
+/// URL next to its token.
+pub(crate) const AZURE_DEVOPS: &str = "azure_devops";
+
+/// Where to get a credential for `provider`, and what it must be allowed to do.
+pub(crate) fn provider_hint(provider: &str) -> &'static str {
+    match provider {
+        AZURE_DEVOPS => {
+            "Azure DevOps → User settings → Personal access tokens. \
+             Scope: Work Items (Read & write)."
+        }
+        _ => "Linear → Settings → Security & access → Personal API keys",
+    }
+}
+
 pub struct HarnessPane {
     pub(crate) client: okena_transport::remote_action::RemoteActionClient,
     /// Lets a view open an overlay — the settings modal, mainly — without
@@ -224,8 +242,29 @@ pub struct PaneContext {
 
 impl HarnessPane {
     pub fn new(section: HarnessSection, ctx: PaneContext, cx: &mut Context<Self>) -> Self {
-        let api_key_input = cx
-            .new(|cx| SimpleInputState::new(cx).placeholder("Paste your Linear personal API key…"));
+        let api_key_input = cx.new(|cx| {
+            SimpleInputState::new(cx).placeholder("Paste your personal API key or access token…")
+        });
+        let org_url_input = cx.new(|cx| {
+            SimpleInputState::new(cx).placeholder("https://dev.azure.com/your-organization")
+        });
+        let provider = crate::settings::settings_entity(cx)
+            .read(cx)
+            .settings
+            .harness
+            .task_provider
+            .clone();
+        // Follow the setting: choosing another provider swaps the whole queue.
+        cx.observe(
+            &crate::settings::settings_entity(cx),
+            |this: &mut Self, settings, cx| {
+                let wanted = settings.read(cx).settings.harness.task_provider.clone();
+                if wanted != this.tasks.provider {
+                    this.switch_provider(wanted, cx);
+                }
+            },
+        )
+        .detach();
         let new_task_title =
             cx.new(|cx| SimpleInputState::new(cx).placeholder("What needs doing?"));
         let new_task_body = cx.new(|cx| {
@@ -254,8 +293,8 @@ impl HarnessPane {
             board_width: Rc::new(RefCell::new(0.0)),
             section,
             tasks: TasksState {
-                provider: "linear".to_string(),
-                provider_display_name: "Linear".to_string(),
+                provider_display_name: tasks_view::provider_label(&provider).to_string(),
+                provider,
                 connection: TaskAuthState::Unknown,
                 tasks: Vec::new(),
                 loading: false,
@@ -263,6 +302,7 @@ impl HarnessPane {
                 error: None,
                 status: None,
                 api_key_input,
+                org_url_input,
                 lane_fraction: 0.5,
                 collapsed: std::collections::HashSet::new(),
                 children: std::collections::HashMap::new(),

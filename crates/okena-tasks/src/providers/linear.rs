@@ -225,6 +225,11 @@ impl LinearProvider {
         match cred {
             Credential::ApiKey(key) => req.header("Authorization", key.clone()),
             Credential::OAuth { access_token, .. } => req.bearer(access_token),
+            // Not a Linear credential; sent as a key so Linear rejects it and
+            // the UI asks for a new one.
+            Credential::PersonalAccessToken { token, .. } => {
+                req.header("Authorization", token.clone())
+            }
         }
     }
 

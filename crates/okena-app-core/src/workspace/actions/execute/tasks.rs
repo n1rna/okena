@@ -64,23 +64,67 @@ pub(super) fn auth_status() -> ActionResult {
 ///
 /// Verify-before-store is the point: a mistyped key that got written would fail
 /// every later call with no obvious cause, and the user would have no signal
-/// that the key — rather than the network — was the problem.
-pub(super) fn connect_api_key(provider: String, api_key: String) -> ActionResult {
+/// that the key — rather than the network — was the problem. For Azure DevOps
+/// the same call checks the organization URL, so a mistyped one is refused too.
+pub(super) fn connect_api_key(
+    provider: String,
+    api_key: String,
+    organization_url: Option<String>,
+) -> ActionResult {
+    use okena_tasks::providers::azure_devops;
+
     let key = api_key.trim().to_string();
     if key.is_empty() {
         return ActionResult::Err("API key is empty".into());
     }
-    // Construct a provider bound to the candidate key without touching disk.
-    let candidate: Box<dyn TaskProvider> = match provider.as_str() {
-        "linear" => Box::new(okena_tasks::LinearProvider::new(Some(Credential::ApiKey(
-            key.clone(),
-        )))),
+    // Construct a provider bound to the candidate credential without touching
+    // disk.
+    let (credential, candidate): (Credential, Box<dyn TaskProvider>) = match provider.as_str() {
+        "linear" => {
+            let credential = Credential::ApiKey(key);
+            let candidate = Box::new(okena_tasks::LinearProvider::new(Some(credential.clone())));
+            (credential, candidate)
+        }
+        azure_devops::PROVIDER_ID => {
+            let url = match azure_devops::normalize_organization_url(
+                organization_url.as_deref().unwrap_or_default(),
+            ) {
+                Ok(url) => url,
+                Err(e) => return ActionResult::Err(e),
+            };
+            let credential = Credential::PersonalAccessToken {
+                token: key,
+                organization_url: url,
+                account: None,
+            };
+            let candidate = Box::new(okena_tasks::AzureDevOpsProvider::new(Some(
+                credential.clone(),
+            )));
+            (credential, candidate)
+        }
         other => return ActionResult::Err(format!("unknown task provider: `{other}`")),
     };
 
     match candidate.list_assigned() {
         Ok(tasks) => {
-            if let Err(e) = okena_tasks::store::save(&provider, &Credential::ApiKey(key)) {
+            // Keep who the token belongs to, learned by the call just made, so
+            // "Connected as …" needs no call of its own later.
+            let credential = match credential {
+                Credential::PersonalAccessToken {
+                    token,
+                    organization_url,
+                    ..
+                } => Credential::PersonalAccessToken {
+                    token,
+                    organization_url,
+                    account: match candidate.auth_status() {
+                        AuthStatus::Connected { account } => account,
+                        _ => None,
+                    },
+                },
+                other => other,
+            };
+            if let Err(e) = okena_tasks::store::save(&provider, &credential) {
                 return ActionResult::Err(format!("could not store credential: {e}"));
             }
             // Re-read through the stored path so the reported status is what a
@@ -528,13 +572,35 @@ mod tests {
         let linear = decoded.provider("linear").expect("linear should be listed");
         assert_eq!(linear.display_name, "Linear");
         assert_eq!(linear.auth, TaskAuthState::Disconnected);
+        let ado = decoded
+            .provider("azure_devops")
+            .expect("azure devops should be listed");
+        assert_eq!(ado.display_name, "Azure DevOps");
+        assert_eq!(ado.auth, TaskAuthState::Disconnected);
     }
 
     #[test]
     fn empty_api_key_is_rejected_before_any_network_call() {
         // Whitespace-only must be caught too — otherwise it reaches Linear as a
         // valid-looking header and fails with a confusing 401 instead.
-        assert!(err_of(connect_api_key("linear".into(), "   ".into())).contains("empty"));
+        assert!(err_of(connect_api_key("linear".into(), "   ".into(), None)).contains("empty"));
+    }
+
+    #[test]
+    fn azure_devops_needs_an_organization_url_before_any_network_call() {
+        let missing = err_of(connect_api_key("azure_devops".into(), "pat".into(), None));
+        assert!(missing.contains("organization URL"), "got: {missing}");
+        // Only Azure DevOps Services: a server install, or a typo'd host, is
+        // refused before a token is sent anywhere.
+        let elsewhere = err_of(connect_api_key(
+            "azure_devops".into(),
+            "pat".into(),
+            Some("https://tfs.contoso.local/tfs".into()),
+        ));
+        assert!(
+            elsewhere.contains("Azure DevOps Services"),
+            "got: {elsewhere}"
+        );
     }
 
     #[test]
@@ -542,7 +608,8 @@ mod tests {
         // A newer client asking an older daemon for a provider it lacks should
         // say so plainly rather than appearing to succeed.
         assert!(
-            err_of(connect_api_key("jira".into(), "k".into())).contains("unknown task provider")
+            err_of(connect_api_key("jira".into(), "k".into(), None))
+                .contains("unknown task provider")
         );
         assert!(err_of(list("jira".into())).contains("unknown task provider"));
     }

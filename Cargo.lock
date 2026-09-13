@@ -6685,6 +6685,7 @@ dependencies = [
 name = "okena-tasks"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "log",
  "okena-core",
  "okena-transport",
