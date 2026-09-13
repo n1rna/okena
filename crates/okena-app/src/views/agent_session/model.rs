@@ -472,10 +472,24 @@ impl AgentSessionInfo {
     }
 }
 
+/// The last `keep` parts of a path, behind an ellipsis when anything was cut.
+///
+/// A working directory is recognised by its end — the worktree folder — while
+/// its start is the same home directory on every row, so the end is what a
+/// narrow panel should spend its width on.
+pub fn short_path(path: &str, keep: usize) -> String {
+    let parts: Vec<&str> = path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    if keep == 0 || parts.len() <= keep {
+        return path.to_string();
+    }
+    format!("…/{}", parts[parts.len() - keep..].join("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AgentSessionInfo, AgentSessionKind, SessionActivity, activity_of, is_related, session_kind,
+        short_path,
     };
     use okena_core::harness::AgentState;
     use okena_core::tasks::{TaskId, TaskRef};
@@ -667,5 +681,20 @@ mod tests {
             AgentSessionKind::Task(task("u1", "QBL-1")).empty_workspace_note()
         );
         assert_eq!(spec.workspace_heading(), "DOCUMENTS");
+    }
+
+    #[test]
+    fn a_long_path_keeps_its_end() {
+        assert_eq!(
+            short_path("/Users/me/p/okena-wt/qbl-372-harness", 2),
+            "…/okena-wt/qbl-372-harness"
+        );
+    }
+
+    #[test]
+    fn a_short_path_is_left_alone() {
+        assert_eq!(short_path("/tmp/x", 2), "/tmp/x");
+        assert_eq!(short_path(r"C:\work", 2), r"C:\work");
+        assert_eq!(short_path(r"C:\work\wt\repo", 2), "…/wt/repo");
     }
 }

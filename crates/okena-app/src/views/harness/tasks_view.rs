@@ -134,6 +134,14 @@ pub(super) fn order_by_hierarchy(
         .collect()
 }
 
+/// Whether a selection outlives a refresh of the list: while its task is still
+/// listed, or while it is the task opened from outside the list, which was
+/// never in it to begin with.
+pub(super) fn selection_survives(selected: &str, tasks: &[Task], opened: Option<&Task>) -> bool {
+    tasks.iter().any(|t| t.id.external_id == selected)
+        || opened.is_some_and(|t| t.id.external_id == selected)
+}
+
 fn slots_len(tasks: &[Task]) -> usize {
     tasks.len()
 }
@@ -548,7 +556,7 @@ pub(super) fn sort_tasks(tasks: &mut [Task], sort: TaskSort) {
 }
 
 /// A provider's name before the daemon has reported its own.
-pub(super) fn provider_label(provider: &str) -> &str {
+pub(crate) fn provider_label(provider: &str) -> &str {
     match provider {
         "linear" => "Linear",
         super::AZURE_DEVOPS => "Azure DevOps",
@@ -573,6 +581,7 @@ impl HarnessPane {
         self.tasks.children.clear();
         self.tasks.children_loading = None;
         self.tasks.selected = None;
+        self.tasks.opened = None;
         self.tasks.checked.clear();
         self.tasks.filter = super::task_filter::TaskFilter::default();
         self.tasks.new_task = None;
@@ -668,7 +677,11 @@ impl HarnessPane {
                             // Leaving it would show detail for a task no
                             // longer in the list.
                             if let Some(id) = this.tasks.selected.clone()
-                                && !this.tasks.tasks.iter().any(|t| t.id.external_id == id)
+                                && !selection_survives(
+                                    &id,
+                                    &this.tasks.tasks,
+                                    this.tasks.opened.as_ref(),
+                                )
                             {
                                 this.tasks.selected = None;
                             }
@@ -1556,6 +1569,62 @@ impl HarnessPane {
     ///
     /// Every path into the detail pane goes through here, so a task reached by
     /// clicking its parent gets the same treatment as one clicked in the list.
+    /// Select a task from outside the view: an agent panel's task card.
+    ///
+    /// The task is often not in the list — the list is the user's own open
+    /// queue, and an agent's task may be a closed epic or somebody else's
+    /// story — so one that is not already known is fetched on its own and
+    /// kept as the opened task. Without that the view opened with nothing
+    /// selected, which looked like the click had missed.
+    pub(crate) fn open_task(
+        &mut self,
+        provider: String,
+        external_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if provider != self.tasks.provider {
+            self.switch_provider(provider.clone(), cx);
+        }
+        self.select_task(external_id.clone(), cx);
+        if self.known_task(&external_id).is_some() {
+            return;
+        }
+
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client
+                    .post_action(ActionRequest::TaskGet {
+                        provider,
+                        task_external_id: external_id,
+                    })
+                    .and_then(|v| v.ok_or_else(|| "Missing task".to_string()))
+                    .and_then(|v| {
+                        serde_json::from_value::<Task>(v).map_err(|e| format!("Invalid task: {e}"))
+                    })
+            })
+            .await;
+
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    match result {
+                        // Only if it is still the one selected: a row clicked
+                        // while the fetch ran is the newer choice.
+                        Ok(task) => {
+                            if this.tasks.selected.as_deref() == Some(task.id.external_id.as_str())
+                            {
+                                this.tasks.opened = Some(task);
+                            }
+                        }
+                        Err(e) => this.report_error(format!("Could not open the task: {e}"), cx),
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn select_task(&mut self, external_id: String, cx: &mut Context<Self>) {
         // The form and a task's detail share the one panel, so picking a row
         // is how you leave the form. Without this, clicking a task while
@@ -1576,6 +1645,7 @@ impl HarnessPane {
             .tasks
             .iter()
             .chain(self.tasks.children.values().flatten())
+            .chain(self.tasks.opened.iter())
             .find(|t| t.id.external_id == external_id)
             .cloned()
     }
@@ -3053,7 +3123,7 @@ impl HarnessPane {
             out = out.child(crate::views::components::render_worktree_card(
                 &summary,
                 |this, id, cx| this.open_session(id.to_string(), cx),
-                |this, id, cx| this.open_diff(id, cx),
+                |this, id, mode, cx| this.open_diff(id, mode, cx),
                 cx,
             ));
         }
@@ -4328,7 +4398,7 @@ mod lane_size_tests {
 #[cfg(test)]
 mod hierarchy_tests {
     // Explicit imports: the `gpui::*` glob shadows `#[test]` with `gpui::test`.
-    use super::order_by_hierarchy;
+    use super::{order_by_hierarchy, selection_survives};
     use okena_core::tasks::{Task, TaskId, TaskKind, TaskState};
 
     fn task(id: &str, parent: Option<&str>) -> Task {
@@ -4398,6 +4468,16 @@ mod hierarchy_tests {
         ];
         let n = input.len();
         assert_eq!(ordered(input).len(), n);
+    }
+
+    #[test]
+    fn a_task_opened_from_outside_the_list_keeps_its_selection() {
+        let listed = vec![task("a", None)];
+        let opened = task("closed-epic", None);
+        assert!(selection_survives("closed-epic", &listed, Some(&opened)));
+        assert!(selection_survives("a", &listed, None));
+        // A selection that is neither listed nor opened still goes.
+        assert!(!selection_survives("gone", &listed, Some(&opened)));
     }
 
     #[test]

@@ -44,6 +44,17 @@ mod tests {
         assert!((0.0..1.0).contains(&identity_hue("session-abc")));
     }
 
+    /// Pinned values, not just "same input, same output" within one run: the
+    /// colour is remembered by the person looking at it, so a change to the
+    /// hash or the step count must fail here rather than quietly repaint
+    /// every row on the next build.
+    #[test]
+    fn hues_are_pinned_across_builds() {
+        assert_eq!(identity_hue("9d519c33-epic"), 2.0 / 12.0);
+        assert_eq!(identity_hue("e209c8e3-story"), 2.0 / 12.0);
+        assert_eq!(identity_hue("session-abc"), 10.0 / 12.0);
+    }
+
     #[test]
     fn keys_are_spread_over_more_than_one_hue() {
         let hues: std::collections::HashSet<u32> = (0..20)

@@ -3,15 +3,19 @@
 //! Shared by the session's own panel and the task detail, which list the same
 //! rows and had drifted into two copies of the same markup.
 //!
-//! A PR row says whether it can merge: conflicts, the CI rollup, the review
-//! decision and unresolved threads, each a compact chip. The CI chip opens the
-//! same checks list the project header's CI popover shows.
+//! Each kind of asset gets the component it calls for, in one shared frame: an
+//! icon for the kind coloured by where it stands, and its actions as icon
+//! buttons. A PR row says whether it can merge: its state, conflicts, the CI
+//! rollup, the review decision and unresolved threads, each a compact chip,
+//! with the PR's page a click away. The CI chip opens the same checks list the
+//! project header's CI popover shows.
 
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::popover::Popover;
 use gpui_component::{Selectable, h_flex, v_flex};
 use okena_core::api::{MergeState, PrInfo, PrReadiness, PrState, ReviewDecision};
+use okena_core::harness::AgentAssetKind;
 use okena_core::session_assets::{DetectedState, SessionAsset};
 use okena_views_git::git_header::{render_ci_checks_header, render_ci_checks_list};
 
@@ -19,46 +23,43 @@ use super::worktree_card::{PushState, chip, ci_chip_style, pr_chip_style};
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::ui_text_ms;
 
-/// Render one produced asset on `bg`. The title opens the row's link.
+/// Render one produced asset on `bg`, as the component its kind calls for.
+///
+/// Every kind shares one frame — an icon for the kind, coloured by where it
+/// stands, a title and caption, and its actions as icon buttons — and differs
+/// in the facts and actions it carries: a PR its state, checks and what is in
+/// the way of merging it; a branch its push state; a task where it stands.
 pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
     let t = theme(cx);
+    let pr_state = pr_state(asset);
 
     let mut chips: Vec<AnyElement> = Vec::new();
-    match &asset.state {
-        Some(DetectedState::LocalOnly) => chips.push(chip("local only".into(), t.warning, cx)),
-        Some(DetectedState::Pushed {
-            unpushed,
-            ahead,
-            behind,
-        }) => {
-            let push = PushState::from_unpushed(Some(*unpushed));
-            chips.push(chip(
-                push.label(),
-                if push.is_pending() {
-                    t.warning
-                } else {
-                    t.success
-                },
-                cx,
-            ));
-            if let Some(counts) = ahead_behind(*ahead, *behind) {
-                chips.push(chip(counts, t.text_muted, cx));
-            }
+    if let Some((number, state)) = &pr_state {
+        let (color, label) = pr_chip_style(*number, state, &t);
+        chips.push(chip(label, color, cx));
+    }
+    if let Some(DetectedState::LocalOnly) = &asset.state {
+        chips.push(chip("local only".into(), t.warning, cx));
+    }
+    if let Some(DetectedState::Pushed {
+        unpushed,
+        ahead,
+        behind,
+    }) = &asset.state
+    {
+        let push = PushState::from_unpushed(Some(*unpushed));
+        chips.push(chip(
+            push.label(),
+            if push.is_pending() {
+                t.warning
+            } else {
+                t.success
+            },
+            cx,
+        ));
+        if let Some(counts) = ahead_behind(*ahead, *behind) {
+            chips.push(chip(counts, t.text_muted, cx));
         }
-        Some(DetectedState::PullRequest { number, state }) => {
-            let (color, label) = pr_chip_style(*number, state, &t);
-            let pr_chip = chip(label, color, cx);
-            // The PR chip opens the PR, like the title does.
-            chips.push(match asset.url.clone() {
-                Some(url) => div()
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| cx.open_url(&url))
-                    .child(pr_chip)
-                    .into_any_element(),
-                None => pr_chip,
-            });
-        }
-        None => {}
     }
     if let Some(pr) = asset.pr.as_ref() {
         for (label, tone) in pr_indicators(pr) {
@@ -71,6 +72,7 @@ pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
             chips.push(chip(label, color, cx));
         }
     }
+    let key = row_key(asset);
     if let Some(summary) = asset.ci.clone() {
         let (color, label) = ci_chip_style(
             &summary.status,
@@ -80,16 +82,6 @@ pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
             &t,
         );
         let pr = asset.pr.clone();
-        let key = asset
-            .url
-            .clone()
-            .or_else(|| {
-                asset
-                    .branch
-                    .as_ref()
-                    .map(|b| format!("{}:{b}", asset.project.as_deref().unwrap_or_default()))
-            })
-            .unwrap_or_else(|| asset.title.clone());
         chips.push(
             Popover::new(SharedString::from(format!("asset-ci-{key}")))
                 .trigger(CiTrigger {
@@ -115,55 +107,225 @@ pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
             cx,
         ));
     }
+    let task_state = crate::views::known_tasks::task_state(asset.task.as_ref(), cx);
+    if asset.kind == AgentAssetKind::Task
+        && let Some(state) = task_state.clone()
+    {
+        chips.push(chip(state, t.text_secondary, cx));
+    }
 
-    // Only the words open the link: the chips below hold a popover of their
-    // own, and a click on the CI chip must not also leave for GitHub.
-    let heading = v_flex()
-        .w_full()
-        .min_w_0()
-        .gap(px(2.0))
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .truncate()
-                .text_size(ui_text_ms(cx))
-                .text_color(rgb(t.text_primary))
-                .child(asset.title.clone()),
-        )
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .truncate()
-                .text_size(ui_text_ms(cx))
-                .text_color(rgb(t.text_muted))
-                .child(subtitle(
-                    asset,
-                    crate::views::known_tasks::task_state(asset.task.as_ref(), cx).as_deref(),
-                )),
-        )
-        .when_some(asset.url.clone(), |heading, url| {
-            heading
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |_, _window, cx| cx.open_url(&url))
-        });
+    let icon_color = match (&asset.kind, &pr_state, &asset.state) {
+        (_, Some((_, state)), _) => pr_chip_style(0, state, &t).0,
+        (_, None, Some(DetectedState::LocalOnly)) => t.warning,
+        (_, None, Some(DetectedState::Pushed { unpushed, .. })) if *unpushed > 0 => t.warning,
+        (_, None, Some(DetectedState::Pushed { .. })) => t.success,
+        _ => t.text_muted,
+    };
+
+    let buttons: Vec<AnyElement> = actions(asset)
+        .into_iter()
+        .enumerate()
+        .map(|(i, action)| {
+            let (icon, tip) = match &action {
+                Action::Open { label, .. } => ("icons/external-link.svg", *label),
+                Action::Copy { label, .. } => ("icons/copy.svg", *label),
+            };
+            okena_ui::icon_button::icon_button_sized(
+                SharedString::from(format!("asset-action-{key}-{i}")),
+                icon,
+                22.0,
+                13.0,
+                &t,
+            )
+            .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip).build(window, cx))
+            .on_click(move |_, _window, cx| match &action {
+                Action::Open { url, .. } => cx.open_url(url),
+                Action::Copy { text, done, .. } => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                    crate::workspace::toast::ToastManager::success(*done, cx);
+                }
+            })
+            .into_any_element()
+        })
+        .collect();
 
     v_flex()
         .w_full()
         .min_w_0()
-        .gap(px(2.0))
+        .gap(px(4.0))
         .px(px(8.0))
-        .py(px(5.0))
-        .rounded(px(4.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
         .bg(rgb(bg))
         .border_1()
         .border_color(rgb(t.border))
-        .child(heading)
+        .child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .items_start()
+                .gap(px(7.0))
+                .child(
+                    svg()
+                        .path(kind_icon(&asset.kind))
+                        .flex_shrink_0()
+                        .mt(px(2.0))
+                        .size(px(13.0))
+                        .text_color(rgb(icon_color)),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(1.0))
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_primary))
+                                .child(asset.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child(subtitle(asset, task_state.as_deref())),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .gap(px(2.0))
+                        .children(buttons),
+                ),
+        )
         .when(!chips.is_empty(), |row| {
-            row.child(h_flex().gap(px(4.0)).flex_wrap().children(chips))
+            row.child(
+                h_flex()
+                    .pl(px(20.0))
+                    .gap(px(4.0))
+                    .flex_wrap()
+                    .children(chips),
+            )
         })
         .into_any_element()
+}
+
+/// A stable id fragment for one row, for element ids and the CI popover.
+fn row_key(asset: &SessionAsset) -> String {
+    asset
+        .url
+        .clone()
+        .or_else(|| {
+            asset
+                .branch
+                .as_ref()
+                .map(|b| format!("{}:{b}", asset.project.as_deref().unwrap_or_default()))
+        })
+        .unwrap_or_else(|| asset.title.clone())
+}
+
+/// The pull request's number and state, from the poll when it saw one, else
+/// from the PR okena looked up for a registered row.
+fn pr_state(asset: &SessionAsset) -> Option<(u32, PrState)> {
+    match &asset.state {
+        Some(DetectedState::PullRequest { number, state }) => Some((*number, state.clone())),
+        _ => asset.pr.as_ref().map(|p| (p.number, p.state.clone())),
+    }
+}
+
+fn kind_icon(kind: &AgentAssetKind) -> &'static str {
+    match kind {
+        AgentAssetKind::PullRequest => "icons/git-pull-request.svg",
+        AgentAssetKind::Branch => "icons/git-branch.svg",
+        AgentAssetKind::Document => "icons/file.svg",
+        AgentAssetKind::Task => "icons/bookmark.svg",
+        AgentAssetKind::Other => "icons/link.svg",
+    }
+}
+
+/// Something a row's icon button does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Action {
+    /// Open a link in the browser.
+    Open { url: String, label: &'static str },
+    /// Put text on the clipboard, and say so.
+    Copy {
+        text: String,
+        label: &'static str,
+        done: &'static str,
+    },
+}
+
+/// The actions a row offers, in the order they are shown, by kind: a PR and
+/// a task open their page, a branch copies its name — there is no page for a
+/// branch worth leaving okena for, but its name is what you paste next.
+fn actions(asset: &SessionAsset) -> Vec<Action> {
+    let link = |preferred: Option<&str>| {
+        preferred
+            .filter(|u| !u.is_empty())
+            .map(str::to_string)
+            .or_else(|| asset.url.clone().filter(|u| !u.is_empty()))
+    };
+    let mut out = Vec::new();
+    match asset.kind {
+        AgentAssetKind::PullRequest => {
+            if let Some(url) = link(asset.pr.as_ref().map(|p| p.url.as_str())) {
+                out.push(Action::Copy {
+                    text: url.clone(),
+                    label: "Copy link",
+                    done: "Copied the pull request link",
+                });
+                out.push(Action::Open {
+                    url,
+                    label: "Open pull request",
+                });
+            }
+        }
+        AgentAssetKind::Branch => {
+            if let Some(branch) = asset.branch.clone().filter(|b| !b.is_empty()) {
+                out.push(Action::Copy {
+                    text: branch,
+                    label: "Copy branch name",
+                    done: "Copied the branch name",
+                });
+            }
+            if let Some(url) = link(None) {
+                out.push(Action::Open {
+                    url,
+                    label: "Open branch",
+                });
+            }
+        }
+        AgentAssetKind::Task => {
+            if let Some(url) = link(asset.task.as_ref().map(|t| t.url.as_str())) {
+                out.push(Action::Copy {
+                    text: url.clone(),
+                    label: "Copy link",
+                    done: "Copied the task link",
+                });
+                out.push(Action::Open {
+                    url,
+                    label: "Open task",
+                });
+            }
+        }
+        AgentAssetKind::Document | AgentAssetKind::Other => {
+            if let Some(url) = link(None) {
+                out.push(Action::Open {
+                    url,
+                    label: "Open link",
+                });
+            }
+        }
+    }
+    out
 }
 
 /// The CI chip, as a popover trigger: a chip that stays lit while its checks
@@ -255,10 +417,11 @@ fn readiness_indicators(readiness: &PrReadiness) -> Vec<(String, Tone)> {
     out
 }
 
-/// Kind, repo and — when the title does not already say it — branch. The link
-/// only when there is no repo to name, as the only place it came from.
+/// Task, repo and — when the title does not already say it — branch. The link
+/// only when there is no repo to name, as the only place it came from. Not
+/// the kind: the row's icon already says it.
 fn subtitle(asset: &SessionAsset, task_state: Option<&str>) -> String {
-    let mut parts = vec![asset.kind.label().to_string()];
+    let mut parts = Vec::new();
     parts.extend(task_caption(asset, task_state));
     parts.extend(asset.project.clone());
     if let Some(branch) = asset.branch.as_ref().filter(|b| **b != asset.title) {
@@ -300,7 +463,9 @@ fn ahead_behind(ahead: Option<usize>, behind: Option<usize>) -> Option<String> {
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{Tone, ahead_behind, pr_indicators, readiness_indicators, subtitle};
+    use super::{
+        Action, Tone, actions, ahead_behind, pr_indicators, readiness_indicators, subtitle,
+    };
     use okena_core::api::{MergeState, PrInfo, PrReadiness, PrState, ReviewDecision};
     use okena_core::harness::AgentAssetKind;
     use okena_core::session_assets::SessionAsset;
@@ -441,11 +606,11 @@ mod tests {
             parent_id: None,
             parent_key: None,
         });
-        assert_eq!(subtitle(&row, None), "PR · QBL-374 · okena");
+        assert_eq!(subtitle(&row, None), "QBL-374 · okena");
         // Once okena has heard where the task stands, it follows the key.
         assert_eq!(
             subtitle(&row, Some("In Progress")),
-            "PR · QBL-374 · In Progress · okena"
+            "QBL-374 · In Progress · okena"
         );
     }
 
@@ -453,7 +618,7 @@ mod tests {
     fn a_state_without_a_task_says_nothing() {
         assert_eq!(
             subtitle(&asset("Detect assets", None, Some("okena")), Some("Done")),
-            "PR · okena"
+            "okena"
         );
     }
 
@@ -461,11 +626,11 @@ mod tests {
     fn the_branch_is_named_only_when_the_title_does_not_already() {
         assert_eq!(
             subtitle(&asset("feat/x", Some("feat/x"), Some("okena")), None),
-            "PR · okena"
+            "okena"
         );
         assert_eq!(
             subtitle(&asset("Detect assets", Some("feat/x"), Some("okena")), None),
-            "PR · okena · feat/x"
+            "okena · feat/x"
         );
     }
 
@@ -473,7 +638,7 @@ mod tests {
     fn the_link_stands_in_for_a_missing_repo() {
         assert_eq!(
             subtitle(&asset("Detect assets", None, None), None),
-            "PR · https://github.com/o/r/pull/1"
+            "https://github.com/o/r/pull/1"
         );
     }
 
@@ -482,5 +647,66 @@ mod tests {
         assert_eq!(ahead_behind(Some(2), Some(1)).as_deref(), Some("↑2 ↓1"));
         assert_eq!(ahead_behind(Some(0), Some(3)).as_deref(), Some("↓3"));
         assert_eq!(ahead_behind(Some(0), None), None);
+    }
+
+    #[test]
+    fn a_pr_offers_its_page_and_its_link() {
+        let row = asset("Detect assets", None, Some("okena"));
+        assert_eq!(
+            actions(&row),
+            [
+                Action::Copy {
+                    text: "https://github.com/o/r/pull/1".into(),
+                    label: "Copy link",
+                    done: "Copied the pull request link",
+                },
+                Action::Open {
+                    url: "https://github.com/o/r/pull/1".into(),
+                    label: "Open pull request",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_branch_copies_its_name_and_has_no_page_without_a_link() {
+        let mut row = asset("feat/x", Some("feat/x"), Some("okena"));
+        row.kind = AgentAssetKind::Branch;
+        row.url = None;
+        assert_eq!(
+            actions(&row),
+            [Action::Copy {
+                text: "feat/x".into(),
+                label: "Copy branch name",
+                done: "Copied the branch name",
+            }]
+        );
+    }
+
+    #[test]
+    fn a_task_opens_its_own_url_before_the_rows() {
+        let mut row = asset("Fix it", None, None);
+        row.kind = AgentAssetKind::Task;
+        row.url = Some("https://example.com/other".into());
+        row.task = Some(okena_core::tasks::TaskRef {
+            id: okena_core::tasks::TaskId::new("linear", "u1"),
+            display_key: "QBL-1".into(),
+            title: "Fix it".into(),
+            url: "https://linear.app/x/issue/QBL-1".into(),
+            parent_id: None,
+            parent_key: None,
+        });
+        assert!(actions(&row).contains(&Action::Open {
+            url: "https://linear.app/x/issue/QBL-1".into(),
+            label: "Open task",
+        }));
+    }
+
+    #[test]
+    fn nothing_to_open_offers_nothing() {
+        let mut row = asset("Notes", None, None);
+        row.kind = AgentAssetKind::Document;
+        row.url = None;
+        assert!(actions(&row).is_empty());
     }
 }

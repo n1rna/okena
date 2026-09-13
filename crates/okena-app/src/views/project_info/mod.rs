@@ -326,7 +326,17 @@ impl ProjectInfoPanel {
     }
 
     /// Show what changed in a checkout.
-    fn open_diff(&mut self, project_id: &str, cx: &mut Context<Self>) {
-        crate::views::components::project_nav::open_diff(&self.request_broker, project_id, cx);
+    fn open_diff(
+        &mut self,
+        project_id: &str,
+        mode: Option<okena_core::types::DiffMode>,
+        cx: &mut Context<Self>,
+    ) {
+        crate::views::components::project_nav::open_diff(
+            &self.request_broker,
+            project_id,
+            mode,
+            cx,
+        );
     }
 }

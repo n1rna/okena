@@ -39,8 +39,18 @@ impl HarnessPane {
     }
 
     /// Show what changed in a worktree.
-    pub(super) fn open_diff(&self, project_id: &str, cx: &mut App) {
-        crate::views::components::project_nav::open_diff(&self.request_broker, project_id, cx);
+    pub(super) fn open_diff(
+        &self,
+        project_id: &str,
+        mode: Option<okena_core::types::DiffMode>,
+        cx: &mut App,
+    ) {
+        crate::views::components::project_nav::open_diff(
+            &self.request_broker,
+            project_id,
+            mode,
+            cx,
+        );
     }
 
     /// A small secondary button, used across the harness views.

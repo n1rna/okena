@@ -28,6 +28,7 @@ use std::rc::Rc;
 
 pub use editor::EDITOR_CONTEXT;
 pub use okena_core::harness::HarnessSection;
+pub(crate) use tasks_view::provider_label;
 
 /// Tasks-view state. Grouped so the pane struct stays readable as more views
 /// grow their own state.
@@ -61,6 +62,11 @@ pub(crate) struct TasksState {
     pub(crate) children_loading: Option<String>,
     /// The task shown in the detail pane, by provider id.
     pub(crate) selected: Option<String>,
+    /// A task opened from outside the list — an agent panel's task card —
+    /// fetched on its own, since it is often not in the user's queue at all:
+    /// a closed epic, or somebody else's story. Kept so the detail can show
+    /// it and a refresh does not drop its selection.
+    pub(crate) opened: Option<Task>,
     /// The selected task's description, parsed as Markdown.
     pub(crate) description: markdown::MarkdownCache,
     /// Sections folded shut in the list. Collapsed rather than expanded state,
@@ -377,6 +383,7 @@ impl HarnessPane {
                 children: std::collections::HashMap::new(),
                 children_loading: None,
                 selected: None,
+                opened: None,
                 description: markdown::MarkdownCache::default(),
                 sections_collapsed: std::collections::HashSet::new(),
                 breaking_down: None,

@@ -218,4 +218,11 @@ pub enum WorkbenchRequest {
     /// root discovery keyed `root_key`. How the project info panel opens a
     /// project map's docs.
     OpenKnowledgeDoc { root_key: String, path: String },
+    /// Open Harness → Tasks with one task selected, by its provider and its
+    /// id there. How an agent panel's task card opens the task it works on —
+    /// often one that is not in the list, like a closed epic.
+    OpenTask {
+        provider: String,
+        external_id: String,
+    },
 }
