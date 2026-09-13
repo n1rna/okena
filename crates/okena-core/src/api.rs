@@ -1713,6 +1713,9 @@ pub enum ActionRequest {
         url: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        /// Branch the asset is on, so it merges into the branch okena detects.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     /// Set the free-text status an agent reports for its session.
     AgentReportStatus {

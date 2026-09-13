@@ -381,7 +381,10 @@ fn tool_definitions() -> Value {
             "name": "okena_register_asset",
             "description":
                 "Record something this agent produced — a pull request, branch or \
-                 document — against its session. Appends; call once per asset.",
+                 document — against its session. Appends; call once per asset. \
+                 Branches and pull requests of the task's worktrees are detected \
+                 without this; registering one anyway (by `url`, or by `branch` \
+                 and `project`) gives it your title.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -396,6 +399,10 @@ fn tool_definitions() -> Value {
                         "type": "string",
                         "description":
                             "Repo it landed in, when the agent spans several projects."
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Branch it is on, when it is on one."
                     }
                 },
                 "required": ["kind", "title"],
@@ -966,6 +973,11 @@ fn parse_state(raw: &str) -> Result<&'static str, String> {
         })
 }
 
+/// Whether a daemon refused an action for carrying `field`, which it predates.
+fn rejects_field(error: &str, field: &str) -> bool {
+    error.contains(&format!("unknown field `{field}`"))
+}
+
 fn register_asset(args: &Value) -> Result<Value, String> {
     let kind = args
         .get("kind")
@@ -986,7 +998,7 @@ fn register_asset(args: &Value) -> Result<Value, String> {
         "kind": kind,
         "title": title,
     });
-    for key in ["url", "project"] {
+    for key in ["url", "project", "branch"] {
         if let Some(v) = args
             .get(key)
             .and_then(|v| v.as_str())
@@ -996,7 +1008,17 @@ fn register_asset(args: &Value) -> Result<Value, String> {
         }
     }
 
-    let response = super::api_action(&token, &body.to_string())?;
+    let response = match super::api_action(&token, &body.to_string()) {
+        // A daemon from before `branch` refuses the whole action over it. One
+        // still running after a self-update should not lose the asset.
+        Err(error) if body.get("branch").is_some() && rejects_field(&error, "branch") => {
+            if let Some(fields) = body.as_object_mut() {
+                fields.remove("branch");
+            }
+            super::api_action(&token, &body.to_string())?
+        }
+        other => other?,
+    };
     Ok(json!({ "ok": true, "response": response }))
 }
 
@@ -1197,5 +1219,15 @@ mod tests {
                 "advertised tool {name} was rejected as unknown by dispatch"
             );
         }
+    }
+
+    #[test]
+    fn only_a_daemon_that_predates_the_field_is_retried_without_it() {
+        // What an older daemon's axum body rejection surfaces as.
+        let older = "Server returned 422 Unprocessable Entity: Failed to deserialize the JSON \
+                     body into the target type: unknown field `branch`, expected one of `url`";
+        assert!(super::rejects_field(older, "branch"));
+        assert!(!super::rejects_field(older, "project"));
+        assert!(!super::rejects_field("project not found: s1", "branch"));
     }
 }

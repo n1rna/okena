@@ -32,3 +32,5 @@ pub use ui_helpers::{
     search_input_area, search_input_area_selected,
 };
 pub use worktree_card::{WorktreeSummary, render_worktree_card};
+pub mod asset_row;
+pub use asset_row::render_asset_row;

@@ -139,10 +139,45 @@ pub struct AgentAsset {
     /// than inheriting the session's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// Branch it is on, so okena can merge it into the branch it detects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// Unix millis, stamped by the daemon on receipt. Agents have no reliable
     /// clock agreement with the host, so their timestamps are not trusted.
     #[serde(default)]
     pub created_at: u64,
+}
+
+/// A pull request whose worktree has been removed.
+///
+/// Detected assets are otherwise derived from the live checkouts, so this is
+/// the one thing a session has to remember: with the worktree gone there is
+/// nothing left to poll by branch. While open, the daemon's git poller
+/// refreshes it by repo and number. Once merged or closed it stays as a
+/// tombstone — never polled, never listed — so an asset the agent registered
+/// for the same PR is retired with it instead of lingering without state.
+#[derive(Clone, Debug, PartialEq, Eq, Ser, De)]
+pub struct TrackedPullRequest {
+    /// Repo label, as the worktree's row showed it.
+    pub project: String,
+    /// The parent repo's checkout, which still resolves the GitHub remote and
+    /// credentials after the worktree is gone.
+    pub repo_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub number: u32,
+    pub url: String,
+    pub state: crate::api::PrState,
+}
+
+impl TrackedPullRequest {
+    /// Merged or closed: a tombstone, no longer polled or listed.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self.state,
+            crate::api::PrState::Merged | crate::api::PrState::Closed
+        )
+    }
 }
 
 /// Where an agent says it is, as distinct from what its terminal shows.
@@ -223,8 +258,14 @@ pub struct AgentSessionState {
     /// What it suggests you tell it next.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<AgentSuggestion>,
+    /// What the agent registered over MCP. Branches and PRs okena detects are
+    /// not stored here — see `crate::session_assets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets: Vec<AgentAsset>,
+    /// PRs of this session's removed worktrees: an open one until it closes,
+    /// and a merged or closed one only while a registered asset names it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracked_prs: Vec<TrackedPullRequest>,
 }
 
 #[cfg(test)]
@@ -299,6 +340,7 @@ mod agent_tests {
             title: "Add harness".into(),
             url: Some("https://github.com/x/y/pull/12".into()),
             project: Some("okena".into()),
+            branch: None,
             created_at: 42,
         };
         let back: AgentAsset =

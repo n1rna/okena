@@ -15,6 +15,7 @@ pub mod render_probe;
 pub mod review;
 pub mod selection;
 pub mod send_payload;
+pub mod session_assets;
 pub mod shell;
 pub mod soft_close;
 pub mod specs;

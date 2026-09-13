@@ -1191,6 +1191,10 @@ fn now_millis() -> u64 {
 }
 
 /// Record an asset an agent produced.
+///
+/// Appended as reported. Branches and PRs okena detects for the same work are
+/// not stored at all; the two are merged when the session's list is read.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn register_asset(
     ws: &mut Workspace,
     project_id: String,
@@ -1198,6 +1202,7 @@ pub(super) fn register_asset(
     title: String,
     url: Option<String>,
     project: Option<String>,
+    branch: Option<String>,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let title = title.trim().to_string();
@@ -1215,6 +1220,9 @@ pub(super) fn register_asset(
         title,
         url: url.filter(|u| !u.trim().is_empty()),
         project: project.filter(|p| !p.trim().is_empty()),
+        branch: branch
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty()),
         created_at: now_millis(),
     };
 

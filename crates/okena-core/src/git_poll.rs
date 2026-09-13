@@ -48,6 +48,9 @@ struct ProjectSchedule {
     ci_revalidate_cycle: u64,
     /// Fetch on the next pass without waiting for the cadence tick.
     urgent: bool,
+    /// Fetch just the PR on the next pass. Unlike `urgent`, it asks nothing of
+    /// CI and does not make a hidden project count as shown.
+    pr_urgent: bool,
 }
 
 impl Default for ProjectSchedule {
@@ -60,6 +63,7 @@ impl Default for ProjectSchedule {
             settled_ci_sha: None,
             ci_revalidate_cycle: 0,
             urgent: false,
+            pr_urgent: false,
         }
     }
 }
@@ -80,6 +84,14 @@ impl GithubPollSchedule {
         entry.ci_revalidate_cycle = 0;
     }
 
+    /// Fetch this project's PR as soon as possible, and nothing else: its CI
+    /// stays on its own schedule, and the project is not treated as shown.
+    pub fn force_pr(&mut self, id: &str) {
+        let entry = self.entry(id);
+        entry.pr_urgent = true;
+        entry.next_pr_cycle = 0;
+    }
+
     /// A project became relevant. Only worth an off-cadence fetch when the
     /// caller holds no PR/CI result for it — otherwise the cached badge is
     /// still good and the cadence will refresh it.
@@ -97,13 +109,32 @@ impl GithubPollSchedule {
 
     /// Whether any project wants an off-cadence fetch right now.
     pub fn has_urgent(&self) -> bool {
-        self.projects.values().any(|entry| entry.urgent)
+        self.projects
+            .values()
+            .any(|entry| entry.urgent || entry.pr_urgent)
     }
 
     pub fn pr_due(&self, id: &str, cycle: u64, cadence_due: bool) -> bool {
         match self.projects.get(id) {
-            Some(entry) => entry.urgent || (cadence_due && cycle >= entry.next_pr_cycle),
+            Some(entry) => {
+                entry.urgent || entry.pr_urgent || (cadence_due && cycle >= entry.next_pr_cycle)
+            }
             None => cadence_due && cycle >= ProjectSchedule::default().next_pr_cycle,
+        }
+    }
+
+    /// Like [`pr_due`](Self::pr_due), but on the cadence tick at most once
+    /// every `every` cycles since the last fetch went out. For a PR that is
+    /// only watched in case a new one replaces it.
+    pub fn pr_due_every(&self, id: &str, cycle: u64, cadence_due: bool, every: u64) -> bool {
+        match self.projects.get(id) {
+            Some(entry) => {
+                let last_dispatch = entry.next_pr_cycle.saturating_sub(PR_POLL_EVERY_N_CYCLES);
+                entry.urgent
+                    || entry.pr_urgent
+                    || (cadence_due && cycle >= last_dispatch.saturating_add(every))
+            }
+            None => self.pr_due(id, cycle, cadence_due),
         }
     }
 
@@ -132,6 +163,7 @@ impl GithubPollSchedule {
         let entry = self.entry(id);
         entry.next_pr_cycle = cycle + PR_POLL_EVERY_N_CYCLES;
         entry.urgent = false;
+        entry.pr_urgent = false;
     }
 
     pub fn ci_dispatched(&mut self, id: &str, cycle: u64) {
@@ -144,6 +176,7 @@ impl GithubPollSchedule {
         let entry = self.entry(id);
         entry.next_pr_cycle = cycle + PR_POLL_EVERY_N_CYCLES;
         entry.urgent = false;
+        entry.pr_urgent = false;
     }
 
     /// A CI fetch came back. `pending` drives this project's own cadence, and a
@@ -202,6 +235,11 @@ impl GithubPollSchedule {
         self.projects.get(id).is_some_and(|entry| entry.urgent)
     }
 
+    /// Whether this project asked for a PR-only fetch that hasn't gone out.
+    pub fn is_pr_urgent(&self, id: &str) -> bool {
+        self.projects.get(id).is_some_and(|entry| entry.pr_urgent)
+    }
+
     fn entry(&mut self, id: &str) -> &mut ProjectSchedule {
         self.projects.entry(id.to_string()).or_default()
     }
@@ -213,6 +251,9 @@ pub struct GitPollTrigger {
     pub project_id: Option<String>,
     pub poll_github: bool,
     pub invalidate_github: bool,
+    /// `project_id` is an agent session: fetch the PRs of the worktrees linked
+    /// to it now, rather than of the session itself.
+    pub linked_worktrees: bool,
 }
 
 impl GitPollTrigger {
@@ -221,6 +262,7 @@ impl GitPollTrigger {
             project_id: Some(project_id),
             poll_github: false,
             invalidate_github: false,
+            linked_worktrees: false,
         }
     }
 
@@ -229,6 +271,7 @@ impl GitPollTrigger {
             project_id: Some(project_id),
             poll_github: true,
             invalidate_github: true,
+            linked_worktrees: false,
         }
     }
 
@@ -237,6 +280,19 @@ impl GitPollTrigger {
             project_id: Some(project_id),
             poll_github: true,
             invalidate_github: false,
+            linked_worktrees: false,
+        }
+    }
+
+    /// An agent session registered an asset. Its worktrees' PRs are fetched
+    /// now, so a PR it just opened is matched instead of listed twice until
+    /// the next PR cadence.
+    pub fn linked_worktrees(session_id: String) -> Self {
+        Self {
+            project_id: Some(session_id),
+            poll_github: true,
+            invalidate_github: false,
+            linked_worktrees: true,
         }
     }
 
@@ -245,6 +301,7 @@ impl GitPollTrigger {
             project_id: None,
             poll_github: false,
             invalidate_github: false,
+            linked_worktrees: false,
         }
     }
 }
@@ -272,6 +329,9 @@ pub fn git_poll_trigger_for_action(action: &ActionRequest) -> Option<GitPollTrig
             show: true,
             ..
         } => Some(GitPollTrigger::project_visible(project_id.clone())),
+        ActionRequest::AgentRegisterAsset { project_id, .. } => {
+            Some(GitPollTrigger::linked_worktrees(project_id.clone()))
+        }
         _ => None,
     }
 }
@@ -328,6 +388,22 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn registering_an_asset_polls_the_sessions_worktrees() {
+        let trigger = git_poll_trigger_for_action(&ActionRequest::AgentRegisterAsset {
+            project_id: "session".to_string(),
+            kind: "pull_request".to_string(),
+            title: "t".to_string(),
+            url: None,
+            project: None,
+            branch: None,
+        })
+        .expect("registering an asset creates trigger");
+        assert_eq!(trigger.project_id.as_deref(), Some("session"));
+        assert!(trigger.linked_worktrees);
+        assert!(!trigger.invalidate_github);
     }
 
     #[test]
@@ -459,5 +535,44 @@ mod tests {
         schedule.retain(&HashSet::from(["kept".to_string()]));
         assert_eq!(schedule.ci_skip_sha("gone", 11), None);
         assert_eq!(schedule.ci_skip_sha("kept", 11).as_deref(), Some("def"));
+    }
+
+    #[test]
+    fn a_pr_only_force_leaves_ci_and_visibility_alone() {
+        let mut schedule = GithubPollSchedule::default();
+        schedule.record_pr("p1", 10);
+        schedule.record_ci("p1", 10, false, Some("abc".into()));
+
+        schedule.force_pr("p1");
+        assert!(schedule.pr_due("p1", 11, false));
+        assert!(schedule.has_urgent());
+        assert!(schedule.is_pr_urgent("p1"));
+        assert!(!schedule.is_urgent("p1"), "not treated as shown");
+        assert!(!schedule.ci_due("p1", 11, false));
+        assert_eq!(schedule.ci_skip_sha("p1", 11).as_deref(), Some("abc"));
+
+        schedule.pr_dispatched("p1", 11);
+        assert!(!schedule.is_pr_urgent("p1"));
+        assert!(!schedule.has_urgent());
+    }
+
+    #[test]
+    fn a_slow_pr_poll_waits_its_own_interval() {
+        let mut schedule = GithubPollSchedule::default();
+        schedule.pr_dispatched("p1", 10);
+
+        assert!(!schedule.pr_due_every("p1", 22, true, 120));
+        assert!(
+            schedule.pr_due("p1", 22, true),
+            "the normal cadence would be due"
+        );
+        assert!(schedule.pr_due_every("p1", 130, true, 120));
+        assert!(!schedule.pr_due_every("p1", 130, false, 120));
+
+        schedule.force_pr("p1");
+        assert!(
+            schedule.pr_due_every("p1", 23, false, 120),
+            "a force still jumps it"
+        );
     }
 }
