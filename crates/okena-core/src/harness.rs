@@ -180,6 +180,10 @@ pub struct TrackedPullRequest {
     /// Mergeability and reviews as last read with the PR, while it is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<crate::api::PrReadiness>,
+    /// The last read left readiness out, because the repo rejected it
+    /// recently. See [`PrInfo::readiness_unavailable`](crate::api::PrInfo).
+    #[serde(default, skip_serializing_if = "crate::api::is_false")]
+    pub readiness_unavailable: bool,
 }
 
 impl TrackedPullRequest {

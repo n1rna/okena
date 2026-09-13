@@ -217,6 +217,12 @@ pub struct PrInfo {
     /// report it. Draft is `state`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<PrReadiness>,
+    /// Readiness was not asked for this time: the repo rejected the fields
+    /// recently, so okena asks without them until it checks again. Lets a row
+    /// say so instead of passing for a clean PR with no reviews. Only set while
+    /// the PR is open or a draft.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub readiness_unavailable: bool,
 }
 
 /// What stands between a pull request and merging it.
@@ -235,7 +241,7 @@ pub struct PrReadiness {
     pub threads_truncated: bool,
 }
 
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !*value
 }
 
@@ -2343,6 +2349,7 @@ mod tests {
                 number: 7,
                 base: Some("main".into()),
                 readiness: None,
+                readiness_unavailable: false,
             }),
             ci_checks: Some(CiCheckSummary {
                 status: CiStatus::Failure,

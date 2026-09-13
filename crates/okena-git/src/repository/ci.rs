@@ -5,9 +5,9 @@
 //! HTTP bus ([`super::github`]) instead of a subprocess per query. The payload
 //! mapping is pure and unit-tested. `list_pull_requests` still shells out to `gh`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use okena_core::process::{command, safe_output_with_timeout};
 use serde_json::{Value, json};
@@ -135,7 +135,8 @@ const READINESS_FIELDS: &str = "mergeable mergeStateStatus reviewDecision \
 /// Where [`READINESS_FIELDS`] go in a PR lookup query.
 const READINESS_SLOT: &str = "__READINESS__";
 
-/// Field names an error has to mention to be blamed on [`READINESS_FIELDS`].
+/// The fields of [`READINESS_FIELDS`] a rejection has to point at to be
+/// blamed on them.
 const READINESS_FIELD_NAMES: [&str; 4] = [
     "mergeable",
     "mergeStateStatus",
@@ -143,11 +144,55 @@ const READINESS_FIELD_NAMES: [&str; 4] = [
     "reviewThreads",
 ];
 
-/// Hosts that rejected [`READINESS_FIELDS`] — an older GitHub Enterprise, or a
-/// token not allowed to read them. Asked without them from then on, so the PR
-/// badge never goes missing over fields the host cannot give.
-static READINESS_UNSUPPORTED: parking_lot::Mutex<Option<HashSet<String>>> =
+/// How long a repo that rejected [`READINESS_FIELDS`] is asked without them
+/// before they are tried again. Long enough not to double every PR request on
+/// a GitHub Enterprise that lacks them, short enough that a rejection that
+/// no longer holds — a token since widened, a server since upgraded — heals
+/// without a restart.
+const READINESS_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// Repos whose PR lookups rejected [`READINESS_FIELDS`] — an older GitHub
+/// Enterprise, or a token not allowed to read them there — and since when.
+/// Asked without them until [`READINESS_RETRY_AFTER`] has passed, so the PR
+/// badge never goes missing over fields the repo cannot give.
+static READINESS_UNSUPPORTED: parking_lot::Mutex<Option<ReadinessMarks>> =
     parking_lot::Mutex::new(None);
+
+/// Repos marked as rejecting [`READINESS_FIELDS`], by [`readiness_key`], with
+/// when they were marked.
+#[derive(Debug, Default)]
+struct ReadinessMarks(HashMap<String, Instant>);
+
+impl ReadinessMarks {
+    /// Whether `key` is still marked at `now`. A mark past
+    /// [`READINESS_RETRY_AFTER`] is dropped, so the fields are asked again.
+    fn is_marked(&mut self, key: &str, now: Instant) -> bool {
+        match self.0.get(key) {
+            Some(since) if now.saturating_duration_since(*since) < READINESS_RETRY_AFTER => true,
+            Some(_) => {
+                self.0.remove(key);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn mark(&mut self, key: &str, now: Instant) {
+        self.0.insert(key.to_string(), now);
+    }
+
+    /// Forget `key`'s mark. Returns whether there was one.
+    fn clear(&mut self, key: &str) -> bool {
+        self.0.remove(key).is_some()
+    }
+}
+
+/// What a mark is kept against: the host and the repo, so one repo — or a
+/// token kept away from one — says nothing about the rest of the host. Folded
+/// the way GitHub folds owner and repo names.
+fn readiness_key(repo: &GithubRepo) -> String {
+    format!("{}/{}/{}", repo.host, repo.owner, repo.name).to_ascii_lowercase()
+}
 
 /// A PR lookup query with or without [`READINESS_FIELDS`].
 fn render_query(query: &str, with_readiness: bool) -> String {
@@ -157,39 +202,118 @@ fn render_query(query: &str, with_readiness: bool) -> String {
     )
 }
 
-/// Whether a GraphQL rejection is about [`READINESS_FIELDS`].
-fn errors_name_readiness(errors: &[String]) -> bool {
-    errors.iter().any(|message| {
-        READINESS_FIELD_NAMES
-            .iter()
-            .any(|field| message.contains(field))
-    })
+/// Whether a GraphQL rejection is GitHub refusing [`READINESS_FIELDS`]
+/// themselves: a schema that lacks one (`undefinedField`, naming it in
+/// `extensions.fieldName` or its `path`), or a token not allowed to read one
+/// (`FORBIDDEN`, with a `path` through it). The message is never read — a
+/// timeout or a server error can mention a field name too.
+fn errors_reject_readiness(errors: &[Value]) -> bool {
+    errors.iter().any(rejects_readiness)
 }
 
-/// Run a PR lookup with the readiness fields, unless `host` is known to
-/// reject them. A rejection that names them is retried once without them, and
-/// remembered.
+fn rejects_readiness(error: &Value) -> bool {
+    let is_readiness =
+        |name: Option<&str>| name.is_some_and(|name| READINESS_FIELD_NAMES.contains(&name));
+    let is = |kind: &str| {
+        error.get("type").and_then(Value::as_str) == Some(kind)
+            || error.pointer("/extensions/code").and_then(Value::as_str) == Some(kind)
+    };
+    let through_readiness = error
+        .get("path")
+        .and_then(Value::as_array)
+        .is_some_and(|path| path.iter().any(|segment| is_readiness(segment.as_str())));
+    let names_readiness = is_readiness(
+        error
+            .pointer("/extensions/fieldName")
+            .and_then(Value::as_str),
+    );
+    (is("undefinedField") && (names_readiness || through_readiness))
+        || (is("FORBIDDEN") && through_readiness)
+}
+
+/// A PR lookup's answer, and whether readiness was left out of the question.
+#[derive(Debug, PartialEq)]
+struct PrAnswer {
+    data: Value,
+    readiness_withheld: bool,
+}
+
+/// Run a PR lookup with the readiness fields, unless `repo` rejected them
+/// recently. A rejection of the fields themselves is retried once without
+/// them, and remembered for [`READINESS_RETRY_AFTER`].
 fn pr_graphql(
     client: &mut GithubClient,
-    host: &str,
+    repo: &GithubRepo,
     query: &str,
     variables: Value,
-) -> Result<Value, ApiError> {
-    let supported = !READINESS_UNSUPPORTED
+) -> Result<PrAnswer, ApiError> {
+    pr_graphql_with(
+        client,
+        repo,
+        query,
+        variables,
+        &READINESS_UNSUPPORTED,
+        Instant::now(),
+    )
+}
+
+/// [`pr_graphql`] against `marks`, at `now`.
+fn pr_graphql_with(
+    client: &mut GithubClient,
+    repo: &GithubRepo,
+    query: &str,
+    variables: Value,
+    marks: &parking_lot::Mutex<Option<ReadinessMarks>>,
+    now: Instant,
+) -> Result<PrAnswer, ApiError> {
+    let key = readiness_key(repo);
+    let ask = !marks
         .lock()
-        .as_ref()
-        .is_some_and(|hosts| hosts.contains(host));
-    match client.graphql(&render_query(query, supported), variables.clone()) {
-        Err(ApiError::Failed) if supported && errors_name_readiness(client.last_errors()) => {
-            log::warn!("{host} rejects PR mergeability and review fields; asking without them");
-            READINESS_UNSUPPORTED
-                .lock()
-                .get_or_insert_with(HashSet::new)
-                .insert(host.to_string());
-            client.graphql(&render_query(query, false), variables)
+        .get_or_insert_with(Default::default)
+        .is_marked(&key, now);
+    match client.graphql(&render_query(query, ask), variables.clone()) {
+        Ok(data) => {
+            // The fields came back: whatever was marked no longer holds.
+            if ask
+                && marks
+                    .lock()
+                    .get_or_insert_with(Default::default)
+                    .clear(&key)
+            {
+                log::info!("{key} serves PR mergeability and review fields again");
+            }
+            Ok(PrAnswer {
+                data,
+                readiness_withheld: !ask,
+            })
         }
-        other => other,
+        Err(ApiError::Failed) if ask && errors_reject_readiness(client.last_errors()) => {
+            log::warn!(
+                "{key} rejects PR mergeability and review fields; asking without them for {} minutes",
+                READINESS_RETRY_AFTER.as_secs() / 60
+            );
+            marks
+                .lock()
+                .get_or_insert_with(Default::default)
+                .mark(&key, now);
+            client
+                .graphql(&render_query(query, false), variables)
+                .map(|data| PrAnswer {
+                    data,
+                    readiness_withheld: true,
+                })
+        }
+        Err(error) => Err(error),
     }
+}
+
+/// Say on an open PR that readiness was left out of its lookup, so a row can
+/// tell that apart from a PR with nothing in its way.
+fn with_readiness_withheld(mut pr: crate::PrInfo, withheld: bool) -> crate::PrInfo {
+    pr.readiness_unavailable = withheld
+        && pr.readiness.is_none()
+        && matches!(pr.state, crate::PrState::Open | crate::PrState::Draft);
+    pr
 }
 
 /// The `pullRequests.nodes[]` entry of [`PR_LOOKUP_QUERY`].
@@ -228,19 +352,25 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
     };
 
     let variables = json!({ "owner": repo.owner, "repo": repo.name, "headBranch": branch });
-    match pr_graphql(&mut client, &repo.host, PR_LOOKUP_QUERY, variables) {
+    match pr_graphql(&mut client, &repo, PR_LOOKUP_QUERY, variables) {
         Err(ApiError::RateLimited) => PrFetch::RateLimited,
         Err(ApiError::Failed) => PrFetch::Failed,
         // The repository is gone, or this token can no longer see it.
         Err(ApiError::NotFound) => PrFetch::Fetched(None),
-        Ok(data) => {
+        Ok(PrAnswer {
+            data,
+            readiness_withheld,
+        }) => {
             let node = data
                 .pointer("/repository/pullRequests/nodes/0")
                 .cloned()
                 .and_then(|node| serde_json::from_value::<PrNode>(node).ok());
-            PrFetch::Fetched(node.and_then(|node| {
-                pr_info_from_node(node, current_sha.as_deref(), pushed_sha.as_deref())
-            }))
+            PrFetch::Fetched(
+                node.and_then(|node| {
+                    pr_info_from_node(node, current_sha.as_deref(), pushed_sha.as_deref())
+                })
+                .map(|pr| with_readiness_withheld(pr, readiness_withheld)),
+            )
         }
     }
 }
@@ -276,13 +406,16 @@ pub fn fetch_pr_by_number_with_head(repo_path: &Path, number: u32) -> (PrFetch, 
         return (PrFetch::Failed, None);
     };
     let variables = json!({ "owner": repo.owner, "repo": repo.name, "number": number });
-    match pr_graphql(&mut client, &repo.host, PR_BY_NUMBER_QUERY, variables) {
+    match pr_graphql(&mut client, &repo, PR_BY_NUMBER_QUERY, variables) {
         Err(ApiError::RateLimited) => (PrFetch::RateLimited, None),
         Err(ApiError::Failed) => (PrFetch::Failed, None),
         // GitHub's answer for a deleted PR or repository, or one this token
         // can no longer see: it is gone, as far as anyone here can tell.
         Err(ApiError::NotFound) => (PrFetch::Fetched(None), None),
-        Ok(data) => {
+        Ok(PrAnswer {
+            data,
+            readiness_withheld,
+        }) => {
             let node = data
                 .pointer("/repository/pullRequest")
                 .cloned()
@@ -291,7 +424,10 @@ pub fn fetch_pr_by_number_with_head(repo_path: &Path, number: u32) -> (PrFetch, 
                 .as_ref()
                 .and_then(|node| node.head_ref_name.clone())
                 .filter(|branch| !branch.is_empty());
-            (PrFetch::Fetched(node.and_then(pr_info_of)), head)
+            let pr = node
+                .and_then(pr_info_of)
+                .map(|pr| with_readiness_withheld(pr, readiness_withheld));
+            (PrFetch::Fetched(pr), head)
         }
     }
 }
@@ -537,6 +673,7 @@ fn pr_info_of(node: PrNode) -> Option<crate::PrInfo> {
         number: node.number,
         base,
         readiness,
+        readiness_unavailable: false,
     })
 }
 
@@ -1921,14 +2058,235 @@ mod tests {
         }
     }
 
+    /// GitHub's validation error for a field its schema lacks, as an older
+    /// GitHub Enterprise sends it.
+    fn undefined_field(field: &str) -> serde_json::Value {
+        serde_json::json!({
+            "path": ["query PullRequestList", "repository", "pullRequests", "nodes", field],
+            "extensions": { "code": "undefinedField", "typeName": "PullRequest", "fieldName": field },
+            "locations": [{ "line": 10, "column": 50 }],
+            "message": format!("Field '{field}' doesn't exist on type 'PullRequest'"),
+        })
+    }
+
     #[test]
-    fn only_a_rejection_naming_the_readiness_fields_drops_them() {
-        assert!(super::errors_name_readiness(&[
-            "Field 'reviewThreads' doesn't exist on type 'PullRequest'".to_string()
-        ]));
-        assert!(!super::errors_name_readiness(&[
-            "Could not resolve to a Repository with the name 'me/okena'.".to_string()
-        ]));
-        assert!(!super::errors_name_readiness(&[]));
+    fn only_github_refusing_a_readiness_field_is_blamed_on_it() {
+        assert!(super::errors_reject_readiness(&[undefined_field(
+            "reviewThreads"
+        )]));
+        // A token not allowed to read one, on this repo.
+        assert!(super::errors_reject_readiness(&[serde_json::json!({
+            "type": "FORBIDDEN",
+            "path": ["repository", "pullRequest", "reviewThreads"],
+            "message": "Resource not accessible by integration",
+        })]));
+
+        // Failures that merely mention a field are not about it.
+        for error in [
+            serde_json::json!({ "message": "Timeout on reviewThreads, mergeable" }),
+            serde_json::json!({
+                "type": "SERVICE_UNAVAILABLE",
+                "path": ["repository", "pullRequest"],
+                "message": "Something went wrong while resolving 'mergeStateStatus'",
+            }),
+            serde_json::json!({
+                "type": "FORBIDDEN",
+                "path": ["repository"],
+                "message": "reviewDecision: Resource not accessible by integration",
+            }),
+            undefined_field("somethingElse"),
+        ] {
+            assert!(!super::errors_reject_readiness(&[error.clone()]), "{error}");
+        }
+        assert!(!super::errors_reject_readiness(&[]));
+    }
+
+    fn repo(owner: &str, name: &str) -> crate::repository::github::GithubRepo {
+        crate::repository::github::GithubRepo {
+            host: "github.com".into(),
+            owner: owner.into(),
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn a_mark_is_per_repo_and_expires() {
+        let start = std::time::Instant::now();
+        let ghes = super::readiness_key(&repo("Old", "Server"));
+        let other = super::readiness_key(&repo("old", "other"));
+        let mut marks = super::ReadinessMarks::default();
+        marks.mark(&ghes, start);
+
+        let hour = super::READINESS_RETRY_AFTER;
+        assert!(marks.is_marked(&ghes, start + hour / 2));
+        assert!(
+            marks.is_marked("github.com/old/server", start),
+            "owner and name fold case"
+        );
+        assert!(!marks.is_marked(&other, start), "another repo is untouched");
+        assert!(!marks.is_marked(&ghes, start + hour), "asked again after");
+        assert!(!marks.clear(&ghes), "and the expired mark is gone");
+    }
+
+    /// A GraphQL mock that rejects the readiness fields as unknown for the
+    /// `rejecting` owner while `reject` holds, fails once with a message naming
+    /// a field for the `flaky` owner, and otherwise answers with an open PR.
+    /// Counts the requests that asked for the fields.
+    struct Mock {
+        reject: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        asked_with_fields: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        _mock: okena_transport::http::testing::MockGuard,
+    }
+
+    fn mock() -> Mock {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let reject = Arc::new(AtomicBool::new(true));
+        let asked_with_fields = Arc::new(AtomicUsize::new(0));
+        let flaked = Arc::new(AtomicBool::new(false));
+        let (reject_in, asked_in) = (reject.clone(), asked_with_fields.clone());
+        let _mock = okena_transport::http::testing::mock(move |req| {
+            let body = req.json_body().cloned().unwrap_or_default();
+            let query = body["query"].as_str().unwrap_or_default();
+            let owner = body["variables"]["owner"].as_str().unwrap_or_default();
+            let with_fields = query.contains("reviewThreads");
+            if with_fields {
+                asked_in.fetch_add(1, Ordering::SeqCst);
+            }
+            let errors = if owner == "rejecting" && with_fields && reject_in.load(Ordering::SeqCst)
+            {
+                Some(undefined_field("reviewThreads"))
+            } else if owner == "flaky" && !flaked.swap(true, Ordering::SeqCst) {
+                Some(serde_json::json!({
+                    "type": "SERVICE_UNAVAILABLE",
+                    "message": "Timeout while resolving reviewThreads",
+                }))
+            } else {
+                None
+            };
+            let body = match errors {
+                Some(error) => serde_json::json!({ "errors": [error] }),
+                None => serde_json::json!({ "data": { "repository": { "pullRequest": {
+                    "url": "https://github.com/o/r/pull/7", "state": "OPEN", "number": 7,
+                }}}}),
+            };
+            Ok(crate::repository::github::tests::response(
+                200,
+                &[],
+                &body.to_string(),
+            ))
+        });
+        Mock {
+            reject,
+            asked_with_fields,
+            _mock,
+        }
+    }
+
+    fn ask(
+        repo: &crate::repository::github::GithubRepo,
+        marks: &parking_lot::Mutex<Option<super::ReadinessMarks>>,
+        now: std::time::Instant,
+    ) -> Result<bool, super::ApiError> {
+        let mut client = super::GithubClient::with_token("github.com", "tok");
+        let variables = serde_json::json!({ "owner": repo.owner, "repo": repo.name, "number": 7 });
+        super::pr_graphql_with(
+            &mut client,
+            repo,
+            super::PR_BY_NUMBER_QUERY,
+            variables,
+            marks,
+            now,
+        )
+        .map(|answer| answer.readiness_withheld)
+    }
+
+    fn marked(
+        marks: &parking_lot::Mutex<Option<super::ReadinessMarks>>,
+        repo: &crate::repository::github::GithubRepo,
+        now: std::time::Instant,
+    ) -> bool {
+        marks
+            .lock()
+            .get_or_insert_with(Default::default)
+            .is_marked(&super::readiness_key(repo), now)
+    }
+
+    #[test]
+    fn a_failure_that_names_a_field_does_not_switch_readiness_off() {
+        let _guard = crate::repository::github::tests::mock_guard();
+        let _mock = mock();
+        let marks = parking_lot::Mutex::new(None);
+        let now = std::time::Instant::now();
+        let flaky = repo("flaky", "r");
+
+        assert_eq!(ask(&flaky, &marks, now), Err(super::ApiError::Failed));
+        assert!(!marked(&marks, &flaky, now));
+        // The next poll asks for the fields again, and gets them.
+        assert_eq!(ask(&flaky, &marks, now), Ok(false));
+    }
+
+    #[test]
+    fn a_repo_that_rejects_the_fields_is_asked_without_them_until_it_is_rechecked() {
+        use std::sync::atomic::Ordering;
+        let _guard = crate::repository::github::tests::mock_guard();
+        let mock = mock();
+        let marks = parking_lot::Mutex::new(None);
+        let start = std::time::Instant::now();
+        let rejecting = repo("rejecting", "r");
+        let healthy = repo("healthy", "r");
+
+        // Rejected, retried without the fields: the PR still comes back,
+        // saying readiness was left out.
+        assert_eq!(ask(&rejecting, &marks, start), Ok(true));
+        assert!(marked(&marks, &rejecting, start));
+        assert_eq!(mock.asked_with_fields.load(Ordering::SeqCst), 1);
+
+        // Within the hour it is not asked for, and another repo on the same
+        // host still is.
+        assert_eq!(ask(&rejecting, &marks, start), Ok(true));
+        assert_eq!(mock.asked_with_fields.load(Ordering::SeqCst), 1);
+        assert_eq!(ask(&healthy, &marks, start), Ok(false));
+        assert_eq!(mock.asked_with_fields.load(Ordering::SeqCst), 2);
+
+        // An hour on, and the repo serves them now: asked again, and the mark
+        // is gone.
+        mock.reject.store(false, Ordering::SeqCst);
+        let later = start + super::READINESS_RETRY_AFTER;
+        assert_eq!(ask(&rejecting, &marks, later), Ok(false));
+        assert!(
+            marks
+                .lock()
+                .as_mut()
+                .is_some_and(|m| !m.clear(&super::readiness_key(&rejecting)))
+        );
+    }
+
+    #[test]
+    fn a_success_with_the_fields_clears_a_mark() {
+        let _guard = crate::repository::github::tests::mock_guard();
+        let _mock = mock();
+        let healthy = repo("healthy", "r");
+        let start = std::time::Instant::now();
+        let marks = parking_lot::Mutex::new(Some(super::ReadinessMarks::default()));
+        let key = super::readiness_key(&healthy);
+        // Marked long enough ago to be asked again, but not yet dropped.
+        marks.lock().as_mut().expect("marks").mark(&key, start);
+        let later = start + super::READINESS_RETRY_AFTER;
+        assert_eq!(ask(&healthy, &marks, later), Ok(false));
+        assert!(!marks.lock().as_mut().expect("marks").clear(&key));
+    }
+
+    #[test]
+    fn readiness_left_out_is_said_only_on_an_open_pr_without_it() {
+        let open: serde_json::Value = open_node(serde_json::json!({}));
+        let pr = super::pr_info_of(serde_json::from_value(open).expect("node")).expect("pr");
+        assert!(super::with_readiness_withheld(pr.clone(), true).readiness_unavailable);
+        assert!(!super::with_readiness_withheld(pr.clone(), false).readiness_unavailable);
+        let merged = crate::PrInfo {
+            state: crate::PrState::Merged,
+            ..pr
+        };
+        assert!(!super::with_readiness_withheld(merged, true).readiness_unavailable);
     }
 }
