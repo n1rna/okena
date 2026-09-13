@@ -82,6 +82,14 @@ fn ensure_defaults(registry: &Path) {
     });
 }
 
+/// okena's defaults store on disk, materialized and registered first.
+pub(super) fn defaults_store() -> std::path::PathBuf {
+    ensure_defaults(&registry::registry_path(&get_config_dir()));
+    get_config_dir()
+        .join("knowledge")
+        .join(prompts::defaults::DEFAULT_STORE_DIR)
+}
+
 fn execute_at(
     registry: &Path,
     action: &ActionRequest,

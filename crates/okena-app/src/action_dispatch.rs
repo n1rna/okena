@@ -1074,6 +1074,25 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::KnowledgeStoreCommit { .. }
         | ActionRequest::KnowledgeStorePush { .. }
         | ActionRequest::KnowledgeDraft { .. }) => passthrough,
+        // Project ids are client-side and must be stripped for the daemon.
+        ActionRequest::ProjectScan {
+            project_id,
+            agent_command,
+        } => ActionRequest::ProjectScan {
+            project_id: s(&project_id),
+            agent_command,
+        },
+        ActionRequest::ProjectMapRead { project_id } => ActionRequest::ProjectMapRead {
+            project_id: s(&project_id),
+        },
+        ActionRequest::ProjectsScan {
+            project_ids,
+            agent_command,
+        } => ActionRequest::ProjectsScan {
+            project_ids: project_ids.iter().map(|id| s(id)).collect(),
+            agent_command,
+        },
+        ActionRequest::ProjectLinks => ActionRequest::ProjectLinks,
         // Task actions carry provider ids, not okena ids, so they cross
         // unchanged.
         ActionRequest::TaskContainers { provider } => ActionRequest::TaskContainers { provider },

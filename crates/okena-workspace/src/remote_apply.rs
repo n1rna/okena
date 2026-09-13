@@ -195,6 +195,7 @@ pub fn apply_remote_snapshot(
                     existing.task_ref = api_project.task_ref.clone();
                     existing.spec_change = api_project.spec_change.clone();
                     existing.knowledge_root = api_project.knowledge_root.clone();
+                    existing.project_scan = api_project.project_scan.clone();
                     existing.task_draft = api_project.task_draft.clone();
                     existing.custom_session = api_project.custom_session.clone();
                     existing.agent = api_project.agent.clone();
@@ -267,6 +268,7 @@ pub fn apply_remote_snapshot(
                         task_ref: api_project.task_ref.clone(),
                         spec_change: api_project.spec_change.clone(),
                         knowledge_root: api_project.knowledge_root.clone(),
+                        project_scan: api_project.project_scan.clone(),
                         task_draft: api_project.task_draft.clone(),
                         custom_session: api_project.custom_session.clone(),
                         agent: api_project.agent.clone(),
@@ -567,6 +569,7 @@ mod tests {
             task_ref: None,
             spec_change: None,
             knowledge_root: None,
+            project_scan: None,
             task_draft: None,
             custom_session: None,
             agent: None,

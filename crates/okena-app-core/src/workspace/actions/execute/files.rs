@@ -964,6 +964,7 @@ mod entry_mutation_tests {
             task_ref: None,
             spec_change: None,
             knowledge_root: None,
+            project_scan: None,
             task_draft: None,
             custom_session: None,
             agent: None,

@@ -64,7 +64,7 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-remote-client` | Remote client connection manager |
 | `okena-services` | Docker Compose, port detection |
 | `okena-openspec` | OpenSpec on disk, CLI-compatible: store registry (with the CLI's lock), store identity, root discovery, planning tree, store setup. GPUI-free. |
-| `okena-knowledge` | Knowledge stores on disk (ADR-0003): store identity, project `.okena/knowledge.yaml`, okena's per-profile store registry, discovery, the entry tree (docs/skills/agents/templates), clone/fetch/fast-forward sync and store setup over `okena-git`. GPUI-free. |
+| `okena-knowledge` | Knowledge stores on disk (ADR-0003): store identity, project `.okena/knowledge.yaml`, okena's per-profile store registry, discovery, the entry tree (docs/skills/agents/templates), clone/fetch/fast-forward sync and store setup over `okena-git`, launch prompts and built-in skills, and project maps (`project-map.yaml`, ADR-0005) read and validated. GPUI-free. |
 | `okena-extensions` | Extension system |
 | `okena-ext-claude` | Claude AI extension |
 | `okena-ext-codex` | Codex extension |

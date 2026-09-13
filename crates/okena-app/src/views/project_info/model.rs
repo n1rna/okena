@@ -5,6 +5,7 @@
 
 use crate::workspace::state::{ProjectData, Workspace};
 use okena_core::api::{CiStatus, PrState};
+use okena_core::project_map::{Interface, InterfaceKind, ProjectMap};
 use std::collections::HashSet;
 
 /// Git facts for one checkout: branch, diff, divergence, PR and pipeline.
@@ -104,6 +105,27 @@ impl ProjectInfo {
     }
 }
 
+/// A map's interfaces grouped by type: types in [`InterfaceKind::all`] order,
+/// each group in manifest order, empty types left out.
+pub(super) fn group_interfaces(list: &[Interface]) -> Vec<(InterfaceKind, Vec<&Interface>)> {
+    InterfaceKind::all()
+        .into_iter()
+        .filter_map(|kind| {
+            let items: Vec<&Interface> = list.iter().filter(|i| i.kind == kind).collect();
+            (!items.is_empty()).then_some((kind, items))
+        })
+        .collect()
+}
+
+/// The names of the areas `ids` names, in order: a label where the map has
+/// one, the id itself otherwise.
+pub(super) fn area_labels(map: &ProjectMap, ids: &[String]) -> String {
+    ids.iter()
+        .map(|id| map.area(id).map_or(id.as_str(), |a| a.label()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Tasks a project has work in flight for: its own, when one was started on the
 /// project itself, and those of the worktrees open against it.
 pub(super) fn task_ids<'a>(
@@ -144,9 +166,57 @@ pub(super) fn sessions_working(
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{sessions_working, task_ids};
+    use super::{area_labels, group_interfaces, sessions_working, task_ids};
     use crate::workspace::state::ProjectData;
+    use okena_core::project_map::{InterfaceKind, ProjectMap};
     use std::collections::HashSet;
+
+    fn map(json: serde_json::Value) -> ProjectMap {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn interfaces_group_by_type_in_a_fixed_order_keeping_manifest_order() {
+        let m = map(serde_json::json!({
+            "version": 1,
+            "project": { "name": "api", "description": "d" },
+            "consumes": [
+                { "type": "package", "name": "@acme/money" },
+                { "type": "http", "name": "accounts/v1" },
+                { "type": "package", "name": "@acme/log" },
+            ],
+        }));
+        let groups: Vec<(InterfaceKind, Vec<&str>)> = group_interfaces(&m.consumes)
+            .into_iter()
+            .map(|(kind, items)| (kind, items.iter().map(|i| i.name.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (InterfaceKind::Http, vec!["accounts/v1"]),
+                (InterfaceKind::Package, vec!["@acme/money", "@acme/log"]),
+            ]
+        );
+        assert!(group_interfaces(&m.exposes).is_empty());
+    }
+
+    #[test]
+    fn areas_are_named_by_label_else_id() {
+        let m = map(serde_json::json!({
+            "version": 1,
+            "project": { "name": "api", "description": "d" },
+            "areas": [
+                { "id": "billing", "name": "Billing", "description": "d", "paths": ["src"] },
+                { "id": "http", "description": "d", "paths": ["src"] },
+            ],
+        }));
+        let ids = [
+            "billing".to_string(),
+            "http".to_string(),
+            "gone".to_string(),
+        ];
+        assert_eq!(area_labels(&m, &ids), "Billing, http, gone");
+    }
 
     fn project(json: serde_json::Value) -> ProjectData {
         serde_json::from_value(json).unwrap()

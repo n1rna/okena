@@ -10,6 +10,7 @@ pub mod knowledge;
 pub mod latency_probe;
 pub mod process;
 pub mod profiles;
+pub mod project_map;
 pub mod render_probe;
 pub mod review;
 pub mod selection;

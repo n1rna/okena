@@ -214,4 +214,8 @@ pub enum WorkbenchRequest {
     /// Open the harness view as a tab in the main area (or focus it if the tab
     /// is already open).
     OpenHarnessView(okena_core::harness::HarnessSection),
+    /// Open Harness → Knowledge on one document: `path` inside the knowledge
+    /// root discovery keyed `root_key`. How the project info panel opens a
+    /// project map's docs.
+    OpenKnowledgeDoc { root_key: String, path: String },
 }
