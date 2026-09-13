@@ -11,7 +11,7 @@
 //! this crate owns the client side — auth and the per-platform providers.
 //!
 //! - [`provider`] — the `TaskProvider` trait every platform implements.
-//! - [`providers`] — concrete implementations (Linear today).
+//! - [`providers`] — concrete implementations (Linear, Azure DevOps).
 //! - [`store`] — per-profile credential persistence.
 
 pub mod provider;
@@ -20,7 +20,7 @@ pub mod store;
 
 pub use okena_core::tasks::{Task, TaskId, TaskRef, TaskState};
 pub use provider::{AuthStatus, Credential, TaskError, TaskProvider};
-pub use providers::LinearProvider;
+pub use providers::{AzureDevOpsProvider, LinearProvider};
 
 /// Build the provider for `provider_id` using whatever credential is stored for
 /// it, or `None` when the id is unknown.
@@ -31,9 +31,15 @@ pub use providers::LinearProvider;
 pub fn provider_for(provider_id: &str) -> Option<Box<dyn TaskProvider>> {
     match provider_id {
         "linear" => Some(Box::new(LinearProvider::new(store::load("linear")))),
+        providers::azure_devops::PROVIDER_ID => Some(Box::new(AzureDevOpsProvider::new(
+            store::load(providers::azure_devops::PROVIDER_ID),
+        ))),
         _ => None,
     }
 }
 
 /// Provider ids this build knows about, in display order.
-pub const KNOWN_PROVIDERS: &[&str] = &["linear"];
+pub const KNOWN_PROVIDERS: &[&str] = &["linear", providers::azure_devops::PROVIDER_ID];
+
+/// The provider the harness uses when settings name none.
+pub const DEFAULT_PROVIDER: &str = "linear";

@@ -295,8 +295,40 @@ pub(super) fn sort_tasks(tasks: &mut [Task], sort: TaskSort) {
     }
 }
 
+/// A provider's name before the daemon has reported its own.
+pub(super) fn provider_label(provider: &str) -> &str {
+    match provider {
+        "linear" => "Linear",
+        super::AZURE_DEVOPS => "Azure DevOps",
+        other => other,
+    }
+}
+
 impl HarnessPane {
     // ─── Data ────────────────────────────────────────────────────────────────
+
+    /// Point the view at another provider.
+    ///
+    /// Everything read from the old one goes — tasks, breakdowns, selection,
+    /// filters — since none of it means anything to the new one, and a queue
+    /// briefly mixing the two would be exactly what one-provider-at-a-time
+    /// rules out.
+    pub(super) fn switch_provider(&mut self, provider: String, cx: &mut Context<Self>) {
+        self.tasks.provider_display_name = provider_label(&provider).to_string();
+        self.tasks.provider = provider;
+        self.tasks.connection = TaskAuthState::Unknown;
+        self.tasks.tasks.clear();
+        self.tasks.children.clear();
+        self.tasks.children_loading = None;
+        self.tasks.selected = None;
+        self.tasks.filter = super::task_filter::TaskFilter::default();
+        self.tasks.new_task = None;
+        self.tasks.start_form = None;
+        self.tasks.error = None;
+        self.tasks.status = None;
+        self.refresh_auth(cx);
+        cx.notify();
+    }
 
     /// Which providers are connected. Local to the daemon — no network call.
     pub(super) fn refresh_auth(&mut self, cx: &mut Context<Self>) {
@@ -415,7 +447,14 @@ impl HarnessPane {
     pub(super) fn connect(&mut self, cx: &mut Context<Self>) {
         let api_key = self.tasks.api_key_input.read(cx).value().trim().to_string();
         if api_key.is_empty() {
-            self.tasks.error = Some("Enter an API key first".to_string());
+            self.tasks.error = Some("Enter an API key or token first".to_string());
+            cx.notify();
+            return;
+        }
+        let organization_url = (self.tasks.provider == super::AZURE_DEVOPS)
+            .then(|| self.tasks.org_url_input.read(cx).value().trim().to_string());
+        if organization_url.as_deref() == Some("") {
+            self.tasks.error = Some("Enter your organization URL first".to_string());
             cx.notify();
             return;
         }
@@ -431,7 +470,11 @@ impl HarnessPane {
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 client
-                    .post_action(ActionRequest::TasksConnectApiKey { provider, api_key })
+                    .post_action(ActionRequest::TasksConnectApiKey {
+                        provider,
+                        api_key,
+                        organization_url,
+                    })
                     .and_then(|v| v.ok_or_else(|| "Missing connect result".to_string()))
             })
             .await;
@@ -1892,6 +1935,7 @@ impl HarnessPane {
     fn render_connect(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
         let expired = self.tasks.connection == TaskAuthState::Expired;
+        let needs_org = self.tasks.provider == super::AZURE_DEVOPS;
 
         v_flex()
             .gap(px(10.0))
@@ -1903,7 +1947,7 @@ impl HarnessPane {
                     .text_color(rgb(t.text_primary))
                     .child(if expired {
                         format!(
-                            "Your {} credential was rejected. Paste a new key to reconnect.",
+                            "Your {} credential was rejected. Paste a new one to reconnect.",
                             self.tasks.provider_display_name
                         )
                     } else {
@@ -1917,8 +1961,20 @@ impl HarnessPane {
                 div()
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_secondary))
-                    .child("Linear → Settings → Security & access → Personal API keys"),
+                    .child(super::provider_hint(&self.tasks.provider)),
             )
+            .when(needs_org, |d| {
+                d.child(
+                    okena_ui::input::input_container(&t, None)
+                        .w_full()
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .child(
+                            SimpleInput::new(&self.tasks.org_url_input)
+                                .text_size(ui_text(13.0, cx)),
+                        ),
+                )
+            })
             .child(
                 okena_ui::input::input_container(&t, None)
                     .w_full()

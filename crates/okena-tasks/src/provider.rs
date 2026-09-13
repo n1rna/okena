@@ -22,14 +22,27 @@ pub enum Credential {
         /// Expiry as a Unix timestamp in seconds, when the provider states one.
         expires_at: Option<u64>,
     },
+    /// A personal access token that is only meaningful against one
+    /// organization — Azure DevOps. A bare key cannot say where to send it,
+    /// which is why this is not an `ApiKey`.
+    PersonalAccessToken {
+        token: String,
+        /// Normalized organization root, e.g. `https://dev.azure.com/contoso`.
+        organization_url: String,
+        /// Who the token belongs to, recorded when it was verified so the
+        /// settings page can say "Connected as …" without a network call.
+        account: Option<String>,
+    },
 }
 
 impl Credential {
-    /// The bearer value to send.
+    /// The secret to send. How it is framed on the wire (raw, `Bearer`,
+    /// `Basic`) is the provider's business.
     pub fn bearer(&self) -> &str {
         match self {
             Credential::ApiKey(k) => k,
             Credential::OAuth { access_token, .. } => access_token,
+            Credential::PersonalAccessToken { token, .. } => token,
         }
     }
 
@@ -37,7 +50,7 @@ impl Credential {
     /// slack so a token that dies mid-flight is refreshed first.
     pub fn is_expired(&self, now_unix: u64, skew_secs: u64) -> bool {
         match self {
-            Credential::ApiKey(_) => false,
+            Credential::ApiKey(_) | Credential::PersonalAccessToken { .. } => false,
             Credential::OAuth { expires_at, .. } => {
                 expires_at.is_some_and(|e| now_unix.saturating_add(skew_secs) >= e)
             }
@@ -54,6 +67,9 @@ impl fmt::Debug for CredentialRedacted<'_> {
             Credential::OAuth { expires_at, .. } => {
                 write!(f, "OAuth(<redacted>, expires_at={expires_at:?})")
             }
+            Credential::PersonalAccessToken {
+                organization_url, ..
+            } => write!(f, "PersonalAccessToken(<redacted>, {organization_url})"),
         }
     }
 }
@@ -293,5 +309,14 @@ mod tests {
         let c = Credential::ApiKey("super-secret".into());
         let rendered = format!("{:?}", CredentialRedacted(&c));
         assert!(!rendered.contains("super-secret"), "leaked: {rendered}");
+
+        let pat = Credential::PersonalAccessToken {
+            token: "super-secret".into(),
+            organization_url: "https://dev.azure.com/contoso".into(),
+            account: None,
+        };
+        let rendered = format!("{:?}", CredentialRedacted(&pat));
+        assert!(!rendered.contains("super-secret"), "leaked: {rendered}");
+        assert!(!pat.is_expired(u64::MAX, 0));
     }
 }

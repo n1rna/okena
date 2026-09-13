@@ -36,6 +36,8 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum Method {
     Get,
     Post,
+    /// Partial update. Azure DevOps takes work item edits as a JSON Patch.
+    Patch,
 }
 
 impl Method {
@@ -43,6 +45,7 @@ impl Method {
         match self {
             Method::Get => "GET",
             Method::Post => "POST",
+            Method::Patch => "PATCH",
         }
     }
 }
@@ -100,6 +103,14 @@ impl HttpRequest {
 
     pub fn post(url: impl Into<String>) -> Self {
         Self::new(Method::Post, url)
+    }
+
+    pub fn patch(url: impl Into<String>) -> Self {
+        Self::new(Method::Patch, url)
+    }
+
+    pub fn method(&self) -> Method {
+        self.method
     }
 
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
@@ -168,6 +179,18 @@ impl HttpRequest {
         }
     }
 
+    /// The body set via [`body`](Self::body), with its content type, so a test
+    /// mock can check a payload that is not plain JSON.
+    pub fn raw_body(&self) -> Option<(&str, &str)> {
+        match &self.body {
+            Body::Raw {
+                content_type,
+                bytes,
+            } => Some((content_type, std::str::from_utf8(bytes).ok()?)),
+            _ => None,
+        }
+    }
+
     /// Client-side rate floor: the bus admits this call site to the network at
     /// most once per `interval`, keyed by [`label`](Self::label) (or the URL if
     /// unset). A call arriving sooner is short-circuited with
@@ -203,6 +226,7 @@ impl HttpRequest {
         let method = match self.method {
             Method::Get => reqwest::Method::GET,
             Method::Post => reqwest::Method::POST,
+            Method::Patch => reqwest::Method::PATCH,
         };
         let mut builder = client.request(method, &self.url);
         for (name, value) in &self.headers {

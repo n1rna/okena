@@ -878,6 +878,7 @@ mod action_timeout_tests {
             ActionRequest::TasksConnectApiKey {
                 provider: "linear".into(),
                 api_key: "k".into(),
+                organization_url: None,
             },
         ] {
             assert!(

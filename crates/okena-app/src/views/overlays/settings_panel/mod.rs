@@ -119,6 +119,8 @@ pub struct SettingsPanel {
     /// verify and store a provider credential, which only the daemon holds.
     pub(super) action_client: Option<okena_transport::remote_action::RemoteActionClient>,
     pub(super) tasks_api_key_input: Entity<SimpleInputState>,
+    /// Organization URL for a provider whose tokens belong to one (Azure DevOps).
+    pub(super) tasks_org_url_input: Entity<SimpleInputState>,
     /// Provider auth state, refreshed when the page opens. `None` until then.
     pub(super) tasks_status: Option<okena_core::tasks::TaskAuthStatusResponse>,
     pub(super) tasks_busy: bool,
@@ -905,8 +907,12 @@ impl SettingsPanel {
         )
         .detach();
 
-        let tasks_api_key_input =
-            cx.new(|cx| SimpleInputState::new(cx).placeholder("Paste a personal API key…"));
+        let tasks_api_key_input = cx.new(|cx| {
+            SimpleInputState::new(cx).placeholder("Paste a personal API key or access token…")
+        });
+        let tasks_org_url_input = cx.new(|cx| {
+            SimpleInputState::new(cx).placeholder("https://dev.azure.com/your-organization")
+        });
 
         let specs = render_specs::SpecsPage::new(
             s.harness.specs.data_dir.clone(),
@@ -1046,6 +1052,7 @@ impl SettingsPanel {
             daemon_endpoint,
             action_client: None,
             tasks_api_key_input,
+            tasks_org_url_input,
             tasks_status: None,
             tasks_busy: false,
             tasks_error: None,

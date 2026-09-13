@@ -1072,9 +1072,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             task_external_id,
         },
         ActionRequest::TasksAuthStatus => ActionRequest::TasksAuthStatus,
-        ActionRequest::TasksConnectApiKey { provider, api_key } => {
-            ActionRequest::TasksConnectApiKey { provider, api_key }
-        }
+        ActionRequest::TasksConnectApiKey {
+            provider,
+            api_key,
+            organization_url,
+        } => ActionRequest::TasksConnectApiKey {
+            provider,
+            api_key,
+            organization_url,
+        },
         ActionRequest::TasksDisconnect { provider } => ActionRequest::TasksDisconnect { provider },
         ActionRequest::TasksList { provider } => ActionRequest::TasksList { provider },
         ActionRequest::AddDiscoveredWorktree {

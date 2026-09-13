@@ -102,6 +102,14 @@ pub struct HarnessConfig {
     #[serde(default = "default_true")]
     pub agent_mcp_injection: bool,
 
+    /// The one task manager the harness reads, by provider id: `linear` or
+    /// `azure_devops`.
+    ///
+    /// One at a time on purpose: tasks from two managers are never merged into
+    /// one queue, so the choice is which queue to look at, not a filter.
+    #[serde(default = "default_task_provider")]
+    pub task_provider: String,
+
     /// Legacy single spec repository.
     ///
     /// Superseded by `specs`: OpenSpec stores are found through OpenSpec's
@@ -137,11 +145,18 @@ impl Default for HarnessConfig {
             // disagree with a deserialized one.
             agent_mcp_injection: true,
             agent_mcp_args: None,
+            task_provider: default_task_provider(),
             spec_repo: None,
             specs: SpecDiscoveryConfig::default(),
             knowledge: KnowledgeConfig::default(),
         }
     }
+}
+
+/// Linear, which was the only provider before the choice existed — so a
+/// settings file written then keeps behaving exactly as it did.
+fn default_task_provider() -> String {
+    "linear".to_string()
 }
 
 impl HarnessConfig {
