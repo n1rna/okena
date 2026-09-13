@@ -94,6 +94,7 @@ pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
 /// only when there is no repo to name, as the only place it came from.
 fn subtitle(asset: &SessionAsset) -> String {
     let mut parts = vec![asset.kind.label().to_string()];
+    parts.extend(task_caption(asset));
     parts.extend(asset.project.clone());
     if let Some(branch) = asset.branch.as_ref().filter(|b| **b != asset.title) {
         parts.push(branch.clone());
@@ -106,7 +107,14 @@ fn subtitle(asset: &SessionAsset) -> String {
     parts.join(" · ")
 }
 
-/// "↑2 ↓1" against the review base, or nothing when neither side has moved.
+/// How the row names the task an asset is about, ahead of the repo. The one
+/// place a richer caption goes; for now, the task's key.
+fn task_caption(asset: &SessionAsset) -> Option<String> {
+    asset.task.as_ref().map(|task| task.display_key.clone())
+}
+
+/// "↑2 ↓1" against the base branch (`origin/<default>`), not the upstream, or
+/// nothing when neither side has moved.
 fn ahead_behind(ahead: Option<usize>, behind: Option<usize>) -> Option<String> {
     let parts: Vec<String> = [
         ahead.filter(|n| *n > 0).map(|n| format!("↑{n}")),
@@ -135,8 +143,23 @@ mod tests {
             branch: branch.map(Into::into),
             state: None,
             uncommitted: None,
+            task: None,
             registered: true,
         }
+    }
+
+    #[test]
+    fn a_task_is_named_ahead_of_the_repo() {
+        let mut row = asset("Detect assets", None, Some("okena"));
+        row.task = Some(okena_core::tasks::TaskRef {
+            id: okena_core::tasks::TaskId::new("linear", "u1"),
+            display_key: "QBL-374".into(),
+            title: "t".into(),
+            url: "http://x".into(),
+            parent_id: None,
+            parent_key: None,
+        });
+        assert_eq!(subtitle(&row), "PR · QBL-374 · okena");
     }
 
     #[test]

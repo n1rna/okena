@@ -5,17 +5,21 @@
 //! session's task from the git poll. Detected rows are derived here, each time
 //! the list is read, rather than stored: a stored copy of a branch's push state
 //! is stale the moment the agent pushes again, and a second registration of
-//! the same PR would show twice.
+//! the same PR would show twice. Matching happens only here, never when an
+//! asset is saved.
 //!
 //! The one stored input is [`TrackedPullRequest`]: once a worktree is removed
-//! there is no checkout left to poll, so an open PR it produced is remembered
-//! on the session until it is merged or closed.
+//! there is no checkout left to poll, so a PR it produced is remembered on the
+//! session. An open one is listed until it closes; a merged or closed one is
+//! kept as a tombstone, never listed, so the registration that named it goes
+//! too instead of lingering as a row with no state.
 
 use crate::api::{ApiGitStatus, PrState};
 use crate::harness::{AgentAsset, AgentAssetKind, TrackedPullRequest};
+use crate::tasks::TaskRef;
 
 /// One row of a session's PRODUCED list.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SessionAsset {
     pub kind: AgentAssetKind,
     /// The agent's title when it registered this asset, otherwise the branch.
@@ -30,6 +34,9 @@ pub struct SessionAsset {
     pub state: Option<DetectedState>,
     /// Uncommitted changes in the worktree behind this row.
     pub uncommitted: Option<LineChanges>,
+    /// The task a registered asset is about, carried through for its caption.
+    /// Nothing sets it yet; registered tasks arrive with the agent's asset.
+    pub task: Option<TaskRef>,
     /// Whether the agent registered it, alone or merged into a detected row.
     pub registered: bool,
 }
@@ -39,11 +46,16 @@ pub struct SessionAsset {
 pub enum DetectedState {
     /// No upstream: the work exists only on this machine.
     LocalOnly,
-    /// On the remote. `unpushed` counts commits since the last push; `ahead`
-    /// and `behind` are measured against the branch's review base.
+    /// On the remote.
     Pushed {
+        /// Commits not yet on the branch's own remote ref, `origin/<branch>`.
         unpushed: usize,
+        /// Commits ahead of the **base branch** (`origin/<default>`, e.g.
+        /// `main`) — not of the branch's own upstream, which `unpushed`
+        /// already covers. Decided with the user: this says how much the
+        /// branch adds and how stale it is. Do not change it to upstream.
         ahead: Option<usize>,
+        /// Commits behind the base branch, likewise not the upstream.
         behind: Option<usize>,
     },
     PullRequest {
@@ -78,11 +90,9 @@ pub fn derive_session_assets(
     let mut rows: Vec<SessionAsset> = checkouts.iter().filter_map(checkout_row).collect();
 
     for pr in tracked {
-        // The branch was checked out again: the live row already covers it.
-        if rows
-            .iter()
-            .any(|r| same_url(r.url.as_deref(), Some(&pr.url)))
-        {
+        // A finished PR is only a tombstone. One checked out again is already
+        // covered by its live row.
+        if pr.is_finished() || rows.iter().any(|r| url_is(r.url.as_deref(), &pr.url)) {
             continue;
         }
         rows.push(SessionAsset {
@@ -99,34 +109,47 @@ pub fn derive_session_assets(
                 state: pr.state.clone(),
             }),
             uncommitted: None,
+            task: None,
             registered: false,
         });
     }
 
     let detected = rows.len();
     for asset in registered {
-        let matched = matching_row(&rows[..detected], asset);
-        match matched {
-            Some(i) => {
-                let row = &mut rows[i];
-                // The agent's title is kept; okena's state is shown. A second
-                // registration of the same thing does not retitle it again.
-                if !row.registered {
-                    row.title = asset.title.clone();
-                    row.registered = true;
-                }
-            }
-            None => rows.push(SessionAsset {
-                kind: asset.kind.clone(),
-                title: asset.title.clone(),
-                url: asset.url.clone(),
-                project: asset.project.clone(),
-                branch: asset.branch.clone(),
-                state: None,
-                uncommitted: None,
-                registered: true,
-            }),
+        // The PR it names merged or closed after its worktree went: the row
+        // goes with it rather than staying as a row with no state.
+        if tracked
+            .iter()
+            .any(|pr| pr.is_finished() && url_is(asset.url.as_deref(), &pr.url))
+        {
+            continue;
         }
+        if let Some(i) = detected_match(&rows[..detected], asset) {
+            let row = &mut rows[i];
+            // The agent's title is kept; okena's state is shown. A second
+            // registration of the same thing does not retitle it again.
+            if !row.registered {
+                row.title = asset.title.clone();
+                row.registered = true;
+            }
+            continue;
+        }
+        // Registered twice and detected by neither: still one row, under the
+        // first registration's title.
+        if rows[detected..].iter().any(|row| matches(asset, row)) {
+            continue;
+        }
+        rows.push(SessionAsset {
+            kind: asset.kind.clone(),
+            title: asset.title.clone(),
+            url: asset.url.clone(),
+            project: asset.project.clone(),
+            branch: asset.branch.clone(),
+            state: None,
+            uncommitted: None,
+            task: None,
+            registered: true,
+        });
     }
     rows
 }
@@ -170,23 +193,43 @@ fn checkout_row(c: &LinkedCheckout<'_>) -> Option<SessionAsset> {
         branch: Some(branch),
         state,
         uncommitted,
+        task: None,
         registered: false,
     })
 }
 
+/// Whether a registered asset and a row describe the same thing.
+///
+/// The single place a match key lives, used both against detected rows and to
+/// collapse repeated registrations. Another key — a task parsed from a ticket
+/// URL, say — is added here and applies to both.
+fn matches(asset: &AgentAsset, row: &SessionAsset) -> bool {
+    matches!(
+        (asset.url.as_deref(), row.url.as_deref()),
+        (Some(a), Some(b)) if same_url(a, b)
+    )
+}
+
 /// The detected row a registered asset describes, if any.
 ///
-/// By URL first. Otherwise by branch and project: the agent names the branch
-/// in `branch`, or — for a branch asset — as its title. With no project, the
-/// branch has to be unambiguous, since a task spanning several repos uses the
-/// same branch name in each of them.
-fn matching_row(rows: &[SessionAsset], asset: &AgentAsset) -> Option<usize> {
-    if asset.url.is_some()
-        && let Some(i) = rows
-            .iter()
-            .position(|r| same_url(r.url.as_deref(), asset.url.as_deref()))
-    {
+/// By [`matches`] first. Failing that, by branch and project — but only for
+/// what can live on a branch, and never for an asset whose URL matched
+/// nothing: that URL names something else, a document or a ticket, which
+/// would otherwise vanish into the branch row and lose its link. The agent
+/// names the branch in `branch`, or — for a branch asset — as its title. With
+/// no project the branch has to be unambiguous, since a task spanning several
+/// repos uses the same branch name in each of them.
+fn detected_match(rows: &[SessionAsset], asset: &AgentAsset) -> Option<usize> {
+    if let Some(i) = rows.iter().position(|row| matches(asset, row)) {
         return Some(i);
+    }
+    if asset.url.is_some()
+        || !matches!(
+            asset.kind,
+            AgentAssetKind::Branch | AgentAssetKind::PullRequest | AgentAssetKind::Other
+        )
+    {
+        return None;
     }
 
     let branch = asset.branch.as_deref().or(match asset.kind {
@@ -212,14 +255,19 @@ fn matching_row(rows: &[SessionAsset], asset: &AgentAsset) -> Option<usize> {
     }
 }
 
-fn same_url(a: Option<&str>, b: Option<&str>) -> bool {
-    match (a, b) {
-        (Some(a), Some(b)) => {
-            let norm = |u: &str| u.trim().trim_end_matches('/').to_ascii_lowercase();
-            norm(a) == norm(b)
-        }
-        _ => false,
-    }
+/// A URL in the form two spellings of it share: trimmed, without a trailing
+/// `/`, lowercased.
+pub fn normalize_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+/// Whether two URLs name the same thing, by [`normalize_url`].
+pub fn same_url(a: &str, b: &str) -> bool {
+    normalize_url(a) == normalize_url(b)
+}
+
+fn url_is(a: Option<&str>, b: &str) -> bool {
+    a.is_some_and(|a| same_url(a, b))
 }
 
 #[cfg(test)]
@@ -394,6 +442,46 @@ mod tests {
     }
 
     #[test]
+    fn a_document_on_the_branch_keeps_its_own_row_and_link() {
+        let g = git(None, None);
+        let mut doc = registered(AgentAssetKind::Document, "Design notes");
+        doc.url = Some("https://example.com/doc".into());
+        doc.branch = Some("feat/x".into());
+        doc.project = Some("okena".into());
+        let mut doc_without_link = doc.clone();
+        doc_without_link.url = None;
+        doc_without_link.title = "Scratch notes".into();
+
+        let rows = derive_session_assets(
+            &[doc, doc_without_link],
+            &[checkout("okena", Some(&g))],
+            &[],
+        );
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0].title, "feat/x", "the branch row is not retitled");
+        assert!(!rows[0].registered);
+        assert_eq!(rows[1].kind, AgentAssetKind::Document);
+        assert_eq!(rows[1].url.as_deref(), Some("https://example.com/doc"));
+        assert_eq!(rows[2].title, "Scratch notes");
+    }
+
+    #[test]
+    fn a_pr_whose_link_matched_nothing_does_not_merge_by_branch() {
+        // Its PR has not been polled yet; the branch row is a different thing
+        // until it has.
+        let g = git(None, None);
+        let mut pr = registered(AgentAssetKind::PullRequest, "Detect assets");
+        pr.url = Some("https://github.com/o/r/pull/7".into());
+        pr.branch = Some("feat/x".into());
+        let rows = derive_session_assets(&[pr], &[checkout("okena", Some(&g))], &[]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[1].url.as_deref(),
+            Some("https://github.com/o/r/pull/7")
+        );
+    }
+
+    #[test]
     fn unmatched_registrations_are_listed_after_detected_rows() {
         let g = git(None, None);
         let mut doc = registered(AgentAssetKind::Document, "Design notes");
@@ -402,16 +490,42 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].kind, AgentAssetKind::Document);
         assert_eq!(rows[1].state, None);
+        assert_eq!(rows[1].task, None);
     }
 
-    fn tracked(number: u32) -> TrackedPullRequest {
+    #[test]
+    fn repeated_unmatched_registrations_collapse_under_the_first_title() {
+        let mut first = registered(AgentAssetKind::Document, "Design notes");
+        first.url = Some("https://example.com/Doc/".into());
+        let mut again = first.clone();
+        again.title = "Design notes v2".into();
+        again.url = Some("https://example.com/doc".into());
+
+        let rows = derive_session_assets(&[first, again], &[], &[]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Design notes");
+    }
+
+    #[test]
+    fn urls_match_across_case_whitespace_and_a_trailing_slash() {
+        assert!(same_url(
+            " https://GitHub.com/o/r/pull/7/ ",
+            "https://github.com/o/r/pull/7"
+        ));
+        assert!(!same_url(
+            "https://github.com/o/r/pull/7",
+            "https://github.com/o/r/pull/70"
+        ));
+    }
+
+    fn tracked(number: u32, state: PrState) -> TrackedPullRequest {
         TrackedPullRequest {
             project: "okena".into(),
             repo_path: "/p/okena".into(),
             branch: Some("feat/x".into()),
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
-            state: PrState::Open,
+            state,
         }
     }
 
@@ -419,16 +533,40 @@ mod tests {
     fn the_pr_of_a_removed_worktree_stays_listed() {
         let mut pr = registered(AgentAssetKind::PullRequest, "Agent title");
         pr.url = Some("https://github.com/o/r/pull/9".into());
-        let rows = derive_session_assets(&[pr], &[], &[tracked(9)]);
+        let rows = derive_session_assets(&[pr], &[], &[tracked(9, PrState::Open)]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "Agent title");
         assert_eq!(rows[0].project.as_deref(), Some("okena"));
     }
 
     #[test]
+    fn a_registered_pr_goes_once_its_removed_worktrees_pr_merges() {
+        // Registered, worktree removed while open, then merged.
+        let mut pr = registered(AgentAssetKind::PullRequest, "Agent title");
+        pr.url = Some("https://github.com/o/r/pull/9/".into());
+
+        let open =
+            derive_session_assets(std::slice::from_ref(&pr), &[], &[tracked(9, PrState::Open)]);
+        assert_eq!(open.len(), 1);
+
+        for finished in [PrState::Merged, PrState::Closed] {
+            let rows = derive_session_assets(
+                std::slice::from_ref(&pr),
+                &[],
+                &[tracked(9, finished.clone())],
+            );
+            assert!(rows.is_empty(), "{finished:?}: {rows:?}");
+        }
+    }
+
+    #[test]
     fn a_tracked_pr_checked_out_again_is_not_listed_twice() {
         let g = git(Some(0), Some((9, PrState::Open)));
-        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[tracked(9)]);
+        let rows = derive_session_assets(
+            &[],
+            &[checkout("okena", Some(&g))],
+            &[tracked(9, PrState::Open)],
+        );
         assert_eq!(rows.len(), 1);
     }
 }

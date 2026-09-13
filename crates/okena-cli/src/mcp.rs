@@ -643,6 +643,11 @@ fn create_subtask(args: &Value) -> Result<Value, String> {
     Ok(json!({ "created": response, "parent": parent }))
 }
 
+/// Whether a daemon refused an action for carrying `field`, which it predates.
+fn rejects_field(error: &str, field: &str) -> bool {
+    error.contains("unknown field") && error.contains(&format!("`{field}`"))
+}
+
 fn register_asset(args: &Value) -> Result<Value, String> {
     let kind = args
         .get("kind")
@@ -673,7 +678,17 @@ fn register_asset(args: &Value) -> Result<Value, String> {
         }
     }
 
-    let response = super::api_action(&token, &body.to_string())?;
+    let response = match super::api_action(&token, &body.to_string()) {
+        // A daemon from before `branch` refuses the whole action over it. One
+        // still running after a self-update should not lose the asset.
+        Err(error) if body.get("branch").is_some() && rejects_field(&error, "branch") => {
+            if let Some(fields) = body.as_object_mut() {
+                fields.remove("branch");
+            }
+            super::api_action(&token, &body.to_string())?
+        }
+        other => other?,
+    };
     Ok(json!({ "ok": true, "response": response }))
 }
 
@@ -827,5 +842,15 @@ mod tests {
                 "advertised tool {name} was rejected as unknown by dispatch"
             );
         }
+    }
+
+    #[test]
+    fn only_a_daemon_that_predates_the_field_is_retried_without_it() {
+        // What an older daemon's axum body rejection surfaces as.
+        let older = "Server returned 422 Unprocessable Entity: Failed to deserialize the JSON \
+                     body into the target type: unknown field `branch`, expected one of `url`";
+        assert!(super::rejects_field(older, "branch"));
+        assert!(!super::rejects_field(older, "project"));
+        assert!(!super::rejects_field("project not found: s1", "branch"));
     }
 }

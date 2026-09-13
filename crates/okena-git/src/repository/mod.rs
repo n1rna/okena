@@ -42,7 +42,8 @@ pub use branch::{
     resolve_review_base, stage_file, stash_changes, stash_pop, unstage_file,
 };
 pub use ci::{
-    CiFetch, PrFetch, fetch_ci_checks, fetch_pr_by_number, fetch_pr_info, list_pull_requests,
+    CiFetch, PrFetch, fetch_ci_checks, fetch_pr_by_branch, fetch_pr_by_number, fetch_pr_info,
+    list_pull_requests,
 };
 pub use clone::{
     CloneProgress, clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,

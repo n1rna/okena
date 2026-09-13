@@ -213,6 +213,9 @@ pub struct GitPollTrigger {
     pub project_id: Option<String>,
     pub poll_github: bool,
     pub invalidate_github: bool,
+    /// `project_id` is an agent session: fetch the PRs of the worktrees linked
+    /// to it now, rather than of the session itself.
+    pub linked_worktrees: bool,
 }
 
 impl GitPollTrigger {
@@ -221,6 +224,7 @@ impl GitPollTrigger {
             project_id: Some(project_id),
             poll_github: false,
             invalidate_github: false,
+            linked_worktrees: false,
         }
     }
 
@@ -229,6 +233,7 @@ impl GitPollTrigger {
             project_id: Some(project_id),
             poll_github: true,
             invalidate_github: true,
+            linked_worktrees: false,
         }
     }
 
@@ -237,6 +242,19 @@ impl GitPollTrigger {
             project_id: Some(project_id),
             poll_github: true,
             invalidate_github: false,
+            linked_worktrees: false,
+        }
+    }
+
+    /// An agent session registered an asset. Its worktrees' PRs are fetched
+    /// now, so a PR it just opened is matched instead of listed twice until
+    /// the next PR cadence.
+    pub fn linked_worktrees(session_id: String) -> Self {
+        Self {
+            project_id: Some(session_id),
+            poll_github: true,
+            invalidate_github: false,
+            linked_worktrees: true,
         }
     }
 
@@ -245,6 +263,7 @@ impl GitPollTrigger {
             project_id: None,
             poll_github: false,
             invalidate_github: false,
+            linked_worktrees: false,
         }
     }
 }
@@ -272,6 +291,9 @@ pub fn git_poll_trigger_for_action(action: &ActionRequest) -> Option<GitPollTrig
             show: true,
             ..
         } => Some(GitPollTrigger::project_visible(project_id.clone())),
+        ActionRequest::AgentRegisterAsset { project_id, .. } => {
+            Some(GitPollTrigger::linked_worktrees(project_id.clone()))
+        }
         _ => None,
     }
 }
@@ -328,6 +350,22 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn registering_an_asset_polls_the_sessions_worktrees() {
+        let trigger = git_poll_trigger_for_action(&ActionRequest::AgentRegisterAsset {
+            project_id: "session".to_string(),
+            kind: "pull_request".to_string(),
+            title: "t".to_string(),
+            url: None,
+            project: None,
+            branch: None,
+        })
+        .expect("registering an asset creates trigger");
+        assert_eq!(trigger.project_id.as_deref(), Some("session"));
+        assert!(trigger.linked_worktrees);
+        assert!(!trigger.invalidate_github);
     }
 
     #[test]

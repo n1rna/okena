@@ -148,12 +148,14 @@ pub struct AgentAsset {
     pub created_at: u64,
 }
 
-/// An open pull request whose worktree has been removed.
+/// A pull request whose worktree has been removed.
 ///
 /// Detected assets are otherwise derived from the live checkouts, so this is
 /// the one thing a session has to remember: with the worktree gone there is
-/// nothing left to poll by branch. The daemon's git poller refreshes it by
-/// repo and number, and drops it once the PR is merged or closed.
+/// nothing left to poll by branch. While open, the daemon's git poller
+/// refreshes it by repo and number. Once merged or closed it stays as a
+/// tombstone — never polled, never listed — so an asset the agent registered
+/// for the same PR is retired with it instead of lingering without state.
 #[derive(Clone, Debug, PartialEq, Eq, Ser, De)]
 pub struct TrackedPullRequest {
     /// Repo label, as the worktree's row showed it.
@@ -166,6 +168,16 @@ pub struct TrackedPullRequest {
     pub number: u32,
     pub url: String,
     pub state: crate::api::PrState,
+}
+
+impl TrackedPullRequest {
+    /// Merged or closed: a tombstone, no longer polled or listed.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self.state,
+            crate::api::PrState::Merged | crate::api::PrState::Closed
+        )
+    }
 }
 
 /// Where an agent says it is, as distinct from what its terminal shows.

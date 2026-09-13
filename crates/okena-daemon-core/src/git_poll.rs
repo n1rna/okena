@@ -24,6 +24,15 @@
 //! and an open PR whose worktree was removed is handed to that session and
 //! polled by repo and number until it is merged or closed. Both feed the
 //! session's PRODUCED list.
+//!
+//! What that costs: each linked worktree adds one PR request per PR cadence
+//! (~60s) until it is removed or its PR is merged or closed, whether or not
+//! its session is still running — the poller cannot see that. Each open
+//! tracked PR adds one request per cadence until it closes, or until it has
+//! gone unanswered long enough to be dropped. A worktree removed before its PR
+//! was seen costs one lookup by branch. Merged and closed tracked PRs stay on
+//! the session as tombstones, which are never polled. All of it shares the
+//! fan-out's concurrency limit and rate-limit gate.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -83,6 +92,8 @@ struct TriggerAccumulator {
     candidate_gh_ids: HashSet<String>,
     /// Projects whose cached PR/CI belongs to a previous branch.
     invalidate_gh_ids: HashSet<String>,
+    /// Agent sessions that registered an asset; their worktrees' PRs are due.
+    session_asset_ids: HashSet<String>,
 }
 
 impl TriggerAccumulator {
@@ -90,6 +101,10 @@ impl TriggerAccumulator {
         let Some(project_id) = trigger.project_id else {
             return;
         };
+        if trigger.linked_worktrees {
+            self.session_asset_ids.insert(project_id);
+            return;
+        }
         if trigger.invalidate_github {
             self.invalidate_gh_ids.insert(project_id.clone());
             self.force_gh_ids.insert(project_id);
@@ -114,6 +129,7 @@ impl TriggerAccumulator {
         self.force_gh_ids.clear();
         self.candidate_gh_ids.clear();
         self.invalidate_gh_ids.clear();
+        self.session_asset_ids.clear();
     }
 }
 
@@ -125,6 +141,8 @@ enum GithubPassMessage {
     Project(GithubPollResult),
     /// A removed worktree's PR, under its schedule key.
     TrackedPr { key: String, fetch: PrFetch },
+    /// A removed worktree's branch, looked up once under its key.
+    RemovedBranch { key: String, fetch: PrFetch },
     /// The pass is over; carries the ids it held so they can be polled again.
     Finished(HashSet<String>),
 }
@@ -155,6 +173,9 @@ struct ProjectPoll {
     /// A removed worktree's PR, fetched by this number from the repo at `path`
     /// rather than by the branch checked out there.
     tracked_pr: Option<u32>,
+    /// A worktree removed before its PR was seen: this branch is looked up
+    /// once, in the repo at `path`.
+    removed_branch: Option<String>,
 }
 
 /// Union of declared viewports (`SetVisibleProjects`). The workspace's own window
@@ -339,7 +360,8 @@ fn update_head_snapshots<T: PartialEq>(
 /// waiting for that pass plus the next cadence tick.
 ///
 /// A worktree linked to an agent session (`linked_ids`) earns a PR slot even
-/// while hidden, so the session's PRODUCED list sees its PR. Only the PR: its
+/// while hidden, so the session's PRODUCED list sees its PR — until that PR is
+/// merged or closed, when there is nothing left to watch. Only the PR: its
 /// checks are nobody's to show until the worktree is on screen.
 #[allow(clippy::too_many_arguments)]
 fn select_github_polls(
@@ -356,7 +378,9 @@ fn select_github_polls(
     projects
         .iter()
         .filter(|(id, _)| {
-            visible_ids.contains(id) || linked_ids.contains(id) || schedule.is_urgent(id)
+            visible_ids.contains(id)
+                || schedule.is_urgent(id)
+                || (linked_ids.contains(id) && !pr_finished(pr_infos, id))
         })
         .filter(|(id, _)| !in_flight.contains(id))
         .filter(|(id, _)| !urgent_only || schedule.is_urgent(id))
@@ -375,9 +399,18 @@ fn select_github_polls(
                     .and_then(|pr| pr.as_ref())
                     .map(|pr| pr.number),
                 tracked_pr: None,
+                removed_branch: None,
             })
         })
         .collect()
+}
+
+/// Whether the PR last fetched for `id` is merged or closed.
+fn pr_finished(pr_infos: &HashMap<String, Option<git::PrInfo>>, id: &str) -> bool {
+    pr_infos
+        .get(id)
+        .and_then(Option::as_ref)
+        .is_some_and(|pr| matches!(pr.state, git::PrState::Merged | git::PrState::Closed))
 }
 
 /// What one project's GitHub slot produced.
@@ -397,6 +430,12 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
         if let Some(number) = poll.tracked_pr {
             return ProjectOutcome {
                 pr: Some(git::repository::fetch_pr_by_number(path, number)),
+                ci: None,
+            };
+        }
+        if let Some(branch) = &poll.removed_branch {
+            return ProjectOutcome {
+                pr: Some(git::repository::fetch_pr_by_branch(path, branch)),
                 ci: None,
             };
         }
@@ -472,12 +511,16 @@ async fn poll_github(
         };
 
         // Not a checkout: no HEAD or branch to guard against, just a PR.
-        if id.starts_with(TRACKED_PR_KEY_PREFIX) {
-            if let Some(fetch) = outcome.pr
-                && result_tx
-                    .send(GithubPassMessage::TrackedPr { key: id, fetch })
-                    .is_err()
-            {
+        if id.starts_with(TRACKED_PR_KEY_PREFIX) || id.starts_with(REMOVED_BRANCH_KEY_PREFIX) {
+            let Some(fetch) = outcome.pr else {
+                continue;
+            };
+            let message = if id.starts_with(TRACKED_PR_KEY_PREFIX) {
+                GithubPassMessage::TrackedPr { key: id, fetch }
+            } else {
+                GithubPassMessage::RemovedBranch { key: id, fetch }
+            };
+            if result_tx.send(message).is_err() {
                 return;
             }
             continue;
@@ -494,7 +537,8 @@ async fn poll_github(
                 pr_infos.insert(id.clone(), info);
             }
             Some(PrFetch::RateLimited) => rate_limited = true,
-            None => {}
+            // No answer: keep the PR already known rather than read it as gone.
+            Some(PrFetch::Failed) | None => {}
         }
         match outcome.ci {
             Some(CiFetch::RateLimited) => rate_limited = true,
@@ -611,6 +655,16 @@ fn apply_github_result(
 /// tracking the same PR share one request.
 const TRACKED_PR_KEY_PREFIX: &str = "tracked-pr:";
 
+/// Key of a removed worktree's one-shot branch lookup, by worktree id.
+const REMOVED_BRANCH_KEY_PREFIX: &str = "removed-branch:";
+
+/// Consecutive lookups of a tracked PR that may come back without it — not
+/// found, or no answer — before it is dropped. At the PR cadence, ~10 minutes.
+const TRACKED_PR_LOOKUP_ATTEMPTS: u32 = 10;
+
+/// Tries at a removed worktree's branch lookup when GitHub gives no answer.
+const REMOVED_BRANCH_LOOKUP_ATTEMPTS: u32 = 3;
+
 /// A worktree linked to an agent session's task.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SessionLink {
@@ -672,7 +726,8 @@ fn tracked_pr_polls(workspace: &Workspace) -> Vec<TrackedPoll> {
         .iter()
         .filter_map(|p| p.agent.as_ref())
         .flat_map(|agent| &agent.tracked_prs)
-        .filter(|pr| seen.insert(pr.url.clone()))
+        // Tombstones are never polled.
+        .filter(|pr| !pr.is_finished() && seen.insert(pr.url.clone()))
         .map(|pr| TrackedPoll {
             key: format!("{TRACKED_PR_KEY_PREFIX}{}", pr.url),
             repo_path: pr.repo_path.clone(),
@@ -704,8 +759,38 @@ fn remember_linked_prs(
     }
 }
 
-/// Hand the open PRs of removed worktrees to their sessions, so they stay
-/// listed until merged or closed. Returns whether any session changed.
+/// Record a removed worktree's PR on its session. An open PR is listed until
+/// it closes; a merged or closed one is a tombstone that retires whatever the
+/// agent registered for it. Returns whether the session changed.
+fn record_removed_pr(
+    projects: &mut [okena_state::ProjectData],
+    link: &SessionLink,
+    pr: git::PrInfo,
+) -> bool {
+    let Some(session) = projects.iter_mut().find(|p| p.id == link.session_id) else {
+        return false;
+    };
+    let agent = session.agent.get_or_insert_with(Default::default);
+    if let Some(existing) = agent.tracked_prs.iter_mut().find(|t| t.url == pr.url) {
+        if existing.state == pr.state {
+            return false;
+        }
+        existing.state = pr.state;
+        return true;
+    }
+    agent.tracked_prs.push(TrackedPullRequest {
+        project: link.project.clone(),
+        repo_path: link.repo_path.clone(),
+        branch: link.branch.clone(),
+        number: pr.number,
+        url: pr.url,
+        state: pr.state,
+    });
+    true
+}
+
+/// Hand the PRs of removed worktrees to their sessions. Returns whether any
+/// session changed.
 fn track_removed_prs(
     projects: &mut [okena_state::ProjectData],
     known: &mut HashMap<String, (SessionLink, git::PrInfo)>,
@@ -718,59 +803,69 @@ fn track_removed_prs(
         .collect();
     let mut changed = false;
     for id in removed {
-        let Some((link, pr)) = known.remove(&id) else {
-            continue;
-        };
-        if !matches!(pr.state, git::PrState::Open | git::PrState::Draft) {
-            continue;
+        if let Some((link, pr)) = known.remove(&id) {
+            changed |= record_removed_pr(projects, &link, pr);
         }
-        let Some(session) = projects.iter_mut().find(|p| p.id == link.session_id) else {
-            continue;
-        };
-        let agent = session.agent.get_or_insert_with(Default::default);
-        if agent.tracked_prs.iter().any(|t| t.url == pr.url) {
-            continue;
-        }
-        agent.tracked_prs.push(TrackedPullRequest {
-            project: link.project,
-            repo_path: link.repo_path,
-            branch: link.branch,
-            number: pr.number,
-            url: pr.url,
-            state: pr.state,
-        });
-        changed = true;
     }
     changed
 }
 
-/// Apply a tracked PR's refresh to every session tracking it: merged or closed
-/// drops it, anything else takes the new state. Returns whether anything
-/// changed.
+/// Linked worktrees that left the workspace with no PR the poller had seen,
+/// keyed for their one lookup by branch. The PR may have been opened moments
+/// before the worktree went — the usual clean-up flow — so "never seen" is
+/// not "none".
+fn unseen_removed_worktrees(
+    links_prev: &HashMap<String, SessionLink>,
+    known: &HashMap<String, (SessionLink, git::PrInfo)>,
+    active_ids: &HashSet<String>,
+) -> Vec<(String, SessionLink)> {
+    links_prev
+        .iter()
+        .filter(|(id, link)| {
+            !active_ids.contains(*id) && !known.contains_key(*id) && link.branch.is_some()
+        })
+        .map(|(id, link)| (format!("{REMOVED_BRANCH_KEY_PREFIX}{id}"), link.clone()))
+        .collect()
+}
+
+/// Apply a tracked PR's refresh to every session tracking it. Merged or closed
+/// turns it into a tombstone. Returns whether anything changed.
 fn apply_tracked_pr(
     projects: &mut [okena_state::ProjectData],
     url: &str,
     pr: &git::PrInfo,
 ) -> bool {
-    let finished = matches!(pr.state, git::PrState::Merged | git::PrState::Closed);
     let mut changed = false;
     for agent in projects.iter_mut().filter_map(|p| p.agent.as_mut()) {
-        if finished {
-            let before = agent.tracked_prs.len();
-            agent.tracked_prs.retain(|t| t.url != url);
-            changed |= agent.tracked_prs.len() != before;
-        } else {
-            for t in agent
-                .tracked_prs
-                .iter_mut()
-                .filter(|t| t.url == url && t.state != pr.state)
-            {
-                t.state = pr.state.clone();
-                changed = true;
-            }
+        for t in agent
+            .tracked_prs
+            .iter_mut()
+            .filter(|t| t.url == url && t.state != pr.state)
+        {
+            t.state = pr.state.clone();
+            changed = true;
         }
     }
     changed
+}
+
+/// Forget a tracked PR nobody can answer for any more. Returns whether any
+/// session changed.
+fn drop_tracked_pr(projects: &mut [okena_state::ProjectData], url: &str) -> bool {
+    let mut changed = false;
+    for agent in projects.iter_mut().filter_map(|p| p.agent.as_mut()) {
+        let before = agent.tracked_prs.len();
+        agent.tracked_prs.retain(|t| t.url != url);
+        changed |= agent.tracked_prs.len() != before;
+    }
+    changed
+}
+
+/// A removed worktree waiting for its lookup by branch.
+struct RemovedLookup {
+    link: SessionLink,
+    /// Lookups that came back with no answer.
+    attempts: u32,
 }
 
 /// Persist and broadcast a change the poller made to workspace data.
@@ -783,39 +878,131 @@ fn notify_workspace(workspace: &mut Workspace, workspace_tick: &watch::Sender<u6
     ));
 }
 
+/// Note a rate-limit refusal, once per cycle as a checkout's result does.
+fn note_rate_limited(schedule: &mut GithubPollSchedule, cycle: u64) {
+    if !schedule.is_rate_limited(cycle) {
+        schedule.note_rate_limited(cycle);
+        log::warn!(
+            "GitHub API rate limit hit; PR/CI polling paused for {} cycles",
+            schedule.rate_limit_backoff_cycles()
+        );
+    }
+}
+
 /// Apply one tracked PR's refresh: the same rate-limit gate and cadence as a
 /// checkout's PR, then the result onto the sessions tracking it.
+///
+/// Only a request that went out and came back clears the rate-limit backoff.
+/// A lookup that comes back without the PR — not found, or no answer — keeps
+/// what the session shows, until `TRACKED_PR_LOOKUP_ATTEMPTS` of them in a row
+/// say it is not coming back and polling it forever would only cost everyone
+/// else's requests.
 fn apply_tracked_pr_result(
     key: &str,
     fetch: PrFetch,
     cycle: u64,
     schedule: &mut GithubPollSchedule,
+    failures: &mut HashMap<String, u32>,
+    workspace: &Mutex<Workspace>,
+    workspace_tick: &watch::Sender<u64>,
+) {
+    let Some(url) = key.strip_prefix(TRACKED_PR_KEY_PREFIX) else {
+        return;
+    };
+    let answer = match fetch {
+        PrFetch::RateLimited => {
+            note_rate_limited(schedule, cycle);
+            return;
+        }
+        PrFetch::Failed => None,
+        PrFetch::Fetched(pr) => {
+            schedule.note_request_succeeded();
+            schedule.record_pr(key, cycle);
+            pr
+        }
+    };
+    let mut ws = workspace.lock();
+    let changed = match answer {
+        Some(pr) => {
+            failures.remove(key);
+            apply_tracked_pr(&mut ws.data.projects, url, &pr)
+        }
+        None => {
+            let misses = failures.entry(key.to_string()).or_default();
+            *misses += 1;
+            if *misses < TRACKED_PR_LOOKUP_ATTEMPTS {
+                return;
+            }
+            failures.remove(key);
+            log::warn!(
+                "no longer tracking {url}: {TRACKED_PR_LOOKUP_ATTEMPTS} lookups came back without it"
+            );
+            drop_tracked_pr(&mut ws.data.projects, url)
+        }
+    };
+    if changed {
+        notify_workspace(&mut ws, workspace_tick);
+    }
+}
+
+/// Apply a removed worktree's lookup by branch. A PR found is recorded on its
+/// session, open or finished alike; no PR ends the lookup. No answer is tried
+/// again, a few times; a refusal waits out the rate-limit gate.
+#[allow(clippy::too_many_arguments)]
+fn apply_removed_branch_result(
+    key: &str,
+    fetch: PrFetch,
+    cycle: u64,
+    schedule: &mut GithubPollSchedule,
+    pending: &mut HashMap<String, RemovedLookup>,
     workspace: &Mutex<Workspace>,
     workspace_tick: &watch::Sender<u64>,
 ) {
     match fetch {
-        PrFetch::RateLimited => {
-            if !schedule.is_rate_limited(cycle) {
-                schedule.note_rate_limited(cycle);
-                log::warn!(
-                    "GitHub API rate limit hit; PR/CI polling paused for {} cycles",
-                    schedule.rate_limit_backoff_cycles()
-                );
+        PrFetch::RateLimited => note_rate_limited(schedule, cycle),
+        PrFetch::Failed => {
+            if let Some(lookup) = pending.get_mut(key) {
+                lookup.attempts += 1;
+                if lookup.attempts >= REMOVED_BRANCH_LOOKUP_ATTEMPTS {
+                    pending.remove(key);
+                }
             }
         }
         PrFetch::Fetched(pr) => {
             schedule.note_request_succeeded();
-            schedule.record_pr(key, cycle);
-            // A failed lookup keeps what the session already shows.
-            let (Some(pr), Some(url)) = (pr, key.strip_prefix(TRACKED_PR_KEY_PREFIX)) else {
+            let (Some(lookup), Some(pr)) = (pending.remove(key), pr) else {
                 return;
             };
             let mut ws = workspace.lock();
-            if apply_tracked_pr(&mut ws.data.projects, url, &pr) {
+            if record_removed_pr(&mut ws.data.projects, &lookup.link, pr) {
                 notify_workspace(&mut ws, workspace_tick);
             }
         }
     }
+}
+
+/// This cycle's removed-worktree lookups: dispatched as soon as they can be,
+/// like a forced project, but never twice at once.
+fn select_removed_branch_polls(
+    pending: &HashMap<String, RemovedLookup>,
+    in_flight: &HashSet<String>,
+) -> Vec<ProjectPoll> {
+    pending
+        .iter()
+        .filter(|(key, _)| !in_flight.contains(*key))
+        .filter_map(|(key, lookup)| {
+            Some(ProjectPoll {
+                id: key.clone(),
+                path: lookup.link.repo_path.clone(),
+                want_pr: true,
+                want_ci: false,
+                ci_skip_sha: None,
+                cached_pr_number: None,
+                tracked_pr: None,
+                removed_branch: Some(lookup.link.branch.clone()?),
+            })
+        })
+        .collect()
 }
 
 /// Pick this cycle's tracked-PR slots: settled PR cadence only, never urgent.
@@ -838,6 +1025,7 @@ fn select_tracked_pr_polls(
             ci_skip_sha: None,
             cached_pr_number: None,
             tracked_pr: Some(t.number),
+            removed_branch: None,
         })
         .collect()
 }
@@ -898,6 +1086,10 @@ pub async fn run_git_poll(
     // last showed — what a removed worktree hands to its session.
     let mut session_links_prev: HashMap<String, SessionLink> = HashMap::new();
     let mut known_linked_prs: HashMap<String, (SessionLink, git::PrInfo)> = HashMap::new();
+    // Removed worktrees with no PR seen, each awaiting one lookup by branch;
+    // and each tracked PR's lookups in a row that came back without it.
+    let mut removed_lookups: HashMap<String, RemovedLookup> = HashMap::new();
+    let mut tracked_failures: HashMap<String, u32> = HashMap::new();
     let (github_result_tx, mut github_result_rx) = mpsc::unbounded_channel();
     // Consume `interval`'s immediate first tick. Subsequent ticks stay anchored
     // to wall time, so targeted wakes cannot postpone periodic refreshes.
@@ -949,6 +1141,13 @@ pub async fn run_git_poll(
         // A linked worktree that left the workspace hands its open PR to its
         // session. Read before the caches below forget the project.
         remember_linked_prs(&mut known_linked_prs, &session_links_prev, &pr_infos);
+        for (key, link) in
+            unseen_removed_worktrees(&session_links_prev, &known_linked_prs, &active_ids)
+        {
+            removed_lookups
+                .entry(key)
+                .or_insert(RemovedLookup { link, attempts: 0 });
+        }
         if known_linked_prs.keys().any(|id| !active_ids.contains(id)) {
             let mut ws = workspace.lock();
             if track_removed_prs(&mut ws.data.projects, &mut known_linked_prs, &active_ids) {
@@ -957,6 +1156,13 @@ pub async fn run_git_poll(
         }
         known_linked_prs.retain(|id, _| links.contains_key(id));
         let linked_ids: HashSet<String> = links.keys().cloned().collect();
+        // An agent just registered an asset: fetch its worktrees' PRs now, so
+        // a PR it just opened is matched rather than listed twice meanwhile.
+        for (id, link) in &links {
+            if trigger_acc.session_asset_ids.contains(&link.session_id) {
+                schedule.force(id);
+            }
+        }
         session_links_prev = links;
 
         pr_infos.retain(|id, _| active_ids.contains(id));
@@ -970,6 +1176,7 @@ pub async fn run_git_poll(
             .chain(tracked_prs.iter().map(|t| t.key.clone()))
             .collect();
         schedule.retain(&scheduled_ids);
+        tracked_failures.retain(|key, _| scheduled_ids.contains(key));
 
         let newly_relevant_ids: HashSet<String> = streaming_ids
             .difference(&known_streaming_ids)
@@ -1089,6 +1296,11 @@ pub async fn run_git_poll(
                     &github_in_flight,
                 ));
             }
+            // One-shot, like a forced project: not held back by a running pass.
+            polls.extend(select_removed_branch_polls(
+                &removed_lookups,
+                &github_in_flight,
+            ));
 
             log::trace!(
                 "GitHub poll cycle={cycle}: {} projects, {} visible, {} due",
@@ -1179,9 +1391,21 @@ pub async fn run_git_poll(
                             fetch,
                             cycle,
                             &mut schedule,
+                            &mut tracked_failures,
                             &workspace,
                             &workspace_tick,
                         ),
+                        GithubPassMessage::RemovedBranch { key, fetch } => {
+                            apply_removed_branch_result(
+                                &key,
+                                fetch,
+                                cycle,
+                                &mut schedule,
+                                &mut removed_lookups,
+                                &workspace,
+                                &workspace_tick,
+                            )
+                        }
                         GithubPassMessage::Finished(ids) => {
                             for id in &ids {
                                 github_in_flight.remove(id);
@@ -2196,17 +2420,37 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_worktree_whose_pr_already_closed_hands_over_nothing() {
+    fn a_removed_worktree_whose_pr_already_merged_leaves_a_tombstone() {
+        // Never listed or polled, but it retires any registration of the PR.
         let mut ws = linked_workspace();
         let link = session_links(&ws)["wt"].clone();
         let mut known = HashMap::from([("wt".to_string(), (link, pr(9, git::PrState::Merged)))]);
 
-        assert!(!track_removed_prs(
+        assert!(track_removed_prs(
             &mut ws.data.projects,
             &mut known,
             &ids(&["repo", "session"]),
         ));
-        assert!(tracked_of(&ws, "session").is_empty());
+        let tracked = tracked_of(&ws, "session");
+        assert_eq!(tracked.len(), 1);
+        assert!(tracked[0].is_finished());
+        assert!(tracked_pr_polls(&ws).is_empty());
+    }
+
+    #[test]
+    fn a_removed_pr_already_tracked_takes_the_newer_state() {
+        let mut ws = linked_workspace();
+        track(&mut ws, "session", 9, git::PrState::Open);
+        let link = session_links(&ws)["wt"].clone();
+
+        assert!(record_removed_pr(
+            &mut ws.data.projects,
+            &link,
+            pr(9, git::PrState::Closed)
+        ));
+        let tracked = tracked_of(&ws, "session");
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(tracked[0].state, git::PrState::Closed);
     }
 
     #[test]
@@ -2225,7 +2469,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tracked_pr_follows_its_state_and_goes_once_merged() {
+    fn a_tracked_pr_follows_its_state_and_becomes_a_tombstone_once_merged() {
         let mut ws = linked_workspace();
         track(&mut ws, "session", 9, git::PrState::Draft);
         let url = pr(9, git::PrState::Open).url;
@@ -2246,7 +2490,11 @@ mod tests {
             &url,
             &pr(9, git::PrState::Merged)
         ));
-        assert!(tracked_of(&ws, "session").is_empty());
+        assert_eq!(tracked_of(&ws, "session")[0].state, git::PrState::Merged);
+        assert!(
+            tracked_pr_polls(&ws).is_empty(),
+            "a tombstone is never polled"
+        );
     }
 
     #[test]
@@ -2288,11 +2536,187 @@ mod tests {
             PrFetch::RateLimited,
             5,
             &mut schedule,
+            &mut HashMap::new(),
             &ws,
             &tick,
         );
 
         assert!(schedule.is_rate_limited(6));
         assert_eq!(*tick.borrow(), 0);
+    }
+
+    #[test]
+    fn a_lookup_that_never_went_out_does_not_lift_the_rate_limit() {
+        let ws = Mutex::new(linked_workspace());
+        let tick = watch::Sender::new(0);
+        let mut schedule = GithubPollSchedule::default();
+        schedule.note_rate_limited(0);
+
+        apply_tracked_pr_result(
+            &format!("{TRACKED_PR_KEY_PREFIX}https://github.com/o/r/pull/9"),
+            PrFetch::Failed,
+            5,
+            &mut schedule,
+            &mut HashMap::new(),
+            &ws,
+            &tick,
+        );
+
+        assert!(schedule.is_rate_limited(5));
+    }
+
+    #[test]
+    fn a_tracked_pr_without_answers_is_dropped_eventually_and_not_before() {
+        let ws = Mutex::new(linked_workspace());
+        track(&mut ws.lock(), "session", 9, git::PrState::Open);
+        let key = format!("{TRACKED_PR_KEY_PREFIX}{}", pr(9, git::PrState::Open).url);
+        let tick = watch::Sender::new(0);
+        let mut schedule = GithubPollSchedule::default();
+        let mut failures = HashMap::new();
+        let mut apply = |fetch: PrFetch| {
+            apply_tracked_pr_result(&key, fetch, 5, &mut schedule, &mut failures, &ws, &tick)
+        };
+
+        for _ in 1..TRACKED_PR_LOOKUP_ATTEMPTS {
+            apply(PrFetch::Failed);
+        }
+        // An answer starts the count again.
+        apply(PrFetch::Fetched(Some(pr(9, git::PrState::Open))));
+        for _ in 1..TRACKED_PR_LOOKUP_ATTEMPTS {
+            apply(PrFetch::Fetched(None));
+        }
+        assert_eq!(tracked_of(&ws.lock(), "session").len(), 1);
+
+        apply(PrFetch::Failed);
+        assert!(tracked_of(&ws.lock(), "session").is_empty());
+    }
+
+    #[test]
+    fn a_linked_worktree_whose_pr_merged_is_no_longer_polled() {
+        let merged = HashMap::from([("hidden".to_string(), Some(pr(9, git::PrState::Merged)))]);
+        let select = |visible: &HashSet<String>| {
+            select_github_polls(
+                &projects(),
+                visible,
+                &ids(&["hidden"]),
+                &GithubPollSchedule::default(),
+                &merged,
+                1,
+                true,
+                &HashSet::new(),
+                false,
+            )
+        };
+
+        assert!(select(&HashSet::new()).is_empty());
+        assert_eq!(
+            select(&ids(&["hidden"])).len(),
+            1,
+            "on screen it is polled like any project"
+        );
+    }
+
+    #[test]
+    fn registering_an_asset_marks_its_session_for_a_pr_fetch() {
+        let mut acc = TriggerAccumulator::default();
+        acc.record(GitPollTrigger::linked_worktrees("session".to_string()));
+        assert!(acc.session_asset_ids.contains("session"));
+        assert!(
+            acc.local_status_ids().is_empty(),
+            "the session itself is not a checkout"
+        );
+        acc.clear();
+        assert!(acc.session_asset_ids.is_empty());
+    }
+
+    #[test]
+    fn a_worktree_removed_before_its_pr_was_seen_gets_a_branch_lookup() {
+        let ws = linked_workspace();
+        let links = session_links(&ws);
+        let active = ids(&["repo", "session", "stray"]);
+
+        let unseen = unseen_removed_worktrees(&links, &HashMap::new(), &active);
+        assert_eq!(unseen.len(), 1);
+        assert_eq!(unseen[0].0, format!("{REMOVED_BRANCH_KEY_PREFIX}wt"));
+
+        let known = HashMap::from([(
+            "wt".to_string(),
+            (links["wt"].clone(), pr(9, git::PrState::Open)),
+        )]);
+        assert!(
+            unseen_removed_worktrees(&links, &known, &active).is_empty(),
+            "a PR already seen is handed over without a lookup"
+        );
+
+        let (key, pending) = removed_lookup(&ws);
+        let polls = select_removed_branch_polls(&pending, &HashSet::new());
+        assert_eq!(polls.len(), 1);
+        assert_eq!(polls[0].removed_branch.as_deref(), Some("feat/x"));
+        assert_eq!(polls[0].path, "/p/okena");
+        assert!(polls[0].want_pr && !polls[0].want_ci);
+        assert!(select_removed_branch_polls(&pending, &ids(&[key.as_str()])).is_empty());
+    }
+
+    fn removed_lookup(ws: &Workspace) -> (String, HashMap<String, RemovedLookup>) {
+        let key = format!("{REMOVED_BRANCH_KEY_PREFIX}wt");
+        let link = session_links(ws)["wt"].clone();
+        (
+            key.clone(),
+            HashMap::from([(key, RemovedLookup { link, attempts: 0 })]),
+        )
+    }
+
+    #[test]
+    fn a_branch_lookup_that_finds_the_pr_hands_it_to_the_session() {
+        let ws = Mutex::new(linked_workspace());
+        let (key, mut pending) = removed_lookup(&ws.lock());
+        let tick = watch::Sender::new(0);
+        let mut schedule = GithubPollSchedule::default();
+
+        apply_removed_branch_result(
+            &key,
+            PrFetch::Fetched(Some(pr(9, git::PrState::Open))),
+            5,
+            &mut schedule,
+            &mut pending,
+            &ws,
+            &tick,
+        );
+
+        assert!(pending.is_empty());
+        assert_eq!(tracked_of(&ws.lock(), "session").len(), 1);
+        assert_eq!(*tick.borrow(), 1, "the session change is saved");
+    }
+
+    #[test]
+    fn a_branch_lookup_without_an_answer_is_tried_a_few_times() {
+        let ws = Mutex::new(linked_workspace());
+        let (key, mut pending) = removed_lookup(&ws.lock());
+        let tick = watch::Sender::new(0);
+        let mut schedule = GithubPollSchedule::default();
+
+        for _ in 1..REMOVED_BRANCH_LOOKUP_ATTEMPTS {
+            apply_removed_branch_result(
+                &key,
+                PrFetch::Failed,
+                5,
+                &mut schedule,
+                &mut pending,
+                &ws,
+                &tick,
+            );
+            assert!(pending.contains_key(&key));
+        }
+        apply_removed_branch_result(
+            &key,
+            PrFetch::Failed,
+            5,
+            &mut schedule,
+            &mut pending,
+            &ws,
+            &tick,
+        );
+        assert!(pending.is_empty());
+        assert!(tracked_of(&ws.lock(), "session").is_empty());
     }
 }

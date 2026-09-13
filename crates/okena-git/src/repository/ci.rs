@@ -26,6 +26,9 @@ const GH_TIMEOUT: Duration = Duration::from_secs(15);
 pub enum PrFetch {
     Fetched(Option<crate::PrInfo>),
     RateLimited,
+    /// No answer: a timeout, a server error, or no client to ask with. Kept
+    /// apart from `Fetched(None)` so a flaky request never erases a known PR.
+    Failed,
 }
 
 /// Outcome of a CI lookup.
@@ -154,7 +157,7 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
     let variables = json!({ "owner": repo.owner, "repo": repo.name, "headBranch": branch });
     match client.graphql(PR_LOOKUP_QUERY, variables) {
         Err(ApiError::RateLimited) => PrFetch::RateLimited,
-        Err(ApiError::Failed) => PrFetch::Fetched(None),
+        Err(ApiError::Failed) => PrFetch::Failed,
         Ok(data) => {
             let node = data
                 .pointer("/repository/pullRequests/nodes/0")
@@ -182,15 +185,39 @@ query PullRequestByNumber($owner: String!, $repo: String!, $number: Int!) {
 /// [`fetch_pr_info`], a merged or closed PR is reported as such, since that is
 /// exactly what the caller is waiting to hear.
 pub fn fetch_pr_by_number(repo_path: &Path, number: u32) -> PrFetch {
+    // No request goes out, so nothing is learned — not even that it's gone.
     let Some((mut client, repo)) = github_client(repo_path) else {
-        return PrFetch::Fetched(None);
+        return PrFetch::Failed;
     };
     let variables = json!({ "owner": repo.owner, "repo": repo.name, "number": number });
     match client.graphql(PR_BY_NUMBER_QUERY, variables) {
         Err(ApiError::RateLimited) => PrFetch::RateLimited,
-        Err(ApiError::Failed) => PrFetch::Fetched(None),
+        Err(ApiError::Failed) => PrFetch::Failed,
         Ok(data) => PrFetch::Fetched(
             data.pointer("/repository/pullRequest")
+                .cloned()
+                .and_then(|node| serde_json::from_value::<PrNode>(node).ok())
+                .and_then(pr_info_of),
+        ),
+    }
+}
+
+/// Get the newest PR whose head is `branch`, in the base repository of the
+/// checkout at `repo_path`, whatever its state.
+///
+/// For a worktree removed before its PR was ever polled: the branch name is
+/// all that is left of it. Unlike [`fetch_pr_info`] there is no checkout to
+/// compare a closed PR's head against, so every state is reported as it is.
+pub fn fetch_pr_by_branch(repo_path: &Path, branch: &str) -> PrFetch {
+    let Some((mut client, repo)) = github_client(repo_path) else {
+        return PrFetch::Failed;
+    };
+    let variables = json!({ "owner": repo.owner, "repo": repo.name, "headBranch": branch });
+    match client.graphql(PR_LOOKUP_QUERY, variables) {
+        Err(ApiError::RateLimited) => PrFetch::RateLimited,
+        Err(ApiError::Failed) => PrFetch::Failed,
+        Ok(data) => PrFetch::Fetched(
+            data.pointer("/repository/pullRequests/nodes/0")
                 .cloned()
                 .and_then(|node| serde_json::from_value::<PrNode>(node).ok())
                 .and_then(pr_info_of),
