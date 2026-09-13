@@ -153,6 +153,9 @@ Both keys and the file are optional.
   `project_root_outside`.
 - **Duplicate path:** a project root at the same path as a registered store is
   listed once, as the store.
+- **Project map:** a project root can hold the repository's map,
+  `project-map.yaml` and `docs/project/`, described in
+  [project-map.md](project-map.md).
 
 Worktrees and agent sessions are never searched. Project discovery can be
 turned off with `harness.knowledge.projects`.
@@ -260,6 +263,7 @@ putting a file at `templates/<flow>.md`; its frontmatter should say
 | `spec-draft` | Filling in a scaffolded OpenSpec change | `idea`, `change`, `change_dir`, `root_path`, `store_note`, `references` |
 | `knowledge-draft` | Adding to or updating a knowledge root | `request`, `path`, `what`, `commit_note` |
 | `agent-session` | A free-form session against a goal you typed | `goal`, `projects` |
+| `project-scan` | Writing or updating a repository's [project map](project-map.md#scanning) | `project`, `path`, `map_root`, `skill`, `start` |
 
 ### Template syntax
 
@@ -294,9 +298,11 @@ the partial it picks.
 | `fan-out-note` | Each agent of a fan-out (`{parent}`, `{siblings}`) |
 | `group-note` | An agent given several sub-tasks by a coordinator (`{also}`) |
 | `coordinate-child` | One sub-task in a coordinator's list (`{key}`, `{kind}`, `{title}`, `{summary}`) |
+| `scan-update`, `scan-repair`, `scan-from-docs`, `scan-from-code` | A project scan's starting point (`{manifest}`; `{list}` of problems or docs) |
 
 Some variables are still assembled by okena, because they are lists or
-optional blocks: `store_note`, `references`, `projects`, `note`, `children`.
+optional blocks: `store_note`, `references`, `projects`, `note`, `children`,
+`start`.
 Each is either empty or arrives with its own blank line in front, so a template
 can place it on its own line without leaving a hole when it is absent. Their
 words come from the partials above.
@@ -319,7 +325,8 @@ more specific than any template.
 
 ### The `okena-defaults` store
 
-okena's own templates and partials are written to
+okena's own templates, partials and skills (the
+[`project-map` skill](project-map.md#the-project-map-skill)) are written to
 `<profile config dir>/knowledge/okena-defaults` and registered, so they are
 readable in Harness → Knowledge like any other store. They are the same bytes
 the built-ins render from.

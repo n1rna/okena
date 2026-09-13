@@ -19,6 +19,9 @@
 //! The built-ins are the same files okena writes when it materializes its own
 //! knowledge store (see [`defaults`]), so "read the default and edit it" is
 //! the same text that would otherwise have run.
+//!
+//! Skills resolve the same way (see [`skill`]), but whole: a skill is handed to
+//! an agent as a file, not rendered into a brief.
 
 pub mod defaults;
 pub mod flows;
@@ -99,6 +102,47 @@ pub fn brief(flow: Flow, root: Option<(&str, &Path)>, vars: &Vars<'_>) -> Brief 
 pub fn fragment(name: &str, root: Option<(&str, &Path)>, vars: &Vars<'_>) -> Rendered {
     let partial = |n: &str| partial_from(root, n);
     render_with(&format!("{{>{name}}}"), vars, &partial)
+}
+
+/// A skill's `SKILL.md`, and where it came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Skill {
+    pub name: String,
+    pub source: Source,
+    /// The whole file, frontmatter included: the frontmatter is what makes it
+    /// a skill to the agent it is handed to.
+    pub content: String,
+}
+
+/// Skill `name`: `root`'s `skills/<name>/SKILL.md` when it has one, else
+/// okena's built-in. `None` when neither exists.
+///
+/// Per skill, like templates are per flow. An override replaces the whole
+/// file; an empty one falls through, as an empty template does.
+pub fn skill(name: &str, root: Option<(&str, &Path)>) -> Option<Skill> {
+    // The name is composed into a path, so only a plain kebab-case name is one.
+    if !okena_core::specs::is_kebab_id(name) {
+        return None;
+    }
+    let rel = defaults::skill_path(name);
+    if let Some((key, dir)) = root
+        && let Ok(content) = std::fs::read_to_string(dir.join(&rel))
+        && !content.trim().is_empty()
+    {
+        return Some(Skill {
+            name: name.to_string(),
+            source: Source::Root {
+                key: key.to_string(),
+                path: rel,
+            },
+            content,
+        });
+    }
+    defaults::skill_file(name).map(|content| Skill {
+        name: name.to_string(),
+        source: Source::Builtin,
+        content: content.to_string(),
+    })
 }
 
 /// A partial's body: the root's, when it has one, else okena's.
@@ -319,6 +363,59 @@ mod tests {
         );
         assert_eq!(b.rendered.unknown, ["mystery"]);
         assert!(b.text().contains("{mystery}"), "{}", b.text());
+    }
+
+    #[test]
+    fn with_no_root_a_skill_is_the_builtin_file_whole() {
+        let s = super::skill(super::defaults::PROJECT_MAP_SKILL, None).expect("built in");
+        assert_eq!(s.source, Source::Builtin);
+        assert!(
+            s.content.starts_with("---\nname: project-map\n"),
+            "{}",
+            s.content
+        );
+    }
+
+    #[test]
+    fn a_roots_skill_replaces_the_builtin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "skills/project-map/SKILL.md",
+            "---\nname: project-map\ndescription: Ours\n---\nMap it our way.\n",
+        );
+        let s = super::skill("project-map", Some(("acme-eng", dir.path()))).expect("skill");
+        assert_eq!(
+            s.source,
+            Source::Root {
+                key: "acme-eng".into(),
+                path: "skills/project-map/SKILL.md".into()
+            }
+        );
+        assert!(s.content.contains("Map it our way."), "{}", s.content);
+        assert!(
+            !s.content.contains("Where to start"),
+            "not merged with the built-in"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_empty_skill_override_falls_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source =
+            || super::skill("project-map", Some(("acme-eng", dir.path()))).map(|s| s.source);
+        assert_eq!(source(), Some(Source::Builtin));
+        write(dir.path(), "skills/project-map/SKILL.md", "\n\n");
+        assert_eq!(source(), Some(Source::Builtin));
+    }
+
+    #[test]
+    fn a_skill_name_is_never_a_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(dir.path(), "SKILL.md", "escaped");
+        assert!(super::skill("..", Some(("acme-eng", dir.path()))).is_none());
+        assert!(super::skill("../project-map", Some(("acme-eng", dir.path()))).is_none());
+        assert!(super::skill("no-such-skill", None).is_none());
     }
 
     #[test]

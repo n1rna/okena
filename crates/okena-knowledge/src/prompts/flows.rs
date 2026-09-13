@@ -31,6 +31,8 @@ pub enum Flow {
     KnowledgeDraft,
     /// A free-form session against a goal the user typed.
     AgentSession,
+    /// Writing or updating a repository's project map (ADR-0005).
+    ProjectScan,
 }
 
 impl Flow {
@@ -47,6 +49,7 @@ impl Flow {
             Flow::SpecDraft => "spec-draft",
             Flow::KnowledgeDraft => "knowledge-draft",
             Flow::AgentSession => "agent-session",
+            Flow::ProjectScan => "project-scan",
         }
     }
 
@@ -60,6 +63,7 @@ impl Flow {
             Flow::SpecDraft => "Draft a spec change",
             Flow::KnowledgeDraft => "Write knowledge",
             Flow::AgentSession => "Free-form session",
+            Flow::ProjectScan => "Map a project",
         }
     }
 
@@ -129,6 +133,14 @@ impl Flow {
             ],
             Flow::KnowledgeDraft => &["request", "path", "what", "commit_note"],
             Flow::AgentSession => &["goal", "projects"],
+            Flow::ProjectScan => &[
+                "project", "path", // The knowledge root the map goes into.
+                "map_root", // Absolute path of the `project-map` SKILL.md to follow.
+                "skill",
+                // The starting point — update, repair, from docs, from code —
+                // worded by the `scan-*` partial okena picked.
+                "start",
+            ],
         }
     }
 
@@ -141,6 +153,7 @@ impl Flow {
             Flow::SpecDraft,
             Flow::KnowledgeDraft,
             Flow::AgentSession,
+            Flow::ProjectScan,
         ]
     }
 

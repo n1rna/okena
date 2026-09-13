@@ -363,6 +363,27 @@ impl HarnessPane {
         self.refresh_knowledge(cx);
     }
 
+    /// Open `path` in the root keyed `root_key`, switching roots when needed.
+    ///
+    /// For links from outside the view, such as a project map's docs in the
+    /// project info panel. The refresh a root switch starts keeps the root it
+    /// was asked for while that root is healthy, so the file stays open.
+    pub(crate) fn open_knowledge_doc(
+        &mut self,
+        root_key: String,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.knowledge.root_key.as_deref() != Some(root_key.as_str()) {
+            self.knowledge.clear_selection();
+            self.knowledge.root_key = Some(root_key);
+            self.knowledge.tree = None;
+            self.knowledge.collapsed.clear();
+            self.refresh_knowledge(cx);
+        }
+        self.open_knowledge_file(path, cx);
+    }
+
     /// Open one file of the current root: its held buffer when it has unsaved
     /// edits, else a fresh read.
     pub(super) fn open_knowledge_file(&mut self, path: String, cx: &mut Context<Self>) {

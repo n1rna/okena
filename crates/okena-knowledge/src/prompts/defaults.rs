@@ -19,6 +19,7 @@ pub const fn file(flow: Flow) -> &'static str {
         Flow::SpecDraft => include_str!("templates/spec-draft.md"),
         Flow::KnowledgeDraft => include_str!("templates/knowledge-draft.md"),
         Flow::AgentSession => include_str!("templates/agent-session.md"),
+        Flow::ProjectScan => include_str!("templates/project-scan.md"),
     }
 }
 
@@ -81,7 +82,47 @@ pub const PARTIALS: &[(&str, &str)] = &[
         "coordinate-child",
         include_str!("templates/partials/coordinate-child.md"),
     ),
+    (
+        "scan-update",
+        include_str!("templates/partials/scan-update.md"),
+    ),
+    (
+        "scan-repair",
+        include_str!("templates/partials/scan-repair.md"),
+    ),
+    (
+        "scan-from-docs",
+        include_str!("templates/partials/scan-from-docs.md"),
+    ),
+    (
+        "scan-from-code",
+        include_str!("templates/partials/scan-from-code.md"),
+    ),
 ];
+
+/// The skill that tells an agent how to map a repository (ADR-0005).
+pub const PROJECT_MAP_SKILL: &str = "project-map";
+
+/// okena's skills: whole Agent Skills handed to an agent as they are, never
+/// rendered into a brief. What to put in a skill is prose a team should be
+/// able to change without a release, exactly like a template.
+pub const SKILLS: &[(&str, &str)] = &[(
+    PROJECT_MAP_SKILL,
+    include_str!("skills/project-map/SKILL.md"),
+)];
+
+/// Where a store keeps skill `name`, relative to its root.
+pub fn skill_path(name: &str) -> String {
+    format!("skills/{name}/SKILL.md")
+}
+
+/// okena's built-in `SKILL.md` for `name`, frontmatter and all.
+pub fn skill_file(name: &str) -> Option<&'static str> {
+    SKILLS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, file)| *file)
+}
 
 /// Where a store keeps partial `name`, relative to its root.
 pub fn partial_path(name: &str) -> String {
@@ -118,6 +159,7 @@ fn managed_files() -> Vec<(String, &'static str)> {
         .iter()
         .map(|f| (f.template_path(), file(*f)))
         .chain(PARTIALS.iter().map(|(n, f)| (partial_path(n), *f)))
+        .chain(SKILLS.iter().map(|(n, f)| (skill_path(n), *f)))
         .collect()
 }
 
@@ -271,6 +313,8 @@ back to the built-in, so you can change one brief without supplying the rest.
 - `templates/<flow>.md` — the brief for one launch flow; frontmatter says which.
 - `templates/partials/<name>.md` — text shared between briefs, included with
   `{>name}`, or used as `{value|name}` when a value is empty.
+- `skills/<name>/SKILL.md` — skills okena hands an agent whole, such as
+  `project-map`. Overriding one replaces the whole file.
 
 okena keeps the files here current: it updates any it wrote that you have not
 changed, and leaves the ones you have edited alone.
@@ -424,6 +468,56 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join(&rel)).expect("read"),
             "unknown provenance"
+        );
+    }
+
+    #[test]
+    fn every_builtin_skill_names_itself_and_says_what_it_is_for() {
+        // Agent Skills are picked by `name` and `description`; a skill without
+        // them is a file an agent never loads.
+        for (name, file) in super::SKILLS {
+            let (yaml, _) = crate::frontmatter::split(file).expect("frontmatter");
+            let fields: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).expect("yaml");
+            assert_eq!(fields["name"].as_str(), Some(*name));
+            assert!(
+                fields["description"]
+                    .as_str()
+                    .is_some_and(|d| !d.is_empty()),
+                "{name} has no description"
+            );
+        }
+    }
+
+    #[test]
+    fn the_project_map_skills_example_is_a_valid_manifest() {
+        // The example is what an agent copies; okena must accept it.
+        let file = super::skill_file(super::PROJECT_MAP_SKILL).expect("skill");
+        let start = file.find("```yaml\n").expect("yaml example") + "```yaml\n".len();
+        let end = start + file[start..].find("\n```").expect("closed example");
+        let map = crate::project_map::parse(&file[start..end], "SKILL.md example")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!map.areas.is_empty() && !map.concepts.is_empty());
+        assert!(!map.exposes.is_empty() && !map.consumes.is_empty());
+        assert!(!map.ci.is_empty() && !map.infrastructure.is_empty());
+        assert!(map.scanned.is_some());
+    }
+
+    #[test]
+    fn materialize_writes_the_skills_where_a_store_lists_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        materialize(dir.path()).expect("write");
+        let rel = super::skill_path(super::PROJECT_MAP_SKILL);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&rel)).expect("read"),
+            super::skill_file(super::PROJECT_MAP_SKILL).expect("skill")
+        );
+        let tree = crate::tree::read_tree(dir.path());
+        assert!(
+            tree.entries
+                .iter()
+                .any(|e| e.path == rel && e.kind == okena_core::knowledge::KnowledgeKind::Skill),
+            "{:?}",
+            tree.entries.iter().map(|e| &e.path).collect::<Vec<_>>()
         );
     }
 

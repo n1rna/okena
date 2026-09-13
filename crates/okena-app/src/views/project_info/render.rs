@@ -4,6 +4,7 @@
 //! who is working on it — so a repo and a session read alike beside their
 //! terminals.
 
+use super::model::{area_labels, group_interfaces};
 use super::{ProjectInfo, ProjectInfoKind, ProjectInfoPanel};
 use crate::theme::theme;
 use crate::ui::tokens::ui_text_ms;
@@ -13,6 +14,7 @@ use crate::views::components::worktree_card::{chip, ci_chip_style, pr_chip_style
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use okena_core::project_map::{ProjectMap, ProjectMapState};
 
 impl ProjectInfoPanel {
     fn section_heading(&self, label: &str, count: Option<usize>, cx: &App) -> AnyElement {
@@ -81,6 +83,277 @@ impl ProjectInfoPanel {
             chips.push(chip(label, color, cx));
         }
         chips
+    }
+
+    /// The repository's map: its status, and the launcher that scans it.
+    fn render_map(&self, project_id: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let t = theme(cx);
+        let mut out = Vec::new();
+        let state = self.map.as_ref().map(|report| &report.state);
+        let (status, color) = match state {
+            None => ("Reading…".to_string(), t.text_muted),
+            Some(ProjectMapState::NotScanned) => ("Not scanned".to_string(), t.text_muted),
+            Some(ProjectMapState::Scanned { map }) => (
+                match &map.scanned {
+                    Some(stamp) => format!(
+                        "Scanned at {}",
+                        stamp.commit.get(..7).unwrap_or(&stamp.commit)
+                    ),
+                    None => "Scanned".to_string(),
+                },
+                t.success,
+            ),
+            Some(ProjectMapState::Invalid { .. }) => ("Invalid".to_string(), t.warning),
+        };
+        out.push(
+            h_flex()
+                .gap(px(4.0))
+                .child(chip(status, color, cx))
+                .into_any_element(),
+        );
+        if let Some(problem) = state.and_then(ProjectMapState::problem) {
+            out.push(self.note(problem.message.clone(), cx));
+            if let Some(fix) = &problem.fix {
+                out.push(self.note(fix.clone(), cx));
+            }
+        }
+        if let Some(notice) = &self.scan_notice {
+            out.push(self.note(notice.clone(), cx));
+        }
+        if let Some(error) = &self.scan_error {
+            out.push(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.warning))
+                    .child(error.clone())
+                    .into_any_element(),
+            );
+        }
+
+        // Any manifest, even a broken one, is a map to bring up to date.
+        let mapped = matches!(
+            state,
+            Some(ProjectMapState::Scanned { .. } | ProjectMapState::Invalid { .. })
+        );
+        let launcher = okena_ui::agent_launcher::AgentLauncher::new(
+            SharedString::from(format!("project-info-scan-{project_id}")),
+            if mapped { "Rescan" } else { "Scan" },
+        )
+        .subtitle("An agent maps this repository into its knowledge folder. Nothing is committed.")
+        .options(crate::views::agent_session::launch_options(
+            self.default_agent.as_deref(),
+            &t,
+        ))
+        .preferred(self.default_agent.clone())
+        .busy(self.scan_starting.then_some("Starting…"))
+        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
+            this.start_scan(command.to_string(), cx);
+        }));
+        out.push(launcher.into_any_element());
+
+        if let Some(map) = state.and_then(ProjectMapState::map) {
+            out.extend(self.render_map_contents(map, cx));
+        }
+        out
+    }
+
+    /// What the scan found: the project, its areas and concepts, what crosses
+    /// its boundary, and how it is built and run. Entries with a doc open it.
+    fn render_map_contents(&self, map: &ProjectMap, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut out = Vec::new();
+        out.push(self.map_item(
+            "project".to_string(),
+            map.project.name.clone(),
+            Some(map.project.description.clone()),
+            None,
+            map.project.doc.clone(),
+            cx,
+        ));
+
+        if !map.areas.is_empty() {
+            out.push(self.map_subheading("Areas", map.areas.len(), cx));
+            for area in &map.areas {
+                out.push(self.map_item(
+                    format!("area-{}", area.id),
+                    area.label().to_string(),
+                    Some(area.description.clone()),
+                    Some(area.paths.join(", ")),
+                    area.doc.clone(),
+                    cx,
+                ));
+            }
+        }
+
+        if !map.concepts.is_empty() {
+            out.push(self.map_subheading("Concepts", map.concepts.len(), cx));
+            for concept in &map.concepts {
+                out.push(self.map_item(
+                    format!("concept-{}", concept.id),
+                    concept.label().to_string(),
+                    Some(concept.description.clone()),
+                    Some(format!("in {}", area_labels(map, &concept.areas))),
+                    concept.doc.clone(),
+                    cx,
+                ));
+            }
+        }
+
+        for (heading, list) in [("Exposes", &map.exposes), ("Consumes", &map.consumes)] {
+            if list.is_empty() {
+                continue;
+            }
+            out.push(self.map_subheading(heading, list.len(), cx));
+            for (kind, items) in group_interfaces(list) {
+                out.push(self.note(kind.label(), cx));
+                for (i, item) in items.into_iter().enumerate() {
+                    out.push(
+                        self.map_item(
+                            format!("{heading}-{}-{i}", kind.id()),
+                            item.name.clone(),
+                            item.description.clone(),
+                            (!item.areas.is_empty())
+                                .then(|| format!("in {}", area_labels(map, &item.areas))),
+                            None,
+                            cx,
+                        ),
+                    );
+                }
+            }
+        }
+
+        if !map.ci.is_empty() {
+            out.push(self.map_subheading("CI/CD", map.ci.len(), cx));
+            for (i, pipeline) in map.ci.iter().enumerate() {
+                let meta = match &pipeline.provider {
+                    Some(provider) => format!("{provider} · {}", pipeline.files.join(", ")),
+                    None => pipeline.files.join(", "),
+                };
+                out.push(self.map_item(
+                    format!("ci-{i}"),
+                    pipeline.name.clone(),
+                    pipeline.description.clone(),
+                    Some(meta),
+                    None,
+                    cx,
+                ));
+            }
+        }
+
+        if !map.infrastructure.is_empty() {
+            out.push(self.map_subheading("Infrastructure", map.infrastructure.len(), cx));
+            for (i, resource) in map.infrastructure.iter().enumerate() {
+                let meta = resource
+                    .kind
+                    .iter()
+                    .cloned()
+                    .chain((!resource.files.is_empty()).then(|| resource.files.join(", ")))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                out.push(self.map_item(
+                    format!("infra-{i}"),
+                    resource.name.clone(),
+                    resource.description.clone(),
+                    (!meta.is_empty()).then_some(meta),
+                    None,
+                    cx,
+                ));
+            }
+        }
+        out
+    }
+
+    /// A group heading inside the map, a step below the panel's sections.
+    fn map_subheading(&self, label: &str, count: usize, cx: &App) -> AnyElement {
+        let t = theme(cx);
+        h_flex()
+            .items_center()
+            .justify_between()
+            .pt(px(6.0))
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(format!("{count}")),
+            )
+            .into_any_element()
+    }
+
+    /// One entry of the map: a name, what it is, where it is, and its doc.
+    fn map_item(
+        &self,
+        key: String,
+        title: String,
+        detail: Option<String>,
+        meta: Option<String>,
+        doc: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let mut item = v_flex()
+            .id(SharedString::from(format!("project-info-map-{key}")))
+            .w_full()
+            .min_w_0()
+            .gap(px(2.0))
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(rgb(t.border))
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(title),
+                    )
+                    .children(doc.is_some().then(|| {
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("doc ↗")
+                    })),
+            )
+            .children(detail.filter(|d| !d.trim().is_empty()).map(|detail| {
+                div()
+                    .w_full()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(detail)
+            }))
+            .children(meta.map(|meta| {
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(meta)
+            }));
+        if let Some(path) = doc {
+            item = item
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(t.bg_hover)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.open_map_doc(path.clone(), cx);
+                    }),
+                );
+        }
+        item.into_any_element()
     }
 
     /// One agent session working this project.
@@ -249,6 +522,16 @@ impl Render for ProjectInfoPanel {
                         }),
                     ),
             );
+        }
+
+        // ── What it is made of ───────────────────────────────────────────────
+        // Only a repository is mapped: a worktree is a checkout of one, and the
+        // map is committed in the repository.
+        if info.kind == ProjectInfoKind::Repo {
+            body = body.child(self.section_heading("MAP", None, cx));
+            for element in self.render_map(&info.project_id, cx) {
+                body = body.child(element);
+            }
         }
 
         // ── Where the work lands ─────────────────────────────────────────────

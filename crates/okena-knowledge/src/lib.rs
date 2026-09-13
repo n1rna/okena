@@ -9,6 +9,10 @@
 //!
 //! - [`identity`]: a store's committed `.okena-knowledge/store.yaml`;
 //! - [`project`]: a project's `.okena/knowledge.yaml`;
+//! - [`project_map`]: a project's `project-map.yaml` — what the repo is, read
+//!   and validated (ADR-0005);
+//! - [`project_scan`]: where a scan writes a project's map and what it
+//!   starts from;
 //! - [`registry`]: okena's per-profile list of store checkouts;
 //! - [`tree`]: the entries inside one root;
 //! - [`discover`]: every root on this machine, with health;
@@ -25,6 +29,8 @@ pub mod frontmatter;
 pub mod git;
 pub mod identity;
 pub mod project;
+pub mod project_map;
+pub mod project_scan;
 pub mod prompts;
 pub mod registry;
 pub mod setup;

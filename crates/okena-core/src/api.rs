@@ -1625,6 +1625,29 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
     },
+    // ─── Project maps (ADR-0005) ───
+    /// Open an agent session in a repository, briefed with the `project-map`
+    /// skill to write or update the repository's map.
+    ///
+    /// okena decides the starting point — update a valid map, repair an
+    /// invalid one, start from the repository's own docs, or from its code —
+    /// and the agent writes into the repository's knowledge root, committing
+    /// nothing. Refused on a worktree: a map describes the repository and is
+    /// committed there. Runs on the workspace path, since it creates a session
+    /// project.
+    ProjectScan {
+        project_id: String,
+        /// Override the agent to launch. `None` uses
+        /// `settings.harness.agent_command`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_command: Option<String>,
+    },
+    /// Read a project's map: not scanned, scanned, or invalid with its
+    /// problems, and the knowledge root its docs are read from. Replies with a
+    /// [`crate::project_map::ProjectMapReport`].
+    ProjectMapRead {
+        project_id: String,
+    },
     // ─── Agent reporting (written by agents through okena's MCP server) ───
     /// Record something an agent produced against its session project.
     ///

@@ -16,6 +16,7 @@ behaviour.
 - [`services.md`](services.md) — Docker Compose integration and port detection.
 - [`worktrees.md`](worktrees.md) — git worktree projects: create, close, parent linkage.
 - [`knowledge.md`](knowledge.md) — knowledge stores: layout, frontmatter, registry, project config, sync.
+- [`project-map.md`](project-map.md) — project maps: docs layout, the `project-map.yaml` manifest, validation, the `project-map` skill.
 - [`remote.md`](remote.md) — remote control server: pairing, HTTP/WS API, TLS.
 - [`mobile.md`](mobile.md) — React Native mobile client architecture (uniffi over `okena-mobile-ffi`).
 - [`testing.md`](testing.md) — repo-wide test-selection rules + the GPUI test harness setup.

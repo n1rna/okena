@@ -1245,6 +1245,15 @@ impl WindowView {
                 crate::workspace::requests::WorkbenchRequest::OpenHarnessView(section) => {
                     self.show_harness_view(section, cx);
                 }
+                crate::workspace::requests::WorkbenchRequest::OpenKnowledgeDoc {
+                    root_key,
+                    path,
+                } => {
+                    self.show_harness_view(okena_core::harness::HarnessSection::Knowledge, cx);
+                    if let Some(pane) = self.active_harness_pane(cx) {
+                        pane.update(cx, |pane, cx| pane.open_knowledge_doc(root_key, path, cx));
+                    }
+                }
             }
         }
 
