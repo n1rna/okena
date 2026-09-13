@@ -19,7 +19,7 @@ pub mod providers;
 pub mod store;
 
 pub use okena_core::tasks::{Task, TaskId, TaskRef, TaskState};
-pub use provider::{AuthStatus, Credential, TaskError, TaskProvider};
+pub use provider::{AuthStatus, Credential, TaskError, TaskProvider, task_branch_name};
 pub use providers::{AzureDevOpsProvider, LinearProvider};
 
 /// Build the provider for `provider_id` using whatever credential is stored for

@@ -415,8 +415,8 @@ pub(super) fn start_work(
         }
     };
 
-    // The provider's branch name keeps its branch-to-issue linking working, so
-    // it stays the default; the user can still name it themselves.
+    // okena's `<kind>/<key>-<title>` name is the default; the user can still
+    // name it themselves.
     let branch = branch_override
         .map(|b| b.trim().to_string())
         .filter(|b| !b.is_empty())
@@ -869,7 +869,7 @@ pub(super) mod agent_shell_tests {
             state: TaskState::Todo,
             state_name: "Todo".into(),
             url: "https://linear.app/x/issue/LIN-42".into(),
-            branch_name: "nima/lin-42-ship".into(),
+            branch_name: "chore/lin-42-ship-the-harness".into(),
             updated_at: "2026-09-02T00:00:00Z".into(),
             kind: okena_core::tasks::TaskKind::Task,
             parent_id: None,

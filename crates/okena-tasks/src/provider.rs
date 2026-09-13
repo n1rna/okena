@@ -221,15 +221,24 @@ pub trait TaskProvider: Send + Sync {
 
     /// Branch name to use when starting a worktree for `task`.
     ///
-    /// Default derives a slug from the task key and title; providers that
-    /// supply a branch name natively (Linear does) should return theirs so the
-    /// provider's own automation — branch-to-issue linking — keeps working.
+    /// okena's own format for every provider, rebuilt from the task rather
+    /// than read from `task.branch_name`, so a task assembled elsewhere cannot
+    /// smuggle in a provider's suggestion. The key stays in the name, which is
+    /// all Linear needs to link the branch and its PR to the issue.
     fn branch_name(&self, task: &Task) -> String {
-        if !task.branch_name.is_empty() {
-            return task.branch_name.clone();
-        }
-        slugify_branch(&task.display_key, &task.title)
+        task_branch_name(task.kind, &task.display_key, &task.title)
     }
+}
+
+/// okena's branch name for a task: `<prefix>/<key>-<title-slug>`, e.g.
+/// `feat/qbl-360-harness-edit-specs`. The prefix comes from the kind; the
+/// 60-character cap applies to the slug alone.
+pub fn task_branch_name(kind: okena_core::tasks::TaskKind, key: &str, title: &str) -> String {
+    let slug = slugify_branch(key, title);
+    if slug.is_empty() {
+        return String::new();
+    }
+    format!("{}/{slug}", kind.branch_prefix())
 }
 
 /// Build a git-safe branch name from a task key and title.
@@ -285,6 +294,34 @@ mod tests {
         let s = slugify_branch("LIN-1", &"word ".repeat(40));
         assert!(s.len() <= 60, "got {} chars", s.len());
         assert!(!s.ends_with('-'));
+    }
+
+    #[test]
+    fn branch_is_prefixed_by_kind() {
+        use okena_core::tasks::TaskKind;
+        let name = |k| task_branch_name(k, "QBL-360", "Harness: edit specs");
+        assert_eq!(name(TaskKind::Epic), "feat/qbl-360-harness-edit-specs");
+        assert_eq!(name(TaskKind::Feature), "feat/qbl-360-harness-edit-specs");
+        assert_eq!(name(TaskKind::Story), "feat/qbl-360-harness-edit-specs");
+        assert_eq!(name(TaskKind::Defect), "fix/qbl-360-harness-edit-specs");
+        assert_eq!(name(TaskKind::Task), "chore/qbl-360-harness-edit-specs");
+    }
+
+    #[test]
+    fn prefix_sits_outside_the_slug_cap() {
+        let s = task_branch_name(
+            okena_core::tasks::TaskKind::Feature,
+            "LIN-1",
+            &"word ".repeat(40),
+        );
+        let slug = s.strip_prefix("feat/").expect("prefixed");
+        assert_eq!(slug, slugify_branch("LIN-1", &"word ".repeat(40)));
+    }
+
+    #[test]
+    fn nothing_to_slug_gives_no_branch() {
+        // An empty name is what `start_work` refuses; a bare `chore/` is not.
+        assert_eq!(task_branch_name(Default::default(), "", "?!"), "");
     }
 
     #[test]

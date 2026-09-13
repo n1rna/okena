@@ -156,6 +156,16 @@ impl TaskKind {
         ]
     }
 
+    /// Conventional-commit prefix for a branch doing this kind of work, so a
+    /// branch reads as a feature or a fix the same way its commits do.
+    pub const fn branch_prefix(self) -> &'static str {
+        match self {
+            TaskKind::Epic | TaskKind::Feature | TaskKind::Story => "feat",
+            TaskKind::Defect => "fix",
+            TaskKind::Task => "chore",
+        }
+    }
+
     /// Derive a kind from a task's labels.
     ///
     /// Matched case-insensitively against a small synonym set, because teams
@@ -305,9 +315,10 @@ pub struct Task {
     pub state_name: String,
     /// Permalink to the task in the provider's web UI.
     pub url: String,
-    /// Branch name the provider suggests for this task. Linear supplies one
-    /// natively; providers without the concept get a derived fallback (see
-    /// `TaskProvider::branch_name`).
+    /// Branch name okena will use for this task, `<prefix>/<key>-<title>`.
+    /// Built by okena for every provider rather than taken from the provider
+    /// (Linear's suggestion leads with the username) — see
+    /// `okena_tasks::task_branch_name`.
     pub branch_name: String,
     /// Last modification time, RFC 3339. Used to detect changes between polls.
     pub updated_at: String,
