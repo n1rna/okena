@@ -6930,6 +6930,7 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         };
         WorkspaceData {
             version: 1,
@@ -7662,6 +7663,7 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         };
         WorkspaceData {
             version: 1,
@@ -8413,6 +8415,7 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         };
         WorkspaceData {
             version: 1,
@@ -8664,6 +8667,7 @@ mod tests {
                 is_creating: false,
                 is_closing: false,
                 creating_progress: None,
+                verification_runs: Vec::new(),
             }
         };
         let parent = mk("p1", None, vec!["wt1".to_string()]);
@@ -10308,6 +10312,7 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         };
         let data = WorkspaceData {
             version: 1,

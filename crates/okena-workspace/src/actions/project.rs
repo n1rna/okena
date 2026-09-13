@@ -48,6 +48,7 @@ fn new_project_row(
         is_creating: false,
         is_closing: false,
         creating_progress: None,
+        verification_runs: Vec::new(),
     }
 }
 
@@ -1434,6 +1435,7 @@ mod worktree_rename_tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }
     }
 
@@ -1570,6 +1572,7 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }
     }
 
@@ -1910,6 +1913,7 @@ mod gpui_tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }
     }
 

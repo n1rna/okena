@@ -405,6 +405,12 @@ pub struct ApiProject {
     /// `task_ref`, it holds no okena-side ids, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<crate::harness::AgentSessionState>,
+    /// Verification runs this session's agents reported, oldest first. Held
+    /// by the daemon only while it runs — see
+    /// `ProjectData::verification_runs`. Terminal ids inside are the daemon's
+    /// own, prefixed on the way in like every other terminal id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_runs: Vec<VerificationRun>,
     /// What the agent in each of this project's terminals is doing, keyed by
     /// terminal id. Decided by the daemon from the agent's own signals; only
     /// terminals running an agent appear.
@@ -736,6 +742,158 @@ pub enum FileDownloadRequest {
         root: String,
         relative_path: String,
     },
+}
+
+// ── Verification runs ────────────────────────────────────────────────────────
+
+/// How far one step of a verification run has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStepState {
+    /// Planned, not yet begun.
+    #[default]
+    Pending,
+    Running,
+    Passed,
+    Failed,
+    /// Not run: the agent decided it did not apply, or the run finished first.
+    Skipped,
+}
+
+impl VerificationStepState {
+    /// Whether the step has an outcome.
+    pub const fn is_finished(self) -> bool {
+        matches!(
+            self,
+            VerificationStepState::Passed
+                | VerificationStepState::Failed
+                | VerificationStepState::Skipped
+        )
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            VerificationStepState::Pending => "pending",
+            VerificationStepState::Running => "running",
+            VerificationStepState::Passed => "passed",
+            VerificationStepState::Failed => "failed",
+            VerificationStepState::Skipped => "skipped",
+        }
+    }
+}
+
+/// What an agent attached to a step to show its result.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VerificationEvidence {
+    /// The last lines of the output that decided the step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_tail: Option<String>,
+    /// A page the step checked, or a CI run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// An image on the agent's host, by path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot_path: Option<String>,
+}
+
+impl VerificationEvidence {
+    pub fn is_empty(&self) -> bool {
+        self.log_tail.is_none() && self.url.is_none() && self.screenshot_path.is_none()
+    }
+}
+
+/// One step of a run's plan, as the agent writes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationStepPlan {
+    pub title: String,
+    /// What passing this step shows to be true.
+    #[serde(default)]
+    pub proves: String,
+}
+
+/// One step of a verification run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationStep {
+    pub title: String,
+    /// What passing this step shows to be true.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proves: String,
+    #[serde(default)]
+    pub state: VerificationStepState,
+    /// Unix millis, stamped by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    /// Unix millis, stamped by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
+    /// The agent's one-line account of the result — for a failure, why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "VerificationEvidence::is_empty")]
+    pub evidence: VerificationEvidence,
+}
+
+/// The agent's overall call on a finished run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationVerdict {
+    Passed,
+    Failed,
+    /// The run could not settle it either way — an environment that would not
+    /// start, a flaky dependency.
+    Inconclusive,
+}
+
+impl VerificationVerdict {
+    pub const fn label(self) -> &'static str {
+        match self {
+            VerificationVerdict::Passed => "passed",
+            VerificationVerdict::Failed => "failed",
+            VerificationVerdict::Inconclusive => "inconclusive",
+        }
+    }
+}
+
+/// An agent verifying its work: a plan of steps, each advancing to a result.
+///
+/// Belongs to the agent session whose terminal reported it, and carries the
+/// task and worktree that session was started for, as they were when the run
+/// began — so a run still says what it verified after the session moves on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationRun {
+    pub id: String,
+    /// The agent's terminal. A session with several agents keeps a run each.
+    pub terminal_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<crate::tasks::TaskRef>,
+    /// The checkout the session works in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    /// Unix millis the plan was first submitted.
+    pub created_at: u64,
+    /// Unix millis the agent closed the run. `None` while it is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<VerificationVerdict>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// The plan, in the order it is run.
+    #[serde(default)]
+    pub steps: Vec<VerificationStep>,
+}
+
+impl VerificationRun {
+    /// Whether any step has left `pending`. A started run's plan is fixed.
+    pub fn has_started(&self) -> bool {
+        self.steps
+            .iter()
+            .any(|s| s.state != VerificationStepState::Pending)
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.finished_at.is_some()
+    }
 }
 
 /// POST /v1/actions request body (tagged enum)
@@ -2236,6 +2394,7 @@ mod tests {
                 is_creating: false,
                 is_closing: false,
                 creating_progress: None,
+                verification_runs: Vec::new(),
             }],
             focused_project_id: Some("p1".into()),
             fullscreen_terminal: None,

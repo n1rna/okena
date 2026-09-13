@@ -88,6 +88,7 @@ pub fn build_api_project(
         custom_session: p.custom_session.clone(),
         agent_purpose: p.agent_purpose.clone(),
         agent: p.agent.clone(),
+        verification_runs: p.verification_runs.clone(),
         pinned: p.pinned,
         last_activity_at: p.last_activity_at,
         default_shell: p.default_shell.clone(),

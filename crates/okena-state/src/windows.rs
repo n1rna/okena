@@ -330,6 +330,22 @@ impl WorkspaceData {
         Some(w.agent_sort_mode)
     }
 
+    /// Record which harness view the targeted window shows. `None` for an
+    /// unknown extra, or when it already showed that one — so re-selecting a
+    /// view does not rewrite the layout file.
+    pub fn set_harness_section(
+        &mut self,
+        id: WindowId,
+        section: Option<okena_core::harness::HarnessSection>,
+    ) -> Option<()> {
+        let w = self.window_mut(id)?;
+        if w.harness_section == section {
+            return None;
+        }
+        w.harness_section = section;
+        Some(())
+    }
+
     /// Show or hide the agents overview in the targeted window.
     ///
     /// Turning it on clears the folder filter: the two select different things
@@ -517,6 +533,33 @@ mod agents_overview_tests {
 
         data.set_agents_show_info(WindowId::Main, false);
         assert!(!data.main_window.agents_show_info);
+    }
+
+    #[test]
+    fn the_harness_section_is_recorded_once_per_change() {
+        use okena_core::harness::HarnessSection;
+        let mut data = WorkspaceData::empty();
+        assert_eq!(data.main_window.harness_section, None);
+
+        assert!(
+            data.set_harness_section(WindowId::Main, Some(HarnessSection::Testing))
+                .is_some()
+        );
+        assert_eq!(
+            data.main_window.harness_section,
+            Some(HarnessSection::Testing)
+        );
+        // Re-selecting the same view is not a change, so nothing is saved.
+        assert!(
+            data.set_harness_section(WindowId::Main, Some(HarnessSection::Testing))
+                .is_none()
+        );
+        assert!(data.set_harness_section(WindowId::Main, None).is_some());
+        let ghost = WindowId::Extra(uuid::Uuid::new_v4());
+        assert!(
+            data.set_harness_section(ghost, Some(HarnessSection::Tasks))
+                .is_none()
+        );
     }
 
     #[test]

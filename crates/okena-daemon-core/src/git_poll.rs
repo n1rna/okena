@@ -2149,6 +2149,7 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }
     }
 

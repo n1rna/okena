@@ -16,6 +16,21 @@ use okena_workspace::requests::WorkbenchRequest;
 
 use super::{Sidebar, SidebarList};
 
+/// The harness views the nav lists, in order, with each entry's element id.
+///
+/// Public so the app can check that the nav, the views and the saved window
+/// layout all cover the same sections — the three read `HarnessSection::all()`
+/// separately, and a section one of them missed would fail silently.
+pub fn harness_nav_entries() -> Vec<(HarnessSection, SharedString)> {
+    HarnessSection::all()
+        .into_iter()
+        .map(|section| {
+            let id = SharedString::from(format!("harness-nav-{}", section.slug()));
+            (section, id)
+        })
+        .collect()
+}
+
 impl Sidebar {
     pub(super) fn render_harness_nav(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
@@ -46,23 +61,21 @@ impl Sidebar {
         })
         .collect();
 
-        let items: Vec<AnyElement> = HarnessSection::all()
+        let items: Vec<AnyElement> = harness_nav_entries()
             .into_iter()
-            .map(|section| {
+            .map(|(section, id)| {
                 let broker = self.request_broker.clone();
                 let is_active = active == Some(section);
-                self.nav_item(
-                    SharedString::from(format!("harness-nav-{}", section.slug())),
-                    section.label(),
-                    is_active,
-                    cx,
-                )
-                .on_click(move |_, _window, cx| {
-                    broker.update(cx, |b, cx| {
-                        b.push_workbench_request(WorkbenchRequest::OpenHarnessView(section), cx);
-                    });
-                })
-                .into_any_element()
+                self.nav_item(id, section.label(), is_active, cx)
+                    .on_click(move |_, _window, cx| {
+                        broker.update(cx, |b, cx| {
+                            b.push_workbench_request(
+                                WorkbenchRequest::OpenHarnessView(section),
+                                cx,
+                            );
+                        });
+                    })
+                    .into_any_element()
             })
             .collect();
 

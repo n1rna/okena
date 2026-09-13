@@ -662,6 +662,7 @@ impl Workspace {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         };
 
         let new_project_hooks = project.hooks.clone();
@@ -846,6 +847,7 @@ impl Workspace {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         };
 
         // Multi-window new-project visibility rule (PRD user story 14):

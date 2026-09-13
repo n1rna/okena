@@ -1,6 +1,6 @@
 //! Chrome shared by every harness view, and the per-section dispatch.
 //!
-//! Tasks, Specs and Knowledge live in their own modules; this file holds the
+//! Tasks, Specs, Knowledge and Testing live in their own modules; this file holds the
 //! toolbar, banners and buttons they all wear.
 
 use crate::theme::{theme, with_alpha};
@@ -286,6 +286,7 @@ impl Render for HarnessPane {
             HarnessSection::Tasks => self.render_tasks_view(cx),
             HarnessSection::Specs => self.render_specs_view(window, cx),
             HarnessSection::Knowledge => self.render_knowledge_view(window, cx),
+            HarnessSection::Testing => self.render_testing_view(cx),
         };
 
         // No title bar and no close button: the sidebar's HARNESS nav already

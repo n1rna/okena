@@ -560,6 +560,15 @@ pub struct ProjectData {
     /// progress that nothing is making.
     #[serde(skip)]
     pub creating_progress: Option<String>,
+    /// Verification runs this session's agents reported over MCP, oldest first.
+    ///
+    /// Not persisted, for the same reason as `is_closing`: a run describes an
+    /// agent working now, and one reloaded after a restart would show a step
+    /// "running" that nothing is running. Mirrored over the wire so every
+    /// client watches the same run. On the project so the runs go with the
+    /// session instead of leaking into a map nothing prunes.
+    #[serde(skip)]
+    pub verification_runs: Vec<okena_core::api::VerificationRun>,
 }
 
 impl ProjectData {
@@ -651,6 +660,7 @@ mod tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }
     }
 
@@ -2352,6 +2362,7 @@ mod agent_session_tests {
             is_creating: false,
             is_closing: false,
             creating_progress: None,
+            verification_runs: Vec::new(),
         }
     }
 
