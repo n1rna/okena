@@ -192,13 +192,7 @@ pub(super) fn create(
         parent_external_id,
         container_id,
     };
-    match p.create_task(&draft) {
-        Ok(task) => match serde_json::to_value(&task) {
-            Ok(v) => ActionResult::Ok(Some(v)),
-            Err(e) => ActionResult::Err(format!("could not serialize the new task: {e}")),
-        },
-        Err(e) => ActionResult::Err(describe(e)),
-    }
+    task_result(p.create_task(&draft))
 }
 
 /// Sub-tasks of a task, whoever they are assigned to.
@@ -303,7 +297,21 @@ fn task_result(result: Result<okena_core::tasks::Task, TaskError>) -> ActionResu
             Ok(v) => ActionResult::Ok(Some(v)),
             Err(e) => ActionResult::Err(format!("could not serialize the task: {e}")),
         },
-        Err(e) => ActionResult::Err(describe(e)),
+        Err(e) => error_result(e),
+    }
+}
+
+/// A provider error as an action result.
+///
+/// `NeedsChoice` is not a failure — the caller has to decide something, such
+/// as which team — so it comes back as a result carrying the question, which
+/// an agent reads and acts on instead of being told the call failed.
+fn error_result(e: TaskError) -> ActionResult {
+    match e {
+        TaskError::NeedsChoice { message } => {
+            ActionResult::Ok(Some(serde_json::json!({ "needs_choice": message })))
+        }
+        other => ActionResult::Err(describe(other)),
     }
 }
 
@@ -492,21 +500,31 @@ pub(super) fn start_work(
     // Re-fetch rather than trusting a branch name the client supplied: the
     // client's list may be minutes old, and the branch name is what every
     // worktree — and the provider's branch-to-issue linking — is keyed on.
-    let tasks = match p.list_assigned() {
-        Ok(t) => t,
-        Err(e) => return ActionResult::Err(describe(e)),
-    };
-    // By id or display key: an agent starting a sub-agent was handed the key.
-    let task = match tasks.iter().find(|t| {
-        t.id.external_id == task_external_id
-            || t.display_key.eq_ignore_ascii_case(&task_external_id)
-    }) {
-        Some(t) => t.clone(),
-        None => {
-            return ActionResult::Err(format!(
-                "task `{task_external_id}` is not in your assigned list"
-            ));
+    //
+    // The one task, by id or display key, rather than the assigned queue: a
+    // sub-task a coordinator just filed has no assignee, and the queue poll is
+    // rate-floored, so two starts back to back would be refused.
+    let id = okena_core::tasks::TaskId::new(provider.clone(), task_external_id.clone());
+    let task = match p.get_task(&id) {
+        Ok(task) => task,
+        Err(TaskError::Unsupported { .. }) => {
+            let tasks = match p.list_assigned() {
+                Ok(t) => t,
+                Err(e) => return ActionResult::Err(describe(e)),
+            };
+            match tasks.into_iter().find(|t| {
+                t.id.external_id == task_external_id
+                    || t.display_key.eq_ignore_ascii_case(&task_external_id)
+            }) {
+                Some(t) => t,
+                None => {
+                    return ActionResult::Err(format!(
+                        "task `{task_external_id}` is not in your assigned list"
+                    ));
+                }
+            }
         }
+        Err(e) => return ActionResult::Err(describe(e)),
     };
 
     // okena's `<kind>/<key>-<title>` name is the default; the user can still
@@ -831,6 +849,52 @@ mod tests {
             .expect("azure devops should be listed");
         assert_eq!(ado.display_name, "Azure DevOps");
         assert_eq!(ado.auth, TaskAuthState::Disconnected);
+    }
+
+    #[test]
+    fn provider_calls_are_claimed_for_the_blocking_pool_and_nothing_else() {
+        use crate::workspace::actions::execute::execute_task_provider_action;
+        use okena_core::api::ActionRequest;
+        // No credential stored, so these fail without touching the network —
+        // what matters is that they are claimed at all.
+        let get = ActionRequest::TaskGet {
+            provider: "linear".into(),
+            task_external_id: "QBL-1".into(),
+        };
+        assert!(execute_task_provider_action(&get).is_some());
+        // Starting work creates worktrees, and disconnecting is a local write:
+        // neither is a provider call the loop may run without the workspace.
+        let start = ActionRequest::TaskStartWork {
+            provider: "linear".into(),
+            task_external_id: "QBL-1".into(),
+            project_ids: vec!["p".into()],
+            agent_root: None,
+            branch: None,
+            agent_command: None,
+            note: None,
+            coordinate: false,
+            also: Vec::new(),
+            siblings: Vec::new(),
+        };
+        assert!(execute_task_provider_action(&start).is_none());
+        assert!(
+            execute_task_provider_action(&ActionRequest::TasksDisconnect {
+                provider: "linear".into()
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_choice_the_provider_needs_is_a_result_not_an_error() {
+        let ActionResult::Ok(Some(v)) = error_result(TaskError::NeedsChoice {
+            message: "choose a team for the new task".into(),
+        }) else {
+            panic!("a needed choice must not come back as an error");
+        };
+        assert_eq!(v["needs_choice"], "choose a team for the new task");
+        let failed = err_of(error_result(TaskError::Unauthorized { provider: "linear" }));
+        assert!(failed.contains("rejected"), "got: {failed}");
     }
 
     #[test]

@@ -114,6 +114,69 @@ pub fn execute_spec_store_action(
     })
 }
 
+/// Run a task-provider call — a read or write against Linear or Azure DevOps —
+/// which needs neither the workspace nor settings.
+///
+/// `None` for any other action. The daemon runs these on its blocking pool
+/// rather than under the workspace lock: each is one or more round trips to
+/// the provider, and every terminal would otherwise wait on them.
+pub fn execute_task_provider_action(action: &ActionRequest) -> Option<ActionResult> {
+    Some(match action {
+        ActionRequest::TasksConnectApiKey {
+            provider,
+            api_key,
+            organization_url,
+        } => tasks::connect_api_key(provider.clone(), api_key.clone(), organization_url.clone()),
+        ActionRequest::TasksList { provider } => tasks::list(provider.clone()),
+        ActionRequest::TaskContainers { provider } => tasks::containers(provider.clone()),
+        ActionRequest::TaskCreate {
+            provider,
+            title,
+            description,
+            kind,
+            parent_external_id,
+            container_id,
+        } => tasks::create(
+            provider.clone(),
+            title.clone(),
+            description.clone(),
+            kind.clone(),
+            parent_external_id.clone(),
+            container_id.clone(),
+        ),
+        ActionRequest::TaskChildren {
+            provider,
+            task_external_id,
+        } => tasks::children(provider.clone(), task_external_id.clone()),
+        ActionRequest::TaskGet {
+            provider,
+            task_external_id,
+        } => tasks::get(provider.clone(), task_external_id.clone()),
+        ActionRequest::TaskUpdate {
+            provider,
+            task_external_id,
+            title,
+            description,
+        } => tasks::update(
+            provider.clone(),
+            task_external_id.clone(),
+            title.clone(),
+            description.clone(),
+        ),
+        ActionRequest::TaskSetState {
+            provider,
+            task_external_id,
+            state,
+        } => tasks::set_state(provider.clone(), task_external_id.clone(), *state),
+        ActionRequest::TaskComment {
+            provider,
+            task_external_id,
+            body,
+        } => tasks::comment(provider.clone(), task_external_id.clone(), body.clone()),
+        _ => return None,
+    })
+}
+
 /// Execute any `ActionRequest` against the workspace.
 ///
 /// This is the single source of truth for all client-facing actions.
@@ -827,53 +890,19 @@ pub fn execute_action(
             cx,
         ),
         ActionRequest::TasksAuthStatus => tasks::auth_status(),
-        ActionRequest::TasksConnectApiKey {
-            provider,
-            api_key,
-            organization_url,
-        } => tasks::connect_api_key(provider, api_key, organization_url),
         ActionRequest::TasksDisconnect { provider } => tasks::disconnect(provider),
-        ActionRequest::TasksList { provider } => tasks::list(provider),
-        ActionRequest::TaskContainers { provider } => tasks::containers(provider),
-        ActionRequest::TaskCreate {
-            provider,
-            title,
-            description,
-            kind,
-            parent_external_id,
-            container_id,
-        } => tasks::create(
-            provider,
-            title,
-            description,
-            kind,
-            parent_external_id,
-            container_id,
-        ),
-        ActionRequest::TaskChildren {
-            provider,
-            task_external_id,
-        } => tasks::children(provider, task_external_id),
-        ActionRequest::TaskGet {
-            provider,
-            task_external_id,
-        } => tasks::get(provider, task_external_id),
-        ActionRequest::TaskUpdate {
-            provider,
-            task_external_id,
-            title,
-            description,
-        } => tasks::update(provider, task_external_id, title, description),
-        ActionRequest::TaskSetState {
-            provider,
-            task_external_id,
-            state,
-        } => tasks::set_state(provider, task_external_id, state),
-        ActionRequest::TaskComment {
-            provider,
-            task_external_id,
-            body,
-        } => tasks::comment(provider, task_external_id, body),
+        // The daemon routes these off its command loop before they get here;
+        // this path is for every other caller.
+        action @ (ActionRequest::TasksConnectApiKey { .. }
+        | ActionRequest::TasksList { .. }
+        | ActionRequest::TaskContainers { .. }
+        | ActionRequest::TaskCreate { .. }
+        | ActionRequest::TaskChildren { .. }
+        | ActionRequest::TaskGet { .. }
+        | ActionRequest::TaskUpdate { .. }
+        | ActionRequest::TaskSetState { .. }
+        | ActionRequest::TaskComment { .. }) => execute_task_provider_action(&action)
+            .unwrap_or_else(|| ActionResult::Err("not a task provider action".into())),
         ActionRequest::TaskStartWork {
             provider,
             task_external_id,

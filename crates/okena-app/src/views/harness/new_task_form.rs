@@ -174,6 +174,10 @@ impl HarnessPane {
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing created task".to_string()))
                     .and_then(|v| {
+                        // The provider needs something decided; say what.
+                        if let Some(question) = v.get("needs_choice").and_then(|q| q.as_str()) {
+                            return Err(question.to_string());
+                        }
                         serde_json::from_value::<Task>(v)
                             .map_err(|e| format!("Unexpected task: {e}"))
                     })

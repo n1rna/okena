@@ -870,6 +870,17 @@ fn file_task(args: &Value, parent_defaults_to_session: bool) -> Result<Value, St
         "parent_external_id": parent,
         "container_id": container,
     }))?;
+    // A choice the provider needs made is the answer, not a created task.
+    if created.get("needs_choice").is_some() {
+        return Ok(created);
+    }
+    // The alias answers in the shape briefs were written against: the created
+    // task as a JSON string.
+    let created = if parent_defaults_to_session {
+        Value::String(created.to_string())
+    } else {
+        created
+    };
     Ok(json!({ "created": created, "parent": parent }))
 }
 

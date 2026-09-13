@@ -25,12 +25,37 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// Linear caps page size at 250; the assigned-work queue is far smaller.
 const PAGE_SIZE: u32 = 100;
 
+/// The issue fields `parse_issue` reads, as a fragment every query that
+/// returns issues spreads, so the queries cannot drift from the parser or
+/// from each other.
+macro_rules! issue_fields {
+    () => {
+        r#"
+fragment IssueFields on Issue {
+  id
+  identifier
+  title
+  description
+  url
+  updatedAt
+  state { name type }
+  parent { id identifier }
+  labels(first: 20) { nodes { name } }
+  team { id key name }
+  project { id name }
+  cycle { id number name }
+}
+"#
+    };
+}
+
 /// Assigned, still-open issues, most recently updated first.
 ///
 /// The `state.type` filter runs server-side so a large finished backlog is
 /// never transferred. Linear's state types are a closed set:
 /// `triage | backlog | unstarted | started | completed | canceled`.
-const QUERY_ASSIGNED: &str = r#"
+const QUERY_ASSIGNED: &str = concat!(
+    r#"
 query AssignedIssues($first: Int!) {
   viewer {
     id
@@ -40,24 +65,13 @@ query AssignedIssues($first: Int!) {
       filter: { state: { type: { nin: ["completed", "canceled"] } } }
       orderBy: updatedAt
     ) {
-      nodes {
-        id
-        identifier
-        title
-        description
-        url
-        updatedAt
-        state { name type }
-        parent { id identifier }
-        labels(first: 20) { nodes { name } }
-        team { id key name }
-        project { id name }
-        cycle { id number name }
-      }
+      nodes { ...IssueFields }
     }
   }
 }
-"#;
+"#,
+    issue_fields!()
+);
 
 /// Teams the authenticated user belongs to, for choosing where a new issue
 /// goes. Linear scopes issues to a team and requires one on create.
@@ -109,7 +123,8 @@ mutation CreateLabel($teamId: String!, $name: String!) {
 
 /// Create an issue, returning it in the same shape the list query uses so the
 /// caller gets a real `Task` without a second fetch.
-const MUTATION_CREATE_ISSUE: &str = r#"
+const MUTATION_CREATE_ISSUE: &str = concat!(
+    r#"
 mutation CreateIssue(
   $teamId: String!
   $title: String!
@@ -127,47 +142,26 @@ mutation CreateIssue(
     }
   ) {
     success
-    issue {
-      id
-      identifier
-      title
-      description
-      url
-      updatedAt
-      state { name type }
-      parent { id identifier }
-      labels(first: 20) { nodes { name } }
-      team { id key name }
-      project { id name }
-      cycle { id number name }
-    }
+    issue { ...IssueFields }
   }
 }
-"#;
+"#,
+    issue_fields!()
+);
 
 /// Sub-issues of a parent, whoever they are assigned to.
-const QUERY_CHILDREN: &str = r#"
+const QUERY_CHILDREN: &str = concat!(
+    r#"
 query IssueChildren($id: String!) {
   issue(id: $id) {
     children(first: 100) {
-      nodes {
-        id
-        identifier
-        title
-        description
-        url
-        updatedAt
-        state { name type }
-        parent { id identifier }
-        labels(first: 20) { nodes { name } }
-        team { id key name }
-        project { id name }
-        cycle { id number name }
-      }
+      nodes { ...IssueFields }
     }
   }
 }
-"#;
+"#,
+    issue_fields!()
+);
 
 /// The workflow states available to the issue's own team.
 ///
@@ -195,24 +189,14 @@ mutation SetState($id: String!, $stateId: String!) {
 "#;
 
 /// One issue, by UUID or identifier — `issue(id:)` takes either.
-const QUERY_ISSUE: &str = r#"
+const QUERY_ISSUE: &str = concat!(
+    r#"
 query Issue($id: String!) {
-  issue(id: $id) {
-    id
-    identifier
-    title
-    description
-    url
-    updatedAt
-    state { name type }
-    parent { id identifier }
-    labels(first: 20) { nodes { name } }
-    team { id key name }
-    project { id name }
-    cycle { id number name }
-  }
+  issue(id: $id) { ...IssueFields }
 }
-"#;
+"#,
+    issue_fields!()
+);
 
 /// The UUID behind an identifier. Mutations are handed the UUID: an
 /// identifier changes when its issue moves team, the UUID never does.
@@ -224,27 +208,17 @@ query IssueId($id: String!) {
 
 /// Edit an issue. `$input` carries only the fields being changed — an explicit
 /// `null` would clear one.
-const MUTATION_UPDATE_ISSUE: &str = r#"
+const MUTATION_UPDATE_ISSUE: &str = concat!(
+    r#"
 mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) {
     success
-    issue {
-      id
-      identifier
-      title
-      description
-      url
-      updatedAt
-      state { name type }
-      parent { id identifier }
-      labels(first: 20) { nodes { name } }
-      team { id key name }
-      project { id name }
-      cycle { id number name }
-    }
+    issue { ...IssueFields }
   }
 }
-"#;
+"#,
+    issue_fields!()
+);
 
 const MUTATION_CREATE_COMMENT: &str = r#"
 mutation CreateComment($issueId: String!, $body: String!) {
@@ -1217,6 +1191,20 @@ mod group_tests {
     }
 
     #[test]
+    fn every_issue_query_carries_the_fields_it_spreads() {
+        for query in [
+            super::QUERY_ASSIGNED,
+            super::QUERY_CHILDREN,
+            super::QUERY_ISSUE,
+            super::MUTATION_CREATE_ISSUE,
+            super::MUTATION_UPDATE_ISSUE,
+        ] {
+            assert!(query.contains("...IssueFields"), "{query}");
+            assert!(query.contains("fragment IssueFields on Issue"), "{query}");
+        }
+    }
+
+    #[test]
     fn a_group_with_a_blank_name_is_dropped_rather_than_shown_empty() {
         let groups = parse_groups(&json!({
             "team": { "id": "t1", "name": "   " },
@@ -1224,5 +1212,166 @@ mod group_tests {
         }));
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].axis, GroupAxis::Project);
+    }
+}
+
+/// Writes by display key, against a mocked API: every mutation must be handed
+/// the UUID, since an identifier changes when its issue moves team.
+#[cfg(test)]
+mod mock_tests {
+    use super::*;
+    use crate::providers::NET;
+    use okena_transport::http::{HttpResponse, testing};
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+
+    const UUID: &str = "f0fe2bc3-d9fe-4db4-b8ce-9aac476ac19d";
+
+    type Sent = Arc<Mutex<Vec<(String, Value)>>>;
+
+    fn ok(v: Value) -> Result<HttpResponse, HttpError> {
+        Ok(HttpResponse::new(200, vec![], v.to_string().into_bytes()))
+    }
+
+    fn issue_node() -> Value {
+        json!({
+            "id": UUID, "identifier": "QBL-9", "title": "Split payments",
+            "state": { "name": "In Progress", "type": "started" },
+        })
+    }
+
+    /// Answer each GraphQL operation by name, recording its variables.
+    fn linear_api(sent: Sent) -> testing::MockGuard {
+        testing::mock(move |req| {
+            let body = req.json_body().cloned().unwrap_or(Value::Null);
+            let operation = body["query"]
+                .as_str()
+                .and_then(|q| q.split_whitespace().nth(1))
+                .and_then(|name| name.split('(').next())
+                .unwrap_or("")
+                .to_string();
+            if let Ok(mut log) = sent.lock() {
+                log.push((operation.clone(), body["variables"].clone()));
+            }
+            ok(match operation.as_str() {
+                "IssueId" => json!({ "data": { "issue": { "id": UUID } } }),
+                "UpdateIssue" => {
+                    json!({ "data": { "issueUpdate": { "success": true, "issue": issue_node() } } })
+                }
+                "CreateComment" => json!({ "data": { "commentCreate": { "success": true } } }),
+                "IssueStates" => json!({ "data": { "issue": { "id": UUID, "team": { "states": {
+                    "nodes": [
+                        { "id": "s-todo", "name": "Todo", "type": "unstarted", "position": 0.0 },
+                        { "id": "s-doing", "name": "In Progress", "type": "started", "position": 1.0 },
+                    ]
+                } } } } }),
+                "SetState" => json!({ "data": { "issueUpdate": { "success": true } } }),
+                "ParentContext" => json!({ "data": { "issue": {
+                    "id": UUID, "team": { "id": "team-1", "labels": { "nodes": [] } },
+                } } }),
+                "CreateIssue" => {
+                    json!({ "data": { "issueCreate": { "success": true, "issue": issue_node() } } })
+                }
+                other => panic!("unexpected operation `{other}`"),
+            })
+        })
+    }
+
+    fn provider() -> LinearProvider {
+        LinearProvider::new(Some(Credential::ApiKey("k".into())))
+    }
+
+    fn by_key() -> TaskId {
+        TaskId::new("linear", "QBL-9")
+    }
+
+    fn variables(sent: &Sent, operation: &str) -> Value {
+        sent.lock()
+            .ok()
+            .and_then(|s| {
+                s.iter()
+                    .find(|(op, _)| op == operation)
+                    .map(|(_, v)| v.clone())
+            })
+            .unwrap_or_else(|| panic!("no `{operation}` was sent"))
+    }
+
+    #[test]
+    fn an_update_by_key_writes_to_the_uuid() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = Sent::default();
+        let _mock = linear_api(sent.clone());
+
+        let task = provider()
+            .update_task(
+                &by_key(),
+                &TaskPatch {
+                    title: None,
+                    description: Some("Two cards".into()),
+                },
+            )
+            .expect("updates");
+        assert_eq!(task.display_key, "QBL-9");
+        let vars = variables(&sent, "UpdateIssue");
+        assert_eq!(vars["id"], UUID);
+        assert_eq!(vars["input"], json!({ "description": "Two cards" }));
+    }
+
+    #[test]
+    fn a_comment_by_key_is_filed_on_the_uuid() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = Sent::default();
+        let _mock = linear_api(sent.clone());
+
+        provider()
+            .add_comment(&by_key(), "Picked up")
+            .expect("comments");
+        let vars = variables(&sent, "CreateComment");
+        assert_eq!(vars["issueId"], UUID);
+        assert_eq!(vars["body"], "Picked up");
+    }
+
+    #[test]
+    fn a_state_change_by_key_moves_the_uuid() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = Sent::default();
+        let _mock = linear_api(sent.clone());
+
+        provider()
+            .set_state(&by_key(), TaskState::InProgress)
+            .expect("moves");
+        assert_eq!(variables(&sent, "IssueStates")["id"], "QBL-9");
+        let vars = variables(&sent, "SetState");
+        assert_eq!(vars["id"], UUID);
+        assert_eq!(vars["stateId"], "s-doing");
+    }
+
+    #[test]
+    fn a_child_of_a_key_is_created_under_the_uuid() {
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = Sent::default();
+        let _mock = linear_api(sent.clone());
+
+        provider()
+            .create_task(&TaskDraft {
+                title: "Split payments".into(),
+                parent_external_id: Some("QBL-9".into()),
+                ..Default::default()
+            })
+            .expect("creates");
+        let vars = variables(&sent, "CreateIssue");
+        assert_eq!(vars["parentId"], UUID);
+        assert_eq!(vars["teamId"], "team-1");
+    }
+
+    #[test]
+    fn back_to_back_writes_are_not_refused_by_the_rate_floor() {
+        // The floor refuses rather than waits; only the queue poll has one.
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let _mock = linear_api(Sent::default());
+        let p = provider();
+        for _ in 0..3 {
+            p.add_comment(&by_key(), "again").expect("not throttled");
+        }
     }
 }

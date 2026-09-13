@@ -1394,8 +1394,7 @@ mod tests {
 
     // ── Against a mocked API ───────────────────────────────────────────────
 
-    /// The bus mock is process-global; these tests take turns.
-    static NET: Mutex<()> = Mutex::new(());
+    use crate::providers::NET;
 
     fn pat() -> Credential {
         Credential::PersonalAccessToken {
