@@ -236,6 +236,9 @@ pub struct WindowView {
     /// so the project stays in the same place rather than jumping to center.
     /// (The offset is otherwise clamped to 0 while a single project is zoomed.)
     saved_grid_offset: Option<Point<Pixels>>,
+    /// The projects overview as a canvas, created the first time this window
+    /// shows it and kept so its view survives switching layouts.
+    project_canvas: Option<Entity<crate::views::project_canvas::ProjectCanvas>>,
     /// Set by an explicit "jump to project" (project switcher Tab) so the next
     /// focus-change observation centers the target. Other project switches
     /// (cmd+alt+arrow, mouse click) leave it unset and only ensure visibility.
@@ -446,6 +449,7 @@ impl WindowView {
             was_project_focused: false,
             pending_center_scroll: None,
             saved_grid_offset: None,
+            project_canvas: None,
             center_next_navigation: false,
             last_project_paths: HashMap::new(),
             last_data_replacement_epoch,

@@ -390,11 +390,14 @@ impl Sidebar {
     /// The overflow menu's contents, which depend on the list it belongs to.
     fn render_overflow_menu(&mut self, window_id: WindowId, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let rows = self
-            .workspace
-            .read(cx)
-            .grid_layout_mode(window_id)
-            .is_rows();
+        let (rows, canvas) = {
+            let ws = self.workspace.read(cx);
+            (
+                ws.grid_layout_mode(window_id).is_rows(),
+                ws.grid_is_canvas(window_id),
+            )
+        };
+        let projects_list = matches!(self.list, SidebarList::Projects);
         let mut panel = okena_ui::menu::context_menu_panel("list-overflow-menu", &t)
             .min_w(px(220.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -545,12 +548,12 @@ impl Sidebar {
             }
         }
 
-        panel
+        panel = panel
             .child(okena_ui::menu::menu_section("Layout", &t))
             .child(self.menu_toggle(
                 "layout-columns",
                 "Side by side",
-                !rows,
+                !rows && !canvas,
                 "icons/split-vertical.svg",
                 move |this, cx| {
                     this.workspace.update(cx, |ws, cx| {
@@ -566,7 +569,7 @@ impl Sidebar {
             .child(self.menu_toggle(
                 "layout-rows",
                 "Stacked",
-                rows,
+                rows && !canvas,
                 "icons/split-horizontal.svg",
                 move |this, cx| {
                     this.workspace.update(cx, |ws, cx| {
@@ -578,8 +581,27 @@ impl Sidebar {
                     });
                 },
                 cx,
-            ))
-            .into_any_element()
+            ));
+        // The canvas draws projects' maps; agent sessions have none.
+        if projects_list {
+            panel = panel.child(self.menu_toggle(
+                "layout-canvas",
+                "Canvas",
+                canvas,
+                "icons/select-all.svg",
+                move |this, cx| {
+                    this.workspace.update(cx, |ws, cx| {
+                        ws.set_grid_layout_mode(
+                            window_id,
+                            okena_workspace::state::ProjectLayoutMode::Canvas,
+                            cx,
+                        );
+                    });
+                },
+                cx,
+            ));
+        }
+        panel.into_any_element()
     }
 }
 

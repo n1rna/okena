@@ -24,9 +24,10 @@ use std::path::{Path, PathBuf};
 pub use okena_layout::{LayoutNode, SplitDirection};
 pub use okena_state::agent_tree;
 pub use okena_state::{
-    AgentRole, AgentSortMode, DropZone, FocusedTerminalState, FolderData, HookTerminalEntry,
-    HookTerminalStatus, PendingWorktreeClose, ProjectData, ProjectLayoutMode, WindowBounds,
-    WindowId, WindowState, WorkspaceData, WorktreeMetadata, now_unix_seconds,
+    AgentRole, AgentSortMode, CanvasPoint, CanvasViewport, DropZone, FocusedTerminalState,
+    FolderData, HookTerminalEntry, HookTerminalStatus, PendingWorktreeClose, ProjectData,
+    ProjectLayoutMode, WindowBounds, WindowId, WindowState, WorkspaceData, WorktreeMetadata,
+    now_unix_seconds,
 };
 
 /// What a window is focused on, captured before a sync reshapes the layout.
@@ -1481,6 +1482,10 @@ impl Workspace {
         let Some(w) = self.data.window_mut(window_id) else {
             return;
         };
+        // The canvas draws projects' maps; agent sessions have none.
+        if mode.is_canvas() && w.agents_overview {
+            return;
+        }
         let current = if w.agents_overview {
             w.agent_layout
         } else {
@@ -1552,6 +1557,59 @@ impl Workspace {
         if self.data.set_grid_show_info(window_id, on).is_some() {
             self.notify_data(cx);
         }
+    }
+
+    /// Whether the window is showing the projects overview as a canvas.
+    ///
+    /// Only the projects overview: a canvas mode left on the agents overview's
+    /// setting is shown as columns there.
+    pub fn grid_is_canvas(&self, window_id: WindowId) -> bool {
+        self.data
+            .window(window_id)
+            .is_some_and(|w| !w.agents_overview && w.project_layout.is_canvas())
+    }
+
+    /// Hand-placed canvas cards in this window, by project id.
+    pub fn canvas_positions(&self, window_id: WindowId) -> HashMap<String, CanvasPoint> {
+        self.data
+            .window(window_id)
+            .map(|w| w.canvas_positions.clone())
+            .unwrap_or_default()
+    }
+
+    /// The canvas pan and zoom this window last showed.
+    pub fn canvas_viewport(&self, window_id: WindowId) -> Option<CanvasViewport> {
+        self.data.window(window_id).and_then(|w| w.canvas_viewport)
+    }
+
+    /// Place a card by hand. Persisted via `notify_data`; call when a drag
+    /// ends, not on every move.
+    pub fn set_canvas_position(
+        &mut self,
+        window_id: WindowId,
+        project_id: &str,
+        point: CanvasPoint,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.mutate_data(cx, |data| {
+            data.set_canvas_position(window_id, project_id, point);
+        });
+    }
+
+    /// Hand every card back to the automatic layout. Persisted.
+    pub fn clear_canvas_positions(&mut self, window_id: WindowId, cx: &mut impl WorkspaceCx) {
+        self.mutate_data(cx, |data| data.clear_canvas_positions(window_id));
+    }
+
+    /// Record the canvas pan and zoom. Persisted; call when a pan or zoom
+    /// settles, not on every event.
+    pub fn set_canvas_viewport(
+        &mut self,
+        window_id: WindowId,
+        viewport: Option<CanvasViewport>,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        self.mutate_data(cx, |data| data.set_canvas_viewport(window_id, viewport));
     }
 
     /// Flip the sidebar project sort mode (manual ↔ activity) for a window.

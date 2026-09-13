@@ -43,5 +43,5 @@ Architecture and build rules live next to the code, not here:
   an agent ([ADR-0005](decisions/0005-project-maps.md),
   [reference](reference/project-map.md)), scanned from and shown in a
   repository's project info panel, and linked to each other on both sides
-  ([ADR-0006](decisions/0006-project-links-on-both-sides.md)). Next: the
-  cross-project view.
+  ([ADR-0006](decisions/0006-project-links-on-both-sides.md)), and seen
+  together on the projects overview's [canvas](reference/project-map.md#the-canvas).

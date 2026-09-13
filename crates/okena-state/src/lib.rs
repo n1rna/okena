@@ -22,7 +22,8 @@ pub use toast::{Toast, ToastAction, ToastActionStyle, ToastLevel};
 pub use transient::{DropZone, FocusedTerminalState, PendingWorktreeClose};
 pub use window_id::WindowId;
 pub use window_state::{
-    AgentSortMode, ProjectLayoutMode, ProjectSortMode, WindowBounds, WindowState,
+    AgentSortMode, CanvasPoint, CanvasViewport, ProjectLayoutMode, ProjectSortMode, WindowBounds,
+    WindowState,
 };
 pub use workspace_data::{
     AgentRole, FolderData, HookTerminalEntry, HookTerminalStatus, ProjectData, WorkspaceData,

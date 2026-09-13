@@ -285,6 +285,32 @@ The read runs in the daemon and replies with the map's state and the key of the
 knowledge root it came from, so a remote project's panel reads the same way as
 a local one.
 
+## The canvas
+
+**Canvas** is a layout of the projects overview, beside Columns and Stacked,
+chosen from the footer's layout menu or the sidebar header's menu. It shows the
+projects the overview shows, as map cards on an open canvas. The agents
+overview has no canvas.
+
+- **Cards:** each project's name and map status, then its areas as boxes with
+  the concepts that live in each. A project without a valid map says so.
+- **Edges:** each link is drawn from the area whose `consumes` entry names the
+  interface to the area whose `exposes` entry does, and from the card when the
+  map names no area. Colour gives the source: matched (muted), confirmed
+  (green), found by scan (blue). A link listed in only one map is dashed.
+  Labels show once zoomed in far enough.
+- **Placement:** cards start in an automatic layout that puts linked projects
+  next to each other. Drag a card to place it; **Auto layout** hands every card
+  back to the automatic layout.
+- **View:** drag the background or scroll to pan; ⌘-scroll (Ctrl-scroll) zooms
+  around the pointer; **Fit** shows every card.
+- **Selecting:** click a card to select it, shift-click to add to the selection.
+  With two or more selected, **Scan links** starts a
+  [links scan](#scanning-links) over exactly those projects.
+- **Opening:** double-click a card to open that project in its column.
+- **Per window:** card positions and the view are kept per window.
+- **Refresh:** maps and links are read again every 3 seconds.
+
 ## The `project-map` skill
 
 What a map contains, and how an agent finds it, is prose in an Agent Skill

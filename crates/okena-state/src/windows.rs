@@ -87,6 +87,43 @@ impl WorkspaceData {
         }
     }
 
+    /// Place a project's card on the targeted window's canvas.
+    pub fn set_canvas_position(
+        &mut self,
+        id: WindowId,
+        project_id: &str,
+        point: crate::window_state::CanvasPoint,
+    ) {
+        if point.x.is_finite()
+            && point.y.is_finite()
+            && let Some(w) = self.window_mut(id)
+        {
+            w.canvas_positions.insert(project_id.to_string(), point);
+        }
+    }
+
+    /// Forget every hand-placed card on the targeted window's canvas, so the
+    /// automatic layout places them all again.
+    pub fn clear_canvas_positions(&mut self, id: WindowId) {
+        if let Some(w) = self.window_mut(id) {
+            w.canvas_positions.clear();
+        }
+    }
+
+    /// Record the targeted window's canvas pan and zoom.
+    pub fn set_canvas_viewport(
+        &mut self,
+        id: WindowId,
+        viewport: Option<crate::window_state::CanvasViewport>,
+    ) {
+        let valid = viewport.is_none_or(|v| {
+            v.x.is_finite() && v.y.is_finite() && v.zoom.is_finite() && v.zoom > 0.0
+        });
+        if valid && let Some(w) = self.window_mut(id) {
+            w.canvas_viewport = viewport;
+        }
+    }
+
     /// Set the pixel scale used by the targeted window's project-size weights.
     pub fn set_project_width_scale(&mut self, id: WindowId, scale: f32) {
         if scale.is_finite()
@@ -209,12 +246,14 @@ impl WorkspaceData {
     pub fn delete_project_scrub_all_windows(&mut self, project_id: &str) {
         self.main_window.hidden_project_ids.remove(project_id);
         self.main_window.project_widths.remove(project_id);
+        self.main_window.canvas_positions.remove(project_id);
         if self.main_window.project_widths.is_empty() {
             self.main_window.project_width_scale = None;
         }
         for extra in &mut self.extra_windows {
             extra.hidden_project_ids.remove(project_id);
             extra.project_widths.remove(project_id);
+            extra.canvas_positions.remove(project_id);
             if extra.project_widths.is_empty() {
                 extra.project_width_scale = None;
             }
@@ -397,6 +436,9 @@ impl WorkspaceData {
                 .retain(|id| valid_projects.contains(id));
             window
                 .project_widths
+                .retain(|id, _| valid_projects.contains(id));
+            window
+                .canvas_positions
                 .retain(|id, _| valid_projects.contains(id));
             if window.project_widths.is_empty() {
                 window.project_width_scale = None;
