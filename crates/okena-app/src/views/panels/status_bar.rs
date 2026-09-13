@@ -542,18 +542,15 @@ impl StatusBar {
             return None;
         }
         let window_id = self.window_id;
-        let (rows, show_info) = {
+        let (layout, show_info) = {
             let ws = self.workspace.read(cx);
-            (
-                ws.grid_layout_mode(window_id).is_rows(),
-                ws.grid_show_info(window_id),
-            )
+            (shown_layout(ws, window_id), ws.grid_show_info(window_id))
         };
 
         Some(
             h_flex()
                 .gap(px(2.0))
-                .child(self.grid_button(GridMenu::Layout, layout_label(rows), t, cx))
+                .child(self.grid_button(GridMenu::Layout, layout_label(layout), t, cx))
                 .child(self.grid_button(GridMenu::Content, content_label(show_info), t, cx))
                 .into_any_element(),
         )
@@ -726,11 +723,14 @@ impl StatusBar {
         }
         let t = theme(cx);
         let window_id = self.window_id;
-        let (rows, show_info) = {
+        let (layout, show_info, agents) = {
             let ws = self.workspace.read(cx);
             (
-                ws.grid_layout_mode(window_id).is_rows(),
+                shown_layout(ws, window_id),
                 ws.grid_show_info(window_id),
+                ws.data()
+                    .window(window_id)
+                    .is_some_and(|w| w.agents_overview),
             )
         };
         let bounds = self
@@ -760,42 +760,62 @@ impl StatusBar {
                 this.hover_grid_panel(*hovered, cx);
             }));
         let panel = match menu {
-            GridMenu::Layout => panel
-                .child(self.grid_menu_toggle(
-                    "grid-menu-columns",
-                    "Columns",
-                    !rows,
-                    "icons/split-vertical.svg",
-                    move |this, cx| {
-                        let ws = this.workspace.clone();
-                        ws.update(cx, |ws, cx| {
-                            ws.set_grid_layout_mode(window_id, ProjectLayoutMode::Columns, cx)
-                        });
-                    },
-                    cx,
-                ))
-                .child(self.grid_menu_toggle(
-                    "grid-menu-stacked",
-                    "Stacked",
-                    rows,
-                    "icons/split-horizontal.svg",
-                    move |this, cx| {
-                        let ws = this.workspace.clone();
-                        ws.update(cx, |ws, cx| {
-                            ws.set_grid_layout_mode(window_id, ProjectLayoutMode::Rows, cx)
-                        });
-                    },
-                    cx,
-                ))
-                // Listed before it exists, so the menu keeps its shape when it
-                // lands. Disabled rather than absent: "coming soon" is an
-                // answer, and a missing entry is not.
-                .child(okena_ui::menu::menu_item_disabled(
-                    "grid-menu-canvas",
-                    "icons/select-all.svg",
-                    "Canvas — coming soon",
-                    &t,
-                )),
+            GridMenu::Layout => {
+                // The canvas draws projects' maps, so the agents overview
+                // offers it disabled rather than hiding it.
+                let canvas_item = if agents {
+                    okena_ui::menu::menu_item_disabled(
+                        "grid-menu-canvas",
+                        "icons/select-all.svg",
+                        "Canvas — projects only",
+                        &t,
+                    )
+                    .into_any_element()
+                } else {
+                    self.grid_menu_toggle(
+                        "grid-menu-canvas",
+                        "Canvas",
+                        layout == ProjectLayoutMode::Canvas,
+                        "icons/select-all.svg",
+                        move |this, cx| {
+                            let ws = this.workspace.clone();
+                            ws.update(cx, |ws, cx| {
+                                ws.set_grid_layout_mode(window_id, ProjectLayoutMode::Canvas, cx)
+                            });
+                        },
+                        cx,
+                    )
+                    .into_any_element()
+                };
+                panel
+                    .child(self.grid_menu_toggle(
+                        "grid-menu-columns",
+                        "Columns",
+                        layout == ProjectLayoutMode::Columns,
+                        "icons/split-vertical.svg",
+                        move |this, cx| {
+                            let ws = this.workspace.clone();
+                            ws.update(cx, |ws, cx| {
+                                ws.set_grid_layout_mode(window_id, ProjectLayoutMode::Columns, cx)
+                            });
+                        },
+                        cx,
+                    ))
+                    .child(self.grid_menu_toggle(
+                        "grid-menu-stacked",
+                        "Stacked",
+                        layout == ProjectLayoutMode::Rows,
+                        "icons/split-horizontal.svg",
+                        move |this, cx| {
+                            let ws = this.workspace.clone();
+                            ws.update(cx, |ws, cx| {
+                                ws.set_grid_layout_mode(window_id, ProjectLayoutMode::Rows, cx)
+                            });
+                        },
+                        cx,
+                    ))
+                    .child(canvas_item)
+            }
             GridMenu::Content => panel
                 .child(self.grid_menu_toggle(
                     "grid-menu-info",
@@ -1118,9 +1138,25 @@ impl StatusBar {
     }
 }
 
+/// The layout the grid is showing. The canvas counts only on the projects
+/// overview; a canvas setting on the agents overview shows as columns.
+fn shown_layout(ws: &Workspace, window_id: WindowId) -> ProjectLayoutMode {
+    if ws.grid_is_canvas(window_id) {
+        ProjectLayoutMode::Canvas
+    } else if ws.grid_layout_mode(window_id).is_rows() {
+        ProjectLayoutMode::Rows
+    } else {
+        ProjectLayoutMode::Columns
+    }
+}
+
 /// What the current layout is called, on the button and in the menu.
-fn layout_label(rows: bool) -> &'static str {
-    if rows { "Stacked" } else { "Columns" }
+fn layout_label(layout: ProjectLayoutMode) -> &'static str {
+    match layout {
+        ProjectLayoutMode::Columns => "Columns",
+        ProjectLayoutMode::Rows => "Stacked",
+        ProjectLayoutMode::Canvas => "Canvas",
+    }
 }
 
 /// What the current column contents are called.
@@ -1456,13 +1492,15 @@ mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
     use super::{content_label, layout_label, shows_grid_controls};
+    use crate::workspace::state::ProjectLayoutMode;
 
     #[test]
     fn the_button_and_its_menu_call_each_mode_the_same_thing() {
         // The button wears the current choice and the menu offers it; two
         // spellings of "Stacked" would read as two different settings.
-        assert_eq!(layout_label(false), "Columns");
-        assert_eq!(layout_label(true), "Stacked");
+        assert_eq!(layout_label(ProjectLayoutMode::Columns), "Columns");
+        assert_eq!(layout_label(ProjectLayoutMode::Rows), "Stacked");
+        assert_eq!(layout_label(ProjectLayoutMode::Canvas), "Canvas");
         assert_eq!(content_label(true), "Info");
         assert_eq!(content_label(false), "Terminals");
     }

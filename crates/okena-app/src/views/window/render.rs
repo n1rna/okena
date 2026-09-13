@@ -191,6 +191,32 @@ impl WindowView {
         }
     }
 
+    /// This window's canvas, created on first use. `None` until the local
+    /// daemon connection is up, since the canvas reads maps from it.
+    fn project_canvas_entity(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<crate::views::project_canvas::ProjectCanvas>> {
+        if let Some(canvas) = &self.project_canvas {
+            return Some(canvas.clone());
+        }
+        let client = self.local_daemon_action_client(cx).ok()?;
+        let workspace = self.workspace.clone();
+        let focus_manager = self.focus_manager.clone();
+        let window_id = self.window_id;
+        let canvas = cx.new(|cx| {
+            crate::views::project_canvas::ProjectCanvas::new(
+                client,
+                workspace,
+                focus_manager,
+                window_id,
+                cx,
+            )
+        });
+        self.project_canvas = Some(canvas.clone());
+        Some(canvas)
+    }
+
     pub(super) fn render_projects_grid(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         // Restore the grid scroll position saved when project focus was entered,
         // deferred from unfocus so the overview can re-expand first. We wait until
@@ -338,6 +364,29 @@ impl WindowView {
                     )
                     .into_any_element();
             }
+        }
+
+        // The canvas shows the same projects as map cards. A focused or
+        // fullscreen project still opens in its column, so double-clicking a
+        // card lands somewhere to work.
+        let show_canvas = {
+            let fm = self.focus_manager.read(cx);
+            self.workspace.read(cx).grid_is_canvas(self.window_id)
+                && fm.focused_project_id().is_none()
+                && fm.fullscreen_project_id().is_none()
+        };
+        if show_canvas && let Some(canvas) = self.project_canvas_entity(cx) {
+            canvas.update(cx, |canvas, cx| {
+                canvas.set_projects(visible_projects.clone(), cx);
+            });
+            return div()
+                .id("projects-canvas-wrapper")
+                .flex_1()
+                .h_full()
+                .min_w_0()
+                .min_h_0()
+                .child(canvas)
+                .into_any_element();
         }
 
         // Get widths for each project

@@ -25,15 +25,24 @@ pub enum ProjectLayoutMode {
     Columns,
     /// Projects stacked vertically (height-resized).
     Rows,
+    /// Projects as map cards on an open canvas, linked where their maps say
+    /// they connect. Projects overview only; the agents overview has no maps.
+    Canvas,
 }
 
 impl ProjectLayoutMode {
-    /// Return the opposite orientation.
+    /// Return the opposite orientation. The canvas has no orientation, so
+    /// flipping it goes back to columns.
     pub fn toggled(self) -> Self {
         match self {
             ProjectLayoutMode::Columns => ProjectLayoutMode::Rows,
-            ProjectLayoutMode::Rows => ProjectLayoutMode::Columns,
+            ProjectLayoutMode::Rows | ProjectLayoutMode::Canvas => ProjectLayoutMode::Columns,
         }
+    }
+
+    /// True when projects are shown on the canvas.
+    pub fn is_canvas(self) -> bool {
+        matches!(self, ProjectLayoutMode::Canvas)
     }
 
     /// True when projects are stacked vertically.
@@ -136,6 +145,32 @@ pub struct WindowBounds {
 /// `#[serde(default = "Uuid::new_v4")]`). Keeping the field present on every
 /// `WindowState` -- main included -- avoids a per-variant struct fork and
 /// keeps the on-disk shape uniform.
+/// Where a project card sits on the canvas, in canvas units (pixels at 100%).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CanvasPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// What part of the canvas a window shows: the screen offset of the canvas
+/// origin, and the zoom.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CanvasViewport {
+    pub x: f32,
+    pub y: f32,
+    pub zoom: f32,
+}
+
+impl Default for CanvasViewport {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WindowState {
     /// Stable identity for this window. Matches `WindowId::Extra(_)` for
@@ -225,6 +260,14 @@ pub struct WindowState {
     /// value has been recorded yet, so callers should fall back to app settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_open: Option<bool>,
+    /// Canvas cards this window's user placed by hand, by project id. A
+    /// project without an entry is placed by the canvas's automatic layout.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub canvas_positions: HashMap<String, CanvasPoint>,
+    /// The canvas pan and zoom this window last showed. `None` fits the
+    /// canvas to its cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_viewport: Option<CanvasViewport>,
 }
 
 impl Default for WindowState {
@@ -248,6 +291,8 @@ impl Default for WindowState {
             folder_collapsed: HashMap::new(),
             os_bounds: None,
             sidebar_open: None,
+            canvas_positions: HashMap::new(),
+            canvas_viewport: None,
         }
     }
 }
@@ -278,6 +323,49 @@ impl WindowState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_canvas_is_its_own_mode_and_flips_back_to_columns() {
+        assert!(ProjectLayoutMode::Canvas.is_canvas());
+        assert!(!ProjectLayoutMode::Canvas.is_rows());
+        assert_eq!(
+            ProjectLayoutMode::Canvas.toggled(),
+            ProjectLayoutMode::Columns
+        );
+        assert_eq!(
+            serde_json::to_value(ProjectLayoutMode::Canvas).expect("json"),
+            "canvas"
+        );
+    }
+
+    #[test]
+    fn canvas_placement_round_trips_and_is_absent_until_used() {
+        let empty = serde_json::to_value(WindowState::default()).expect("json");
+        assert!(empty.get("canvas_positions").is_none());
+        assert!(empty.get("canvas_viewport").is_none());
+
+        let s = WindowState {
+            project_layout: ProjectLayoutMode::Canvas,
+            canvas_positions: HashMap::from([(
+                "p1".to_string(),
+                CanvasPoint { x: 120.0, y: -40.5 },
+            )]),
+            canvas_viewport: Some(CanvasViewport {
+                x: 10.0,
+                y: 20.0,
+                zoom: 0.75,
+            }),
+            ..WindowState::default()
+        };
+        let back: WindowState =
+            serde_json::from_str(&serde_json::to_string(&s).expect("encode")).expect("decode");
+        assert_eq!(back.project_layout, ProjectLayoutMode::Canvas);
+        assert_eq!(
+            back.canvas_positions.get("p1"),
+            Some(&CanvasPoint { x: 120.0, y: -40.5 })
+        );
+        assert_eq!(back.canvas_viewport, s.canvas_viewport);
+    }
 
     #[test]
     fn window_state_default_is_empty() {
@@ -324,6 +412,8 @@ mod tests {
                 height: 800.0,
             }),
             sidebar_open: Some(false),
+            canvas_positions: HashMap::new(),
+            canvas_viewport: None,
         };
 
         let json = serde_json::to_string(&original).unwrap();
