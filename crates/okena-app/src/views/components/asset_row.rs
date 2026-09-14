@@ -62,43 +62,16 @@ pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
         }
     }
     if let Some(pr) = asset.pr.as_ref() {
-        for (label, tone) in pr_indicators(pr) {
-            let color = match tone {
-                Tone::Bad => t.error,
-                Tone::Warn => t.warning,
-                Tone::Good => t.success,
-                Tone::Muted => t.text_muted,
-            };
-            chips.push(chip(label, color, cx));
-        }
+        chips.extend(readiness_chips(pr, cx));
     }
     let key = row_key(asset);
     if let Some(summary) = asset.ci.clone() {
-        let (color, label) = ci_chip_style(
-            &summary.status,
-            summary.passed,
-            summary.failed,
-            summary.pending,
-            &t,
-        );
-        let pr = asset.pr.clone();
-        chips.push(
-            Popover::new(SharedString::from(format!("asset-ci-{key}")))
-                .trigger(CiTrigger {
-                    label,
-                    color,
-                    selected: false,
-                })
-                .content(move |_, _window, cx| {
-                    let t = theme(cx);
-                    v_flex()
-                        .w(px(360.0))
-                        .max_h(px(420.0))
-                        .child(render_ci_checks_header(&summary, pr.as_ref(), &t, cx))
-                        .child(render_ci_checks_list(&summary, &t, cx))
-                })
-                .into_any_element(),
-        );
+        chips.push(ci_checks_chip(
+            SharedString::from(format!("asset-ci-{key}")),
+            summary,
+            asset.pr.clone(),
+            cx,
+        ));
     }
     if let Some(changes) = asset.uncommitted {
         chips.push(chip(
@@ -213,6 +186,58 @@ pub fn render_asset_row(asset: &SessionAsset, bg: u32, cx: &App) -> AnyElement {
                     .flex_wrap()
                     .children(chips),
             )
+        })
+        .into_any_element()
+}
+
+/// What stands between `pr` and merging it, one chip each: conflicts, the
+/// review decision, unresolved threads. Shared by every PR row, so a PR reads
+/// the same wherever it is listed.
+pub fn readiness_chips(pr: &PrInfo, cx: &App) -> Vec<AnyElement> {
+    let t = theme(cx);
+    pr_indicators(pr)
+        .into_iter()
+        .map(|(label, tone)| {
+            let color = match tone {
+                Tone::Bad => t.error,
+                Tone::Warn => t.warning,
+                Tone::Good => t.success,
+                Tone::Muted => t.text_muted,
+            };
+            chip(label, color, cx)
+        })
+        .collect()
+}
+
+/// The CI rollup as a chip that opens the checks list — the same list the
+/// project header's CI popover shows. `id` must be unique among its siblings.
+pub fn ci_checks_chip(
+    id: SharedString,
+    summary: okena_core::api::CiCheckSummary,
+    pr: Option<PrInfo>,
+    cx: &App,
+) -> AnyElement {
+    let t = theme(cx);
+    let (color, label) = ci_chip_style(
+        &summary.status,
+        summary.passed,
+        summary.failed,
+        summary.pending,
+        &t,
+    );
+    Popover::new(id)
+        .trigger(CiTrigger {
+            label,
+            color,
+            selected: false,
+        })
+        .content(move |_, _window, cx| {
+            let t = theme(cx);
+            v_flex()
+                .w(px(360.0))
+                .max_h(px(420.0))
+                .child(render_ci_checks_header(&summary, pr.as_ref(), &t, cx))
+                .child(render_ci_checks_list(&summary, &t, cx))
         })
         .into_any_element()
 }

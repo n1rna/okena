@@ -27,6 +27,12 @@
 //! polled PR-only, by repo and number, on the settled PR cadence until it is
 //! merged or closed.
 //!
+//! A third feeds the project info panel: every github.com repository behind a
+//! project has its open pull requests listed — all of them, from anyone —
+//! whether or not anything shows it, on the settled PR cadence. The list is
+//! keyed by repository, so a repo open as a project and as its worktrees is
+//! asked once, and each result replaces the list on every one of them.
+//!
 //! A PR's mergeability and review threads ride on the PR request itself, which
 //! runs on the settled PR cadence whatever the commit, so they cost nothing
 //! extra and a conflict or a resolved thread shows within a cadence. The checks
@@ -43,8 +49,10 @@
 //! worktree removed before its PR was seen costs one lookup by branch, retried
 //! a cadence apart, and a PR link an agent registers that nothing here knows
 //! costs one lookup by number. Merged and closed tracked PRs are kept, never polled, only
-//! while a registered asset names them. All of it shares the fan-out's
-//! concurrency limit and rate-limit gate.
+//! while a registered asset names them. Each repository's list costs one
+//! request per page of 25 open PRs per PR cadence, plus one for any PR with
+//! more than 100 checks. All of it shares the fan-out's concurrency limit and
+//! rate-limit gate.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -56,7 +64,7 @@ use okena_core::git_poll::{GitPollTrigger, GithubPollSchedule};
 use okena_core::harness::TrackedPullRequest;
 use okena_core::process::{Lane, with_lane};
 use okena_core::session_assets::{normalize_url, same_url};
-use okena_git::repository::{CiFetch, PrFetch};
+use okena_git::repository::{CiFetch, PrFetch, RepoPrsFetch};
 use okena_git::{self as git, GitStatus, HeadSnapshot};
 use okena_workspace::state::Workspace;
 use parking_lot::Mutex;
@@ -92,6 +100,7 @@ fn to_api(s: &GitStatus) -> ApiGitStatus {
         unpushed: s.unpushed,
         review_base: s.review_base.clone(),
         default_branch: s.default_branch.clone(),
+        repo_pull_requests: s.repo_pull_requests.clone(),
     }
 }
 
@@ -163,6 +172,8 @@ enum GithubPassMessage {
         fetch: PrFetch,
         found: Option<RegisteredFound>,
     },
+    /// A repository's open pull requests, under its schedule key.
+    RepoPrs { key: String, fetch: RepoPrsFetch },
     /// The pass is over; carries the ids it held so they can be polled again.
     Finished(HashSet<String>),
 }
@@ -199,6 +210,9 @@ struct ProjectPoll {
     /// A PR link an agent registered that nothing known covers: looked up by
     /// number through whichever checkout is in its repository.
     registered_pr: Option<RegisteredTarget>,
+    /// Every open PR of the repository behind `path`, rather than anything
+    /// about its branch.
+    repo_prs: bool,
 }
 
 /// Union of declared viewports (`SetVisibleProjects`). The workspace's own window
@@ -435,6 +449,7 @@ fn select_github_polls(
                 tracked_pr: None,
                 removed_branch: None,
                 registered_pr: None,
+                repo_prs: false,
             })
         })
         .collect()
@@ -454,6 +469,8 @@ struct ProjectOutcome {
     ci: Option<CiFetch>,
     /// For a registered PR: the checkout it was looked up through.
     registered: Option<RegisteredFound>,
+    /// For a repository's slot: its open pull requests.
+    repo_prs: Option<RepoPrsFetch>,
 }
 
 /// Run one project's PR and CI lookups back to back on a bus worker.
@@ -467,11 +484,20 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
         if let Some(target) = &poll.registered_pr {
             return lookup_registered_pr(target);
         }
+        if poll.repo_prs {
+            return ProjectOutcome {
+                pr: None,
+                ci: None,
+                registered: None,
+                repo_prs: Some(git::repository::fetch_open_pull_requests(path)),
+            };
+        }
         if let Some(number) = poll.tracked_pr {
             return ProjectOutcome {
                 pr: Some(git::repository::fetch_pr_by_number(path, number)),
                 ci: None,
                 registered: None,
+                repo_prs: None,
             };
         }
         if let Some(branch) = &poll.removed_branch {
@@ -479,6 +505,7 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
                 pr: Some(git::repository::fetch_pr_by_branch(path, branch)),
                 ci: None,
                 registered: None,
+                repo_prs: None,
             };
         }
         // Repos with no GitHub remote can never have PRs or checks; skipping
@@ -491,6 +518,7 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
                     summary: None,
                 }),
                 registered: None,
+                repo_prs: None,
             };
         }
 
@@ -513,6 +541,7 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
             pr,
             ci,
             registered: None,
+            repo_prs: None,
         }
     })
 }
@@ -533,6 +562,7 @@ fn lookup_registered_pr(target: &RegisteredTarget) -> ProjectOutcome {
             pr: Some(PrFetch::Fetched(None)),
             ci: None,
             registered: None,
+            repo_prs: None,
         };
     };
     let (fetch, head_branch) =
@@ -545,6 +575,7 @@ fn lookup_registered_pr(target: &RegisteredTarget) -> ProjectOutcome {
             repo_path: repo_path.clone(),
             head_branch,
         }),
+        repo_prs: None,
     }
 }
 
@@ -587,6 +618,18 @@ async fn poll_github(
                 continue;
             }
         };
+
+        // A repository, not a checkout: its list is all there is.
+        if id.starts_with(REPO_PRS_KEY_PREFIX) {
+            if let Some(fetch) = outcome.repo_prs
+                && result_tx
+                    .send(GithubPassMessage::RepoPrs { key: id, fetch })
+                    .is_err()
+            {
+                return;
+            }
+            continue;
+        }
 
         // Not a checkout: no HEAD or branch to guard against, just a PR.
         if id.starts_with(TRACKED_PR_KEY_PREFIX)
@@ -1131,6 +1174,7 @@ fn select_removed_branch_polls(
                 tracked_pr: None,
                 removed_branch: Some(lookup.link.branch.clone()?),
                 registered_pr: None,
+                repo_prs: false,
             })
         })
         .collect()
@@ -1346,6 +1390,7 @@ fn select_registered_pr_polls(
             tracked_pr: None,
             removed_branch: None,
             registered_pr: Some(lookup.target.clone()),
+            repo_prs: false,
         })
         .collect()
 }
@@ -1372,8 +1417,114 @@ fn select_tracked_pr_polls(
             tracked_pr: Some(t.number),
             removed_branch: None,
             registered_pr: None,
+            repo_prs: false,
         })
         .collect()
+}
+
+/// Schedule key prefix of a repository's open-PR list; the rest is the
+/// repository's [`git::repository::github_repo_key`].
+const REPO_PRS_KEY_PREFIX: &str = "repo-prs:";
+
+/// Every github.com repository behind the workspace's projects, by schedule
+/// key, with the checkout to ask through: the first in workspace order, so a
+/// repository open as a project and as several worktrees is asked once.
+fn repo_pr_targets(
+    projects: &[(String, String)],
+    repo_keys: &HashMap<String, Option<String>>,
+) -> Vec<(String, String)> {
+    let mut seen = HashSet::new();
+    projects
+        .iter()
+        .filter_map(|(id, path)| {
+            let repo = repo_keys.get(id)?.as_ref()?;
+            seen.insert(repo.clone())
+                .then(|| (format!("{REPO_PRS_KEY_PREFIX}{repo}"), path.clone()))
+        })
+        .collect()
+}
+
+/// This cycle's repository list slots: on the settled PR cadence, whether or
+/// not anything shows the repository, and never twice at once.
+fn select_repo_pr_polls(
+    targets: &[(String, String)],
+    schedule: &GithubPollSchedule,
+    cycle: u64,
+    cadence_due: bool,
+    in_flight: &HashSet<String>,
+) -> Vec<ProjectPoll> {
+    targets
+        .iter()
+        .filter(|(key, _)| !in_flight.contains(key))
+        .filter(|(key, _)| schedule.pr_due(key, cycle, cadence_due))
+        .map(|(key, path)| ProjectPoll {
+            id: key.clone(),
+            path: path.clone(),
+            want_pr: true,
+            want_ci: false,
+            ci_skip_sha: None,
+            cached_pr_number: None,
+            tracked_pr: None,
+            removed_branch: None,
+            registered_pr: None,
+            repo_prs: true,
+        })
+        .collect()
+}
+
+/// The open PRs project `id` shows: its repository's list, when it has a
+/// github.com repository and the list has been fetched.
+fn repo_list_for(
+    id: &str,
+    repo_keys: &HashMap<String, Option<String>>,
+    repo_prs: &HashMap<String, Option<Vec<git::RepoPullRequest>>>,
+) -> Option<Vec<git::RepoPullRequest>> {
+    let repo = repo_keys.get(id)?.as_ref()?;
+    repo_prs.get(repo).cloned().flatten()
+}
+
+/// Apply a repository's open-PR list: the same rate-limit gate and cadence as
+/// a checkout's PR, then the list onto every project in that repository.
+///
+/// The list replaces the one before it whole, so a PR merged or closed since
+/// is gone and one opened since is there. No answer keeps the list shown: a
+/// list with a page missing would drop PRs that are still open.
+#[allow(clippy::too_many_arguments)]
+fn apply_repo_prs_result(
+    key: &str,
+    fetch: RepoPrsFetch,
+    cycle: u64,
+    schedule: &mut GithubPollSchedule,
+    repo_keys: &HashMap<String, Option<String>>,
+    repo_prs: &mut HashMap<String, Option<Vec<git::RepoPullRequest>>>,
+    last: &mut HashMap<String, GitStatus>,
+    git_status_tx: &watch::Sender<HashMap<String, ApiGitStatus>>,
+    state_version: &watch::Sender<u64>,
+) {
+    let Some(repo) = key.strip_prefix(REPO_PRS_KEY_PREFIX) else {
+        return;
+    };
+    let list = match fetch {
+        RepoPrsFetch::RateLimited => {
+            note_rate_limited(schedule, cycle);
+            return;
+        }
+        RepoPrsFetch::Failed => return,
+        RepoPrsFetch::Fetched(list) => {
+            // With no client to ask with, no request went out.
+            if list.is_some() {
+                schedule.note_request_succeeded();
+            }
+            schedule.record_pr(key, cycle);
+            list
+        }
+    };
+    repo_prs.insert(repo.to_string(), list);
+    let mut enriched = last.clone();
+    for (id, status) in &mut enriched {
+        status.repo_pull_requests = repo_list_for(id, repo_keys, repo_prs);
+    }
+    publish(last, &enriched, git_status_tx, state_version);
 }
 
 /// Run the daemon git-status poll loop until the server is gone: every `watch`
@@ -1440,6 +1591,11 @@ pub async fn run_git_poll(
     // PR links agents registered that nothing known covers, each awaiting one
     // lookup by number.
     let mut registered_lookups: HashMap<String, RegisteredLookup> = HashMap::new();
+    // Each project's github.com repository (`None`: it has none), read with
+    // its status when first seen and again on the hidden cadence; and each
+    // repository's open PRs, by that key.
+    let mut repo_keys: HashMap<String, Option<String>> = HashMap::new();
+    let mut repo_prs: HashMap<String, Option<Vec<git::RepoPullRequest>>> = HashMap::new();
     let (github_result_tx, mut github_result_rx) = mpsc::unbounded_channel();
     // Consume `interval`'s immediate first tick. Subsequent ticks stay anchored
     // to wall time, so targeted wakes cannot postpone periodic refreshes.
@@ -1539,14 +1695,22 @@ pub async fn run_git_poll(
         ci_checks.retain(|id, _| active_ids.contains(id));
         head_generations.retain(|id, _| active_ids.contains(id));
         known_streaming_ids.retain(|id| active_ids.contains(id));
-        // Tracked PRs and branch lookups have no project of their own; their
-        // keys keep their slot, and with it the spacing between retries.
+        repo_keys.retain(|id, _| active_ids.contains(id));
+        let live_repos: HashSet<String> = repo_keys.values().flatten().cloned().collect();
+        repo_prs.retain(|repo, _| live_repos.contains(repo));
+        // Tracked PRs, branch lookups and repository lists have no project of
+        // their own; their keys keep their slot, and with it their cadence.
         let scheduled_ids: HashSet<String> = active_ids
             .iter()
             .cloned()
             .chain(tracked_prs.iter().map(|t| t.key.clone()))
             .chain(removed_lookups.keys().cloned())
             .chain(registered_lookups.keys().cloned())
+            .chain(
+                live_repos
+                    .iter()
+                    .map(|repo| format!("{REPO_PRS_KEY_PREFIX}{repo}")),
+            )
             .collect();
         schedule.retain(&scheduled_ids);
         tracked_failures.retain(|key, _| scheduled_ids.contains(key));
@@ -1587,19 +1751,32 @@ pub async fn run_git_poll(
         {
             let id = id.clone();
             let path = path.clone();
+            // A remote rarely changes: read once, then with the hidden sweep.
+            let resolve_repo = poll_hidden || !repo_keys.contains_key(&id);
             let status = tokio::task::spawn_blocking(move || {
-                with_lane(Lane::Poll, || git::refresh_git_status(Path::new(&path)))
+                with_lane(Lane::Poll, || {
+                    let path = Path::new(&path);
+                    let status = git::refresh_git_status(path);
+                    let repo = (resolve_repo && status.is_some())
+                        .then(|| git::repository::github_repo_key(path));
+                    (status, repo)
+                })
             })
             .await;
             match status {
-                Ok(Some(mut status)) => {
+                Ok((Some(mut status), repo)) => {
+                    if let Some(repo) = repo {
+                        repo_keys.insert(id.clone(), repo);
+                    }
                     // Inject whatever PR/CI we already have cached so a still-fresh
                     // badge doesn't blank between GitHub cadence cycles.
                     status.pr_info = pr_infos.get(&id).cloned().flatten();
                     status.ci_checks = ci_checks.get(&id).cloned().flatten();
+                    status.repo_pull_requests = repo_list_for(&id, &repo_keys, &repo_prs);
                     attempted.insert(id, Some(status));
                 }
-                Ok(None) => {
+                Ok((None, _)) => {
+                    repo_keys.remove(&id);
                     attempted.insert(id, None);
                 }
                 Err(error) => {
@@ -1666,6 +1843,13 @@ pub async fn run_git_poll(
             if !urgent_only {
                 polls.extend(select_tracked_pr_polls(
                     &tracked_prs,
+                    &schedule,
+                    cycle,
+                    cadence_due,
+                    &github_in_flight,
+                ));
+                polls.extend(select_repo_pr_polls(
+                    &repo_pr_targets(&projects, &repo_keys),
                     &schedule,
                     cycle,
                     cadence_due,
@@ -1805,6 +1989,17 @@ pub async fn run_git_poll(
                                 &workspace_tick,
                             )
                         }
+                        GithubPassMessage::RepoPrs { key, fetch } => apply_repo_prs_result(
+                            &key,
+                            fetch,
+                            cycle,
+                            &mut schedule,
+                            &repo_keys,
+                            &mut repo_prs,
+                            &mut last,
+                            &git_status_tx,
+                            &state_version,
+                        ),
                         GithubPassMessage::Finished(ids) => {
                             for id in &ids {
                                 github_in_flight.remove(id);
@@ -2540,6 +2735,185 @@ mod tests {
             harness.ci_checks.get("p1").is_some_and(Option::is_some),
             "an unchanged commit must not blank the badge"
         );
+    }
+
+    // ─── Repository PR lists ───────────────────────────────────────────
+
+    fn repo_pr(number: u32) -> git::RepoPullRequest {
+        git::RepoPullRequest {
+            pr: git::PrInfo {
+                url: format!("https://github.com/o/r/pull/{number}"),
+                state: git::PrState::Open,
+                number,
+                base: Some("main".to_string()),
+                readiness: None,
+                readiness_unavailable: false,
+            },
+            title: format!("PR {number}"),
+            author: Some("someone".to_string()),
+            head: format!("feat/{number}"),
+            ci: None,
+        }
+    }
+
+    /// A repo `o/r` open as a project and as a worktree, another repo, and a
+    /// checkout with no github.com repository.
+    fn repo_key_map() -> HashMap<String, Option<String>> {
+        HashMap::from([
+            ("repo".to_string(), Some("o/r".to_string())),
+            ("worktree".to_string(), Some("o/r".to_string())),
+            ("other".to_string(), Some("o/s".to_string())),
+            ("local".to_string(), None),
+        ])
+    }
+
+    fn repo_projects() -> Vec<(String, String)> {
+        ["repo", "worktree", "other", "local"]
+            .iter()
+            .map(|id| (id.to_string(), format!("/tmp/{id}")))
+            .collect()
+    }
+
+    #[test]
+    fn a_repository_open_as_a_project_and_a_worktree_is_asked_once() {
+        assert_eq!(
+            repo_pr_targets(&repo_projects(), &repo_key_map()),
+            [
+                ("repo-prs:o/r".to_string(), "/tmp/repo".to_string()),
+                ("repo-prs:o/s".to_string(), "/tmp/other".to_string()),
+            ],
+            "one slot per repository, none for a checkout without one"
+        );
+    }
+
+    #[test]
+    fn every_repository_is_listed_on_the_settled_pr_cadence_shown_or_not() {
+        // Nothing here is visible, linked or forced: the list is polled anyway.
+        let targets = repo_pr_targets(&repo_projects(), &repo_key_map());
+        let mut schedule = GithubPollSchedule::default();
+        let none = HashSet::new();
+
+        assert!(
+            select_repo_pr_polls(&targets, &schedule, 0, true, &none).is_empty(),
+            "not at startup"
+        );
+        let polls = select_repo_pr_polls(&targets, &schedule, 1, true, &none);
+        assert_eq!(polls.len(), 2);
+        assert!(polls.iter().all(|p| p.repo_prs && p.want_pr && !p.want_ci));
+
+        for poll in &polls {
+            schedule.pr_dispatched(&poll.id, 1);
+        }
+        assert!(select_repo_pr_polls(&targets, &schedule, 12, true, &none).is_empty());
+        assert_eq!(
+            select_repo_pr_polls(&targets, &schedule, 13, true, &none).len(),
+            2,
+            "due again one PR cadence later"
+        );
+        assert!(
+            select_repo_pr_polls(&targets, &schedule, 13, false, &none).is_empty(),
+            "nothing between cadence ticks"
+        );
+        let running = HashSet::from(["repo-prs:o/r".to_string()]);
+        let polls = select_repo_pr_polls(&targets, &schedule, 13, true, &running);
+        assert_eq!(polls.len(), 1, "never twice at once");
+        assert_eq!(polls[0].id, "repo-prs:o/s");
+    }
+
+    struct RepoHarness {
+        schedule: GithubPollSchedule,
+        repo_prs: HashMap<String, Option<Vec<git::RepoPullRequest>>>,
+        last: HashMap<String, GitStatus>,
+        git_status_tx: watch::Sender<HashMap<String, ApiGitStatus>>,
+        state_version: watch::Sender<u64>,
+        _state_rx: watch::Receiver<u64>,
+    }
+
+    impl RepoHarness {
+        fn new() -> Self {
+            let (git_status_tx, _) = watch::channel(HashMap::new());
+            let (state_version, _state_rx) = watch::channel(0);
+            Self {
+                schedule: GithubPollSchedule::default(),
+                repo_prs: HashMap::new(),
+                last: repo_projects()
+                    .into_iter()
+                    .map(|(id, _)| (id, GitStatus::default()))
+                    .collect(),
+                git_status_tx,
+                state_version,
+                _state_rx,
+            }
+        }
+
+        fn apply(&mut self, fetch: RepoPrsFetch, cycle: u64) {
+            apply_repo_prs_result(
+                "repo-prs:o/r",
+                fetch,
+                cycle,
+                &mut self.schedule,
+                &repo_key_map(),
+                &mut self.repo_prs,
+                &mut self.last,
+                &self.git_status_tx,
+                &self.state_version,
+            );
+        }
+
+        /// The numbers project `id` publishes, `None` for no list.
+        fn published(&self, id: &str) -> Option<Vec<u32>> {
+            self.git_status_tx
+                .borrow()
+                .get(id)?
+                .repo_pull_requests
+                .as_ref()
+                .map(|prs| prs.iter().map(|p| p.pr.number).collect())
+        }
+    }
+
+    #[test]
+    fn a_list_replaces_the_last_one_on_every_checkout_of_its_repository() {
+        let mut harness = RepoHarness::new();
+
+        harness.apply(RepoPrsFetch::Fetched(Some(vec![repo_pr(1), repo_pr(2)])), 1);
+        assert_eq!(harness.published("repo"), Some(vec![1, 2]));
+        assert_eq!(
+            harness.published("worktree"),
+            Some(vec![1, 2]),
+            "a worktree shows its repository's list"
+        );
+        assert_eq!(harness.published("other"), None, "another repository");
+        assert_eq!(harness.published("local"), None, "no github.com repository");
+        assert!(!harness.schedule.pr_due("repo-prs:o/r", 12, true));
+        assert!(harness.schedule.pr_due("repo-prs:o/r", 13, true));
+
+        // #1 merged, #3 opened: one result later the list says so.
+        let version = *harness.state_version.borrow();
+        harness.apply(RepoPrsFetch::Fetched(Some(vec![repo_pr(2), repo_pr(3)])), 13);
+        assert_eq!(harness.published("repo"), Some(vec![2, 3]));
+        assert_eq!(harness.published("worktree"), Some(vec![2, 3]));
+        assert!(
+            *harness.state_version.borrow() > version,
+            "clients are told"
+        );
+    }
+
+    #[test]
+    fn no_answer_keeps_the_list_and_a_refusal_parks_the_fan_out() {
+        let mut harness = RepoHarness::new();
+        harness.apply(RepoPrsFetch::Fetched(Some(vec![repo_pr(1)])), 1);
+
+        harness.apply(RepoPrsFetch::Failed, 13);
+        assert_eq!(harness.published("repo"), Some(vec![1]));
+
+        harness.apply(RepoPrsFetch::RateLimited, 13);
+        assert_eq!(harness.published("repo"), Some(vec![1]));
+        assert!(harness.schedule.is_rate_limited(13));
+
+        // A token lost, or the repository gone from view: no section at all.
+        harness.apply(RepoPrsFetch::Fetched(None), 30);
+        assert_eq!(harness.published("repo"), None);
+        assert_eq!(harness.published("worktree"), None);
     }
 
     fn projects() -> Vec<(String, String)> {

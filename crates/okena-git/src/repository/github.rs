@@ -197,6 +197,16 @@ pub fn github_repo_slug(path: &Path) -> Option<(String, String)> {
     resolve_base_repo(path).map(|repo| (repo.owner, repo.name))
 }
 
+/// `owner/name`, lowercased, of the github.com repository `gh` would run
+/// against for this checkout — the key a repository's open pull requests are
+/// fetched and shared under, so every checkout of it asks once. `None` for a
+/// checkout whose base repository is not on github.com.
+pub fn github_repo_key(path: &Path) -> Option<String> {
+    let repo = resolve_base_repo(path)?;
+    (repo.host == DEFAULT_HOST)
+        .then(|| format!("{}/{}", repo.owner, repo.name).to_ascii_lowercase())
+}
+
 /// The GitHub repository behind `origin`, where this checkout's own branches
 /// are pushed. A PR whose head lives anywhere else — a fork's branch that
 /// happens to share a name — is not this checkout's.
