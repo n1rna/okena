@@ -48,8 +48,8 @@
 //! often enough that it does not exist; no answer at all never drops it. A
 //! worktree removed before its PR was seen costs one lookup by branch, retried
 //! a cadence apart, and a PR link an agent registers that nothing here knows
-//! costs one lookup by number. Merged and closed tracked PRs are kept, never polled, only
-//! while a registered asset names them. Each repository's list costs one
+//! costs one lookup by number. Merged and closed tracked PRs are kept on their
+//! session, never polled again, for as long as it exists. Each repository's list costs one
 //! request per page of 25 open PRs per PR cadence, plus one for any PR with
 //! more than 100 checks. All of it shares the fan-out's concurrency limit and
 //! rate-limit gate.
@@ -862,7 +862,7 @@ fn tracked_pr_polls(workspace: &Workspace) -> Vec<TrackedPoll> {
         .iter()
         .filter_map(|p| p.agent.as_ref())
         .flat_map(|agent| &agent.tracked_prs)
-        // Tombstones are never polled.
+        // A merged or closed PR keeps its last state and is not polled again.
         .filter(|pr| !pr.is_finished() && seen.insert(pr.url.clone()))
         .map(|pr| TrackedPoll {
             key: format!("{TRACKED_PR_KEY_PREFIX}{}", pr.url),
@@ -895,26 +895,10 @@ fn remember_linked_prs(
     }
 }
 
-/// Whether the agent registered an asset for the PR at `url`.
-fn names_pr(assets: &[okena_core::harness::AgentAsset], url: &str) -> bool {
-    assets
-        .iter()
-        .any(|asset| asset.url.as_deref().is_some_and(|u| same_url(u, url)))
-}
-
-/// Forget merged and closed PRs no registered asset names. A tombstone only
-/// exists to retire such a registration; without one it is dead weight in the
-/// saved workspace.
-fn prune_tombstones(agent: &mut okena_core::harness::AgentSessionState) {
-    let assets = &agent.assets;
-    agent
-        .tracked_prs
-        .retain(|t| !t.is_finished() || names_pr(assets, &t.url));
-}
-
-/// Record a removed worktree's PR on its session. An open PR is listed until
-/// it closes; a merged or closed one is kept, as a tombstone, only if the
-/// agent registered it. Returns whether the session changed.
+/// Record a removed worktree's PR on its session, whatever its state. An open
+/// PR is refreshed until it closes; a merged or closed one stays on the
+/// session's card, with its last state, for as long as the session exists.
+/// Returns whether the session changed.
 fn record_removed_pr(
     projects: &mut [okena_state::ProjectData],
     link: &SessionLink,
@@ -923,13 +907,6 @@ fn record_removed_pr(
     let Some(session) = projects.iter_mut().find(|p| p.id == link.session_id) else {
         return false;
     };
-    let finished = matches!(pr.state, git::PrState::Merged | git::PrState::Closed);
-    let known = session.agent.as_ref().is_some_and(|agent| {
-        names_pr(&agent.assets, &pr.url) || agent.tracked_prs.iter().any(|t| t.url == pr.url)
-    });
-    if finished && !known {
-        return false;
-    }
     let agent = session.agent.get_or_insert_with(Default::default);
     let before = agent.tracked_prs.clone();
     match agent.tracked_prs.iter_mut().find(|t| t.url == pr.url) {
@@ -949,7 +926,6 @@ fn record_removed_pr(
             readiness_unavailable: pr.readiness_unavailable,
         }),
     }
-    prune_tombstones(agent);
     agent.tracked_prs != before
 }
 
@@ -992,9 +968,9 @@ fn unseen_removed_worktrees(
         .collect()
 }
 
-/// Apply a tracked PR's refresh to every session tracking it. Merged or closed
-/// turns it into a tombstone where the agent registered it, and drops it
-/// where not. Returns whether anything changed.
+/// Apply a tracked PR's refresh to every session tracking it. Once merged or
+/// closed it keeps that state on the session and is not polled again.
+/// Returns whether anything changed.
 fn apply_tracked_pr(
     projects: &mut [okena_state::ProjectData],
     url: &str,
@@ -1008,7 +984,6 @@ fn apply_tracked_pr(
             t.readiness = pr.readiness.clone();
             t.readiness_unavailable = pr.readiness_unavailable;
         }
-        prune_tombstones(agent);
         changed |= agent.tracked_prs != before;
     }
     changed
@@ -3402,8 +3377,9 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_worktrees_merged_pr_is_kept_only_to_retire_a_registration() {
-        // Never listed or polled; kept only while an asset names it.
+    fn a_removed_worktrees_merged_pr_stays_on_its_session() {
+        // Kept whether or not the agent registered it, so the card still says
+        // Merged after the worktree is gone. Never polled again.
         for registered in [false, true] {
             let mut ws = linked_workspace();
             if registered {
@@ -3413,17 +3389,14 @@ mod tests {
             let mut known =
                 HashMap::from([("wt".to_string(), (link, pr(9, git::PrState::Merged)))]);
 
-            assert_eq!(
-                track_removed_prs(
-                    &mut ws.data.projects,
-                    &mut known,
-                    &ids(&["repo", "session"]),
-                ),
-                registered
-            );
+            assert!(track_removed_prs(
+                &mut ws.data.projects,
+                &mut known,
+                &ids(&["repo", "session"]),
+            ));
             let tracked = tracked_of(&ws, "session");
-            assert_eq!(tracked.len(), usize::from(registered), "{registered}");
-            assert!(tracked.iter().all(|t| t.is_finished()));
+            assert_eq!(tracked.len(), 1, "{registered}");
+            assert_eq!(tracked[0].state, git::PrState::Merged);
             assert!(tracked_pr_polls(&ws).is_empty());
         }
     }
@@ -3461,7 +3434,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tracked_pr_follows_its_state_and_on_merge_goes_unless_registered() {
+    fn a_tracked_pr_follows_its_state_and_stays_once_merged() {
         for registered in [false, true] {
             let mut ws = linked_workspace();
             track(&mut ws, "session", 9, git::PrState::Draft);
@@ -3487,15 +3460,11 @@ mod tests {
                 &pr(9, git::PrState::Merged)
             ));
             let tracked = tracked_of(&ws, "session");
-            if registered {
-                assert_eq!(tracked.len(), 1);
-                assert_eq!(tracked[0].state, git::PrState::Merged);
-            } else {
-                assert!(tracked.is_empty(), "no registration to retire");
-            }
+            assert_eq!(tracked.len(), 1, "kept whether registered or not");
+            assert_eq!(tracked[0].state, git::PrState::Merged);
             assert!(
                 tracked_pr_polls(&ws).is_empty(),
-                "a tombstone is never polled"
+                "a merged PR is not polled again"
             );
         }
     }
@@ -3923,16 +3892,20 @@ mod tests {
         assert!(pending.is_empty());
         assert_eq!(tracked_of(&ws.lock(), "session").len(), 1);
         assert!(tracked_of(&ws.lock(), "session")[0].is_finished());
-        // So the registration goes, instead of lingering with no state.
+        // So the registration shows as one card marked Merged, not a row with
+        // no state.
         let agent = ws.lock().project("session").unwrap().agent.clone().unwrap();
-        assert!(
-            okena_core::session_assets::derive_session_assets(
-                &agent.assets,
-                &[],
-                &agent.tracked_prs
-            )
-            .is_empty()
+        let rows = okena_core::session_assets::derive_session_assets(
+            &agent.assets,
+            &[],
+            &agent.tracked_prs,
         );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].pr.as_ref().map(|p| (p.number, p.state.clone())),
+            Some((9, git::PrState::Merged))
+        );
+        assert!(rows[0].registered);
 
         // Known now: registering again looks nothing up.
         let ws = ws.lock();

@@ -184,9 +184,9 @@ pub struct AgentAsset {
 /// Detected assets are otherwise derived from the live checkouts, so this is
 /// the one thing a session has to remember: with the worktree gone there is
 /// nothing left to poll by branch. While open, the daemon's git poller
-/// refreshes it by repo and number. Once merged or closed it stays as a
-/// tombstone — never polled, never listed — so an asset the agent registered
-/// for the same PR is retired with it instead of lingering without state.
+/// refreshes it by repo and number. Once merged or closed it keeps that state,
+/// is no longer polled, and stays on the session's card for as long as the
+/// session exists.
 #[derive(Clone, Debug, PartialEq, Eq, Ser, De)]
 pub struct TrackedPullRequest {
     /// Repo label, as the worktree's row showed it.
@@ -209,7 +209,7 @@ pub struct TrackedPullRequest {
 }
 
 impl TrackedPullRequest {
-    /// Merged or closed: a tombstone, no longer polled or listed.
+    /// Merged or closed: still listed, but no longer polled.
     pub fn is_finished(&self) -> bool {
         matches!(
             self.state,
@@ -305,8 +305,8 @@ pub struct AgentSessionState {
     /// not stored here — see `crate::session_assets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets: Vec<AgentAsset>,
-    /// PRs of this session's removed worktrees: an open one until it closes,
-    /// and a merged or closed one only while a registered asset names it.
+    /// PRs of this session's removed worktrees, whatever their state: an open
+    /// one refreshed until it closes, a merged or closed one kept as it ended.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracked_prs: Vec<TrackedPullRequest>,
 }

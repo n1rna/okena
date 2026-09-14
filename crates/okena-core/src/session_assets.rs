@@ -10,9 +10,11 @@
 //!
 //! The one stored input is [`TrackedPullRequest`]: once a worktree is removed
 //! there is no checkout left to poll, so a PR it produced is remembered on the
-//! session. An open one is listed until it closes; a merged or closed one is
-//! kept as a tombstone, never listed, so the registration that named it goes
-//! too instead of lingering as a row with no state.
+//! session. It stays listed whatever its state — an open one refreshed until it
+//! closes, a merged or closed one marked so, with its last readiness — for as
+//! long as the session exists. One card per branch: a checkout that is on the
+//! branch again shows its own PR instead, and of several PRs from one branch
+//! only the newest is listed.
 
 use crate::api::{ApiGitStatus, CiCheckSummary, PrInfo, PrState};
 use crate::harness::{AgentAsset, AgentAssetKind, TrackedPullRequest};
@@ -89,8 +91,9 @@ pub struct LinkedCheckout<'a> {
     pub git: Option<&'a ApiGitStatus>,
 }
 
-/// Build the PRODUCED list: detected checkouts first, then the open PRs of
-/// removed worktrees, then whatever the agent registered that matched neither.
+/// Build the PRODUCED list: detected checkouts first, then the PRs of removed
+/// worktrees — open, merged or closed — then whatever the agent registered
+/// that matched neither.
 pub fn derive_session_assets(
     registered: &[AgentAsset],
     checkouts: &[LinkedCheckout<'_>],
@@ -99,9 +102,20 @@ pub fn derive_session_assets(
     let mut rows: Vec<SessionAsset> = checkouts.iter().filter_map(checkout_row).collect();
 
     for pr in tracked {
-        // A finished PR is only a tombstone. One checked out again is already
-        // covered by its live row.
-        if pr.is_finished() || rows.iter().any(|r| url_is(r.url.as_deref(), &pr.url)) {
+        // One card per branch. A live checkout's row already covers its own
+        // PR, or its branch's newer one; and of several tracked PRs from the
+        // same branch, only the newest is listed.
+        let live_covers = rows.iter().any(|r| {
+            url_is(r.url.as_deref(), &pr.url)
+                || (r.pr.is_some() && same_branch(r, &pr.project, pr.branch.as_deref()))
+        });
+        let newer_tracked = tracked.iter().any(|other| {
+            other.number > pr.number
+                && other.project == pr.project
+                && other.branch.is_some()
+                && other.branch == pr.branch
+        });
+        if live_covers || newer_tracked {
             continue;
         }
         rows.push(SessionAsset {
@@ -136,14 +150,8 @@ pub fn derive_session_assets(
 
     let detected = rows.len();
     for asset in registered {
-        // The PR it names merged or closed after its worktree went: the row
-        // goes with it rather than staying as a row with no state.
-        if tracked
-            .iter()
-            .any(|pr| pr.is_finished() && url_is(asset.url.as_deref(), &pr.url))
-        {
-            continue;
-        }
+        // A PR it names — open, merged or closed — is already a card above:
+        // the registration only lends it the agent's title.
         if let Some(i) = detected_match(&rows[..detected], asset) {
             let row = &mut rows[i];
             // The agent's title is kept; okena's state is shown. A second
@@ -406,6 +414,16 @@ pub fn same_url(a: &str, b: &str) -> bool {
 
 fn url_is(a: Option<&str>, b: &str) -> bool {
     a.is_some_and(|a| same_url(a, b))
+}
+
+/// Whether `row` is on `branch` in the repo labelled `project`.
+fn same_branch(row: &SessionAsset, project: &str, branch: Option<&str>) -> bool {
+    branch.is_some()
+        && row.branch.as_deref() == branch
+        && row
+            .project
+            .as_deref()
+            .is_some_and(|p| p.eq_ignore_ascii_case(project))
 }
 
 #[cfg(test)]
@@ -904,8 +922,8 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_pr_goes_once_its_removed_worktrees_pr_merges() {
-        // Registered, worktree removed while open, then merged.
+    fn a_registered_pr_stays_one_card_marked_merged_or_closed() {
+        // Registered, worktree removed while open, then merged or closed.
         let mut pr = registered(AgentAssetKind::PullRequest, "Agent title");
         pr.url = Some("https://github.com/o/r/pull/9/".into());
 
@@ -919,8 +937,55 @@ mod tests {
                 &[],
                 &[tracked(9, finished.clone())],
             );
-            assert!(rows.is_empty(), "{finished:?}: {rows:?}");
+            assert_eq!(rows.len(), 1, "{finished:?}: {rows:?}");
+            assert_eq!(rows[0].title, "Agent title", "one card, the agent's title");
+            assert_eq!(
+                rows[0].state,
+                Some(DetectedState::PullRequest {
+                    number: 9,
+                    state: finished.clone()
+                })
+            );
         }
+    }
+
+    #[test]
+    fn a_merged_pr_nobody_registered_stays_listed() {
+        let rows = derive_session_assets(&[], &[], &[tracked(9, PrState::Merged)]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, AgentAssetKind::PullRequest);
+        assert_eq!(rows[0].pr.as_ref().map(|p| p.state.clone()), Some(PrState::Merged));
+    }
+
+    #[test]
+    fn one_card_per_branch_shows_its_newest_pr() {
+        // A closed PR replaced by a new one on the same branch.
+        let rows = derive_session_assets(
+            &[],
+            &[],
+            &[tracked(9, PrState::Closed), tracked(12, PrState::Open)],
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].pr.as_ref().map(|p| p.number), Some(12));
+
+        // The branch checked out again with its new PR: the live card covers it.
+        let g = git(Some(0), Some((12, PrState::Open)));
+        let rows = derive_session_assets(
+            &[],
+            &[checkout("okena", Some(&g))],
+            &[tracked(9, PrState::Merged)],
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].pr.as_ref().map(|p| p.number), Some(12));
+
+        // Checked out again with no PR yet: the merged one is still worth a card.
+        let bare = git(Some(0), None);
+        let rows = derive_session_assets(
+            &[],
+            &[checkout("okena", Some(&bare))],
+            &[tracked(9, PrState::Merged)],
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
     }
 
     #[test]
