@@ -1,5 +1,6 @@
-//! GitHub API access for the PR/CI poll path: the base repository resolved the
-//! way non-interactive `gh` resolves it, the token from the sources `gh` reads
+//! GitHub API access for the PR/CI poll path: the base repository resolved
+//! much as non-interactive `gh` resolves it, but with `origin` ahead of
+//! `upstream` (see [`remote_name_score`]), the token from the sources `gh` reads
 //! (env, then one cached `gh auth token` spawn), and REST/GraphQL calls over the
 //! shared [`okena_transport::http`] bus so connections are reused.
 
@@ -120,12 +121,16 @@ fn remote_candidates(repo: &gix::Repository) -> Vec<RemoteCandidate> {
     candidates
 }
 
-/// gh's remote priority: `upstream` > `github` > `origin` > anything else.
+/// Remote priority: `origin` > `upstream` > `github` > anything else.
+///
+/// Not gh's order, which puts `upstream` first: on a fork, okena's branches
+/// are pushed to `origin` and their pull requests opened there, so reading
+/// `upstream` found none of them. `gh repo set-default` still wins over this.
 fn remote_name_score(name: &str) -> u8 {
     match name.to_ascii_lowercase().as_str() {
-        "upstream" => 3,
-        "github" => 2,
-        "origin" => 1,
+        "origin" => 3,
+        "upstream" => 2,
+        "github" => 1,
         _ => 0,
     }
 }
@@ -148,9 +153,9 @@ fn repo_from_full_name(full_name: &str, host: &str) -> Option<GithubRepo> {
     })
 }
 
-/// The base repository the way non-interactive `gh` picks it: only remotes on
-/// `host` count, a `gh repo set-default` choice wins, else the highest-priority
-/// remote name (ties keep `git remote` order).
+/// The base repository: only remotes on `host` count, a `gh repo set-default`
+/// choice wins, else the highest-priority remote name by
+/// [`remote_name_score`] (ties keep `git remote` order).
 fn select_base_repo(candidates: Vec<RemoteCandidate>, host: &str) -> Option<GithubRepo> {
     let mut candidates: Vec<RemoteCandidate> = candidates
         .into_iter()
@@ -548,7 +553,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn base_repo_follows_gh_remote_priority() {
+    fn base_repo_prefers_origin_where_branches_are_pushed() {
+        // A fork: its PRs are opened in `origin`, not in `upstream`.
         let candidates = vec![
             candidate("origin", repo("github.com", "me", "fork"), None),
             candidate("upstream", repo("github.com", "org", "main"), None),
@@ -556,12 +562,13 @@ pub(crate) mod tests {
         ];
         assert_eq!(
             select_base_repo(candidates, "github.com"),
-            Some(repo("github.com", "org", "main"))
+            Some(repo("github.com", "me", "fork"))
         );
 
+        // Without `origin`, `upstream` comes before `github`.
         let candidates = vec![
-            candidate("origin", repo("github.com", "me", "fork"), None),
-            candidate("github", repo("github.com", "org", "main"), None),
+            candidate("github", repo("github.com", "me", "mirror"), None),
+            candidate("upstream", repo("github.com", "org", "main"), None),
         ];
         assert_eq!(
             select_base_repo(candidates, "github.com"),
@@ -649,15 +656,16 @@ pub(crate) mod tests {
         let candidates = remote_candidates(&gix::open(&path).expect("repo"));
         assert_eq!(
             select_base_repo(candidates, "github.com"),
-            Some(repo("github.com", "org", "main"))
+            Some(repo("github.com", "me", "fork"))
         );
 
-        git_in(&path, &["config", "remote.origin.gh-resolved", "base"]);
+        // `gh repo set-default` still decides over the remote names.
+        git_in(&path, &["config", "remote.upstream.gh-resolved", "base"]);
         // Opened directly: the shared handle cache would hide the config edit.
         let candidates = remote_candidates(&gix::open(&path).expect("repo"));
         assert_eq!(
             select_base_repo(candidates, "github.com"),
-            Some(repo("github.com", "me", "fork"))
+            Some(repo("github.com", "org", "main"))
         );
     }
 
