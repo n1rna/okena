@@ -1376,8 +1376,9 @@ fn select_tracked_pr_polls(
         .collect()
 }
 
-/// Run the daemon git-status poll loop until the `watch` channel is closed (all
-/// receivers dropped → the server is gone).
+/// Run the daemon git-status poll loop until the server is gone: every `watch`
+/// receiver dropped and every trigger sender dropped. A daemon no client has
+/// subscribed to yet keeps polling, so a status is ready when one does.
 ///
 /// Each cycle snapshots all local projects and their current relevance, selects
 /// only due or explicitly triggered repositories, and runs their gix work on the
@@ -1634,9 +1635,12 @@ pub async fn run_git_poll(
         // never block the branch/diff badge from appearing.
         publish(&mut last, &new_statuses, &git_status_tx, &state_version);
 
-        // Stop once every external `watch` receiver is gone (the server is down).
-        if git_status_tx.is_closed() {
-            log::trace!("git poll loop exiting: no status receivers left");
+        // Stop once the server is down: no `watch` receiver left AND no one left
+        // to send triggers. Receivers alone are not enough — none exists until
+        // the first client subscribes, and the first cycle routinely finishes
+        // before that, which used to end polling for the daemon's lifetime.
+        if git_status_tx.is_closed() && trigger_rx_closed {
+            log::trace!("git poll loop exiting: no status receivers or trigger senders left");
             return;
         }
 
@@ -1909,7 +1913,9 @@ mod tests {
 
         let subscribed = Arc::new(RwLock::new(HashMap::new()));
         let client_visible = Arc::new(RwLock::new(HashMap::new()));
-        let (_trigger_tx, trigger_rx) = mpsc::unbounded_channel();
+        // The server holds the trigger senders; it is gone, so are they.
+        let (trigger_tx, trigger_rx) = mpsc::unbounded_channel();
+        drop(trigger_tx);
         run_git_poll(
             workspace,
             git_status_tx.clone(),
@@ -1923,6 +1929,43 @@ mod tests {
 
         // No projects → nothing was published; the channel holds the initial map.
         assert!(git_status_tx.borrow().is_empty());
+    }
+
+    /// The regression: a daemon starts polling before any client has
+    /// subscribed to its statuses. With the server still up (it holds the
+    /// trigger senders), the loop must keep going rather than read "no
+    /// receivers yet" as "server gone" — which stopped git status and every
+    /// GitHub fetch for the daemon's whole lifetime.
+    #[tokio::test(start_paused = true)]
+    async fn polling_survives_a_start_with_no_client_subscribed_yet() {
+        let workspace = Arc::new(Mutex::new(Workspace::new(empty_workspace_data())));
+        let git_status_tx = Arc::new(watch::Sender::new(HashMap::<String, ApiGitStatus>::new()));
+        let (state_version, _svrx) = watch::channel(0u64);
+        let (trigger_tx, trigger_rx) = mpsc::unbounded_channel();
+        let poll = tokio::spawn(run_git_poll(
+            workspace,
+            git_status_tx.clone(),
+            state_version,
+            watch::Sender::new(0),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            trigger_rx,
+        ));
+
+        // Several cadence cycles with no receiver: still polling.
+        for _ in 0..4 {
+            tokio::time::sleep(GIT_POLL_INTERVAL).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(!poll.is_finished(), "polling stopped before any client came");
+
+        // The server goes away: the loop ends on its next cycle.
+        drop(trigger_tx);
+        tokio::time::sleep(GIT_POLL_INTERVAL * 2).await;
+        tokio::time::timeout(GIT_POLL_INTERVAL * 2, poll)
+            .await
+            .expect("the loop ends once the server is gone")
+            .expect("the poll task does not panic");
     }
 
     #[test]
