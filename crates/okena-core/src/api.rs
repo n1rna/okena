@@ -2094,6 +2094,12 @@ pub enum ActionRequest {
     AgentHookEvent {
         terminal_id: String,
         event: crate::agent_activity::AgentHookEvent,
+        /// The directory a `git push` or `gh pr create` just ran in, when the
+        /// hook saw one: the daemon records that branch on the session and
+        /// looks its PR up now. Absent from hooks that saw no push, and from
+        /// older CLIs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pushed_from: Option<String>,
     },
     /// Restart a session's agent and resume its conversation.
     ///
