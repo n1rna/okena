@@ -412,7 +412,13 @@ fn parse_work_item(item: &Value, organization_url: &str, category: Option<&str>)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
         .collect();
-    let parent = fields.get("System.Parent").and_then(Value::as_u64);
+    // The field when it came back, else the hierarchy link: the batch
+    // documents no default field set, and a list whose parents silently went
+    // missing rendered every breakdown flat.
+    let parent = fields
+        .get("System.Parent")
+        .and_then(Value::as_u64)
+        .or_else(|| linked_ids(item, PARENT_LINK).first().copied());
     let url = if project.is_empty() {
         format!("{organization_url}/_workitems/edit/{id}")
     } else {
@@ -446,12 +452,17 @@ fn parse_work_item(item: &Value, organization_url: &str, category: Option<&str>)
 
 /// Ids of a work item's children, from its expanded relations.
 fn child_ids(item: &Value) -> Vec<u64> {
+    linked_ids(item, CHILD_LINK)
+}
+
+/// Ids a work item links to with `rel`, from its expanded relations.
+fn linked_ids(item: &Value, rel: &str) -> Vec<u64> {
     item.get("relations")
         .and_then(Value::as_array)
         .map(|relations| {
             relations
                 .iter()
-                .filter(|r| r.get("rel").and_then(Value::as_str) == Some(CHILD_LINK))
+                .filter(|r| r.get("rel").and_then(Value::as_str) == Some(rel))
                 .filter_map(|r| r.get("url")?.as_str()?.rsplit('/').next()?.parse().ok())
                 .collect()
         })
@@ -707,7 +718,11 @@ impl AzureDevOpsProvider {
                 Method::Post,
                 "/_apis/wit/workitemsbatch",
                 // `omit`: an item deleted since the query must not fail the rest.
-                Payload::Json(json!({ "ids": chunk, "errorPolicy": "omit" })),
+                // `relations`: the parent link, which is where a task sits in
+                // the breakdown. It cannot be combined with a `fields` list.
+                Payload::Json(
+                    json!({ "ids": chunk, "errorPolicy": "omit", "$expand": "relations" }),
+                ),
             )?;
             if let Some(value) = data.get("value").and_then(Value::as_array) {
                 items.extend(value.iter().filter(|v| !v.is_null()).cloned());
@@ -1466,6 +1481,119 @@ mod tests {
         assert_eq!(tasks[0].state, TaskState::InReview);
         assert_eq!(tasks[0].labels, ["api"]);
         assert_eq!(tasks[1].state, TaskState::InProgress);
+    }
+
+    #[test]
+    fn a_listed_task_knows_its_parent_from_its_hierarchy_link() {
+        // The batch documents no default field set, so `System.Parent` may not
+        // be among the fields; the hierarchy link is what says where it sits.
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let _mock = http::testing::mock(|req| {
+            let url = req.url();
+            if url.contains("/_apis/wit/workitemsbatch") {
+                let body = req.json_body().cloned().unwrap_or_default();
+                let relations = body["$expand"] == "relations";
+                let item = |id: u64, parent: Option<u64>| {
+                    let mut v = json!({ "id": id, "fields": {
+                        "System.TeamProject": "Shop", "System.WorkItemType": "User Story",
+                        "System.State": "Active", "System.Title": format!("t{id}"),
+                    }});
+                    if relations {
+                        v["relations"] = json!(parent.map(|p| vec![json!({
+                            "rel": PARENT_LINK,
+                            "url": format!("https://dev.azure.com/contoso/_apis/wit/workItems/{p}"),
+                        })]).unwrap_or_default());
+                    }
+                    v
+                };
+                return ok(json!({ "value": [item(1, Some(2)), item(2, Some(3)), item(3, None)] }));
+            }
+            if url.contains("/states") {
+                return ok(story_states());
+            }
+            panic!("unexpected request {url}");
+        });
+
+        // Through `get_tasks` rather than `list_assigned`: both read the batch
+        // the same way, and the queue's rate floor would refuse a second
+        // test's poll in the same process.
+        let ids: Vec<TaskId> = ["1", "2", "3"]
+            .iter()
+            .map(|id| TaskId::new(PROVIDER_ID, *id))
+            .collect();
+        let tasks = AzureDevOpsProvider::new(Some(pat()))
+            .get_tasks(&ids)
+            .expect("reads");
+        let parents: Vec<_> = tasks
+            .iter()
+            .map(|t| {
+                (
+                    t.id.external_id.as_str(),
+                    t.parent_id.as_deref(),
+                    t.parent_key.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            parents,
+            [
+                ("1", Some("2"), Some("#2")),
+                ("2", Some("3"), Some("#3")),
+                ("3", None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn tasks_by_id_include_closed_ones_and_other_peoples() {
+        // What an ancestor is: often finished, often somebody else's. The queue
+        // leaves both out; reading by id must not.
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let _mock = http::testing::mock(|req| {
+            let url = req.url();
+            if url.contains("/_apis/wit/workitemsbatch") {
+                let item = |id: u64, state: &str| {
+                    json!({ "id": id, "fields": {
+                        "System.TeamProject": "Shop", "System.WorkItemType": "User Story",
+                        "System.State": state, "System.Title": format!("t{id}"),
+                        "System.AssignedTo": { "displayName": "Someone Else" },
+                    }})
+                };
+                return ok(json!({ "value": [item(10, "Closed"), item(11, "Active")] }));
+            }
+            if url.contains("/states") {
+                return ok(story_states());
+            }
+            panic!("unexpected request {url}");
+        });
+
+        let ids = [
+            TaskId::new(PROVIDER_ID, "10"),
+            TaskId::new(PROVIDER_ID, "11"),
+        ];
+        let tasks = AzureDevOpsProvider::new(Some(pat()))
+            .get_tasks(&ids)
+            .expect("reads");
+        let keys: Vec<_> = tasks.iter().map(|t| t.display_key.as_str()).collect();
+        assert_eq!(keys, ["#10", "#11"]);
+        assert!(tasks[0].state.is_closed(), "{:?}", tasks[0].state);
+    }
+
+    #[test]
+    fn the_parent_field_and_the_hierarchy_link_both_name_a_parent() {
+        let fields = json!({ "System.WorkItemType": "Task", "System.Title": "t" });
+        let linked = json!({ "id": 5, "fields": fields, "relations": [
+            { "rel": "System.LinkTypes.Related", "url": "https://dev.azure.com/c/_apis/wit/workItems/8" },
+            { "rel": PARENT_LINK, "url": "https://dev.azure.com/c/_apis/wit/workItems/9" },
+        ]});
+        let t = parse_work_item(&linked, "https://dev.azure.com/c", None).expect("parses");
+        assert_eq!(t.parent_id.as_deref(), Some("9"));
+
+        let orphan = json!({ "id": 5, "fields": fields, "relations": [
+            { "rel": CHILD_LINK, "url": "https://dev.azure.com/c/_apis/wit/workItems/8" },
+        ]});
+        let t = parse_work_item(&orphan, "https://dev.azure.com/c", None).expect("parses");
+        assert_eq!(t.parent_id, None, "a child link is not a parent");
     }
 
     #[test]
