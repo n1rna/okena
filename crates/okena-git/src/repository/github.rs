@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use gix::bstr::ByteSlice;
-use okena_core::process::{command, safe_output_with_timeout};
+use okena_core::process::safe_output_with_timeout;
 use okena_transport::http::{self, HttpRequest, HttpResponse};
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
@@ -412,7 +412,7 @@ pub(crate) fn env_token(host: &str) -> Option<String> {
 
 fn gh_cli_token(host: &str) -> Option<String> {
     let output = safe_output_with_timeout(
-        command("gh").args(["auth", "token", "--hostname", host]),
+        super::gh::gh_command().args(["auth", "token", "--hostname", host]),
         REQUEST_TIMEOUT,
     )
     .ok()?;
@@ -1081,6 +1081,25 @@ pub(crate) mod tests {
         );
         // `ghe.com` itself is no tenant.
         assert_eq!(host_kind("ghe.com"), HostKind::Server);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_token_comes_from_the_configured_gh_not_whatever_path_holds() {
+        let _guard = mock_guard();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gh = crate::repository::gh::tests::fake_gh(
+            &tmp.path().join("custom-bin"),
+            r#"[ "$1 $2 $3 $4" = "auth token --hostname gh-path.example" ] && echo tok-from-configured-gh || exit 1"#,
+            true,
+        );
+
+        super::super::gh::set_gh_path(Some(gh.to_str().expect("utf-8 path")));
+        assert_eq!(super::super::gh::resolved_gh_path(), Some(gh));
+        let token = gh_cli_token("gh-path.example");
+        super::super::gh::set_gh_path(None);
+
+        assert_eq!(token.as_deref(), Some("tok-from-configured-gh"));
     }
 
     #[test]

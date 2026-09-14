@@ -147,6 +147,16 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `github_enterprise_hosts` | string[] | `[]` | GitHub Enterprise hosts to treat as GitHub (Settings → GitHub), e.g. `github.acme.corp`. Entries may be bare hosts or URLs. |
+| `gh_path` | string | unset | The `gh` binary, or the directory holding it (Settings → GitHub). `~` is expanded. |
+
+okena runs `gh` for tokens (`gh auth token`) and the worktree dialog's **From
+PR** list. Started from the Dock or a desktop entry, okena doesn't inherit your
+shell's `PATH`, so gh is looked for in order: `gh_path`, then `PATH`, then
+`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`,
+`/home/linuxbrew/.linuxbrew/bin`, `/opt/local/bin`, `/snap/bin`, `/usr/bin`,
+`~/.linuxbrew/bin` and `~/bin` (on Windows: `GitHub CLI` under Program Files
+and Local AppData, and Scoop's shims). A `gh_path` that isn't an executable gh
+is logged and skipped.
 
 PR, CI and readiness status work for repos on any GitHub host: `github.com`, a
 GHE.com tenant (`*.ghe.com`), a host gh is logged into (gh's `hosts.yml`),

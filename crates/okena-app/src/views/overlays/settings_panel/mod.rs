@@ -104,6 +104,8 @@ pub struct SettingsPanel {
     pub(super) worktree_dir_suffix_input: Entity<SimpleInputState>,
     /// The GitHub page: a host to add to the enterprise hosts.
     pub(super) github_host_input: Entity<SimpleInputState>,
+    /// The GitHub page: where to run gh from.
+    pub(super) gh_path_input: Entity<SimpleInputState>,
     pub(super) harness_agent_root_input: Entity<SimpleInputState>,
     /// The Specs page: OpenSpec stores, discovery and folders.
     specs: render_specs::SpecsPage,
@@ -965,6 +967,13 @@ impl SettingsPanel {
         .detach();
 
         let github_host_input = render_specs::text_input(cx, "e.g. github.acme.corp", None);
+        let gh_path_input =
+            render_specs::text_input(cx, "e.g. /opt/homebrew/bin/gh", s.gh_path.clone());
+        cx.subscribe(&gh_path_input, |_this, entity, _: &InputChangedEvent, cx| {
+            let val = entity.read(cx).value().to_string();
+            settings_entity(cx).update(cx, |state, cx| state.set_gh_path(val, cx));
+        })
+        .detach();
 
         // File opener input
         let file_opener_input = cx.new(|cx| {
@@ -1047,6 +1056,7 @@ impl SettingsPanel {
             project_hook_terminal_shell_wrapper,
             worktree_dir_suffix_input,
             github_host_input,
+            gh_path_input,
             harness_agent_root_input,
             specs,
             knowledge,

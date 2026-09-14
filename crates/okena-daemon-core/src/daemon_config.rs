@@ -152,16 +152,22 @@ impl ConfigBackend for DaemonConfig {
         // Persist to disk first; only replace the held value on success so a
         // save failure leaves the in-memory settings unchanged.
         (self.persist_settings)(new)?;
-        let hosts_changed = {
+        let (hosts_changed, gh_path_changed) = {
             let mut held = self.settings.lock();
-            let changed = held.github_enterprise_hosts != new.github_enterprise_hosts;
+            let changed = (
+                held.github_enterprise_hosts != new.github_enterprise_hosts,
+                held.gh_path != new.gh_path,
+            );
             *held = new.clone();
             changed
         };
-        // Only on a change: the host list is process-wide, and a store that
-        // leaves it alone has nothing to tell the GitHub poller.
+        // Only on a change: both are process-wide, and a store that leaves
+        // them alone has nothing to tell the GitHub code.
         if hosts_changed {
             okena_git::repository::set_enterprise_hosts(&new.github_enterprise_hosts);
+        }
+        if gh_path_changed {
+            okena_git::repository::set_gh_path(new.gh_path.as_deref());
         }
         self.refresh_palette();
         Ok(())
@@ -253,6 +259,34 @@ mod tests {
         ));
         assert!(settings.lock().github_enterprise_hosts.is_empty());
         assert!(!okena_git::repository::has_github_remote(repo));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_gh_path_set_in_settings_is_the_gh_that_runs_until_cleared() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gh = tmp.path().join("gh");
+        std::fs::write(&gh, "#!/bin/sh\nexit 0\n").expect("write gh");
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let settings = Arc::new(Mutex::new(default_settings()));
+        let mut cfg = DaemonConfig::with_persistence(settings.clone(), Arc::new(|_| Ok(())));
+
+        // A directory holding gh works as well as the binary itself.
+        assert!(matches!(
+            cfg.set_settings(json!({"gh_path": tmp.path().to_str().unwrap()})),
+            CommandResult::Ok(_)
+        ));
+        assert_eq!(okena_git::repository::resolved_gh_path(), Some(gh.clone()));
+
+        assert!(matches!(
+            cfg.set_settings(json!({"gh_path": null})),
+            CommandResult::Ok(_)
+        ));
+        assert_eq!(settings.lock().gh_path, None);
+        assert_ne!(okena_git::repository::resolved_gh_path(), Some(gh));
     }
 
     #[test]

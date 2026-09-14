@@ -11,6 +11,7 @@
 //! | `diff_memo`  | private: per-file diff counts remembered across status walks |
 //! | [`ci`]       | GitHub PR info + CI check aggregation |
 //! | [`github`]   | GitHub base-repo resolution, token cache, REST/GraphQL client |
+//! | `gh`         | finding the `gh` binary: Settings path, `PATH`, then install directories |
 //! | [`paths`]    | repo-root resolution and worktree/project path computation |
 //! | [`upstream`] | the checked-out branch's upstream, fast-forward to it, `origin` URL |
 //! | [`init`]     | `git init`, commit of given paths, commit-identity check |
@@ -24,6 +25,7 @@ pub mod branch;
 pub mod ci;
 pub mod clone;
 mod diff_memo;
+pub(crate) mod gh;
 pub(crate) mod github;
 pub mod init;
 pub mod paths;
@@ -49,6 +51,7 @@ pub use clone::{
     CloneProgress, clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,
     parse_clone_progress, start_clone_repository, validate_clone_url,
 };
+pub use gh::{resolved_gh_path, set_gh_path};
 pub use github::{
     GithubRepo, github_repo, github_repo_key, has_github_remote, normalize_github_host,
     set_enterprise_hosts,

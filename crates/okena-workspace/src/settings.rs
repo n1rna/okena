@@ -649,6 +649,12 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub github_enterprise_hosts: Vec<String>,
 
+    /// Path to the `gh` binary, or a directory holding it. Unset looks gh up
+    /// on `PATH` and then where Homebrew and user installs put it — okena
+    /// started from the Dock does not see a shell's `PATH`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_path: Option<String>,
+
     /// Saved remote connections for the client feature
     #[serde(default)]
     pub remote_connections: Vec<RemoteConnectionConfig>,
@@ -728,6 +734,7 @@ impl Default for AppSettings {
             sidebar: SidebarSettings::default(),
             harness: HarnessConfig::default(),
             github_enterprise_hosts: Vec::new(),
+            gh_path: None,
             show_focused_border: default_show_focused_border(),
             color_tinted_background: false,
             font_size: default_font_size(),

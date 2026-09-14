@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use okena_core::process::{command, safe_output_with_timeout};
+use okena_core::process::safe_output_with_timeout;
 use serde_json::{Value, json};
 
 use super::github::{ApiError, GithubClient, GithubRepo, origin_repo, resolve_base_repo};
@@ -75,7 +75,7 @@ pub fn list_pull_requests(
     limit: usize,
 ) -> Result<Vec<okena_core::api::WorktreePullRequest>, String> {
     let limit = limit.clamp(1, 100).to_string();
-    let mut gh = command("gh");
+    let mut gh = super::gh::gh_command();
     gh.args([
         "pr",
         "list",
