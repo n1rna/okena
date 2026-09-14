@@ -210,19 +210,21 @@ pub(super) fn activity_of(
     }
 }
 
-/// Whether `candidate` belongs to the same task as the session, and isn't the
+/// Whether `candidate` works on any of the session's tasks, and isn't the
 /// session itself.
 ///
-/// Matched on the provider's own task id rather than the display key, which
-/// changes when an issue moves team and would silently drop the worktrees.
-pub(super) fn is_related(
+/// Every task on both sides counts: a session started on several picked tasks
+/// owns the worktrees of its second and later tasks too. Matched on the
+/// provider's own task id rather than the display key, which changes when an
+/// issue moves team and would silently drop the worktrees.
+pub(super) fn is_related<'a>(
     session_id: &str,
-    task_external_id: &str,
+    session_tasks: &[String],
     candidate_id: &str,
-    candidate_task: Option<&TaskRef>,
+    mut candidate_tasks: impl Iterator<Item = &'a TaskRef>,
 ) -> bool {
     candidate_id != session_id
-        && candidate_task.is_some_and(|t| t.id.external_id == task_external_id)
+        && candidate_tasks.any(|t| session_tasks.contains(&t.id.external_id))
 }
 
 /// Classify a project as an agent session.
@@ -284,13 +286,15 @@ impl AgentSessionInfo {
         // Where this session's work lands. Found by task rather than by path: a
         // session is rooted above the repos precisely so one agent can span
         // several, so it has no directory that would place its checkouts.
+        let session_task_ids: Vec<String> = project
+            .linked_tasks()
+            .map(|t| t.id.external_id.clone())
+            .collect();
         let workspaces: Vec<RelatedWorkspace> = match &kind {
-            AgentSessionKind::Task(task) => ws
+            AgentSessionKind::Task(_) => ws
                 .projects()
                 .iter()
-                .filter(|p| {
-                    is_related(project_id, &task.id.external_id, &p.id, p.task_ref.as_ref())
-                })
+                .filter(|p| is_related(project_id, &session_task_ids, &p.id, p.linked_tasks()))
                 .map(|p| RelatedWorkspace {
                     project_id: p.id.clone(),
                     name: p.name.clone(),
@@ -613,26 +617,64 @@ mod tests {
         serde_json::from_value(json).unwrap()
     }
 
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn a_worktree_on_the_same_task_is_related() {
-        assert!(is_related("s1", "u1", "wt1", Some(&task("u1", "QBL-1"))));
+        assert!(is_related(
+            "s1",
+            &ids(&["u1"]),
+            "wt1",
+            [task("u1", "QBL-1")].iter()
+        ));
+    }
+
+    #[test]
+    fn a_worktree_on_a_sessions_second_task_is_related() {
+        // A session started on two picked tasks: the worktree Start work made
+        // for the second one is as much this session's as the first's.
+        assert!(is_related(
+            "s1",
+            &ids(&["u1", "u2"]),
+            "wt2",
+            [task("u2", "QBL-2")].iter()
+        ));
+        // And a worktree covering several tasks matches on any of them.
+        assert!(is_related(
+            "s1",
+            &ids(&["u2"]),
+            "wt1",
+            [task("u1", "QBL-1"), task("u2", "QBL-2")].iter()
+        ));
     }
 
     #[test]
     fn the_session_is_not_related_to_itself() {
         // It carries the same task as its worktrees, so it would otherwise
         // list itself as one of its own checkouts.
-        assert!(!is_related("s1", "u1", "s1", Some(&task("u1", "QBL-1"))));
+        assert!(!is_related(
+            "s1",
+            &ids(&["u1"]),
+            "s1",
+            [task("u1", "QBL-1")].iter()
+        ));
     }
 
     #[test]
     fn a_different_task_is_not_related() {
-        assert!(!is_related("s1", "u1", "wt1", Some(&task("u9", "QBL-9"))));
+        assert!(!is_related(
+            "s1",
+            &ids(&["u1", "u2"]),
+            "wt1",
+            [task("u9", "QBL-9")].iter()
+        ));
     }
 
     #[test]
     fn an_unlinked_project_is_not_related() {
-        assert!(!is_related("s1", "u1", "p1", None));
+        assert!(!is_related("s1", &ids(&["u1"]), "p1", std::iter::empty()));
     }
 
     #[test]
@@ -647,7 +689,7 @@ mod tests {
             parent_id: None,
             parent_key: None,
         };
-        assert!(is_related("s1", "u1", "wt1", Some(&moved)));
+        assert!(is_related("s1", &ids(&["u1"]), "wt1", [moved].iter()));
     }
 
     #[test]
