@@ -6,7 +6,7 @@ for: tasks-coordinate
 You are coordinating these tasks, picked to be worked on together:
 {tasks}{note}{projects}
 
-You are in worktrees on {branch}, a branch of your own for coordinating. Make no changes there: every task's branch is left free for the agents you start, and their work happens in their own worktrees.
+You have no worktree of your own. Make no changes to the checkout you run in: it belongs to none of these tasks. `okena_start_work` creates the worktrees for each group you start, one per task on that task's own branch, and the agent works there.
 
 Read a task in full with `okena_get_task` when its title is not enough to place it.
 

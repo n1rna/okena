@@ -343,11 +343,11 @@ fn tool_definitions() -> Value {
         {
             "name": "okena_start_work",
             "description":
-                "Start an agent on one or more sub-tasks, in their own worktrees. \
-                 Use this after deciding how a parent task splits: one call per \
-                 group of sub-tasks that can be built and tested together. The \
-                 first key is the group's own task; the rest are named to it as \
-                 part of the same piece of work.",
+                "Start an agent on one or more tasks, each in worktrees of its own. \
+                 Use this after deciding how the work splits: one call per \
+                 group of tasks that can be built and tested together. Every \
+                 task in the group gets its own worktree in each repo, on its \
+                 own branch, and the agent is told which worktree is whose.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -356,9 +356,8 @@ fn tool_definitions() -> Value {
                         "items": { "type": "string" },
                         "minItems": 1,
                         "description":
-                            "Provider ids or keys of the sub-tasks in this group. \
-                             The first one is where the agent's worktree and branch \
-                             come from."
+                            "Provider ids or keys of the tasks in this group. The \
+                             session is named after the first."
                     },
                     "note": {
                         "type": "string",
@@ -806,11 +805,10 @@ fn list_subtasks(args: &Value) -> Result<Value, String> {
 
 /// Start one agent on a group of sub-tasks.
 ///
-/// The group is the point: a coordinating agent decides that two sub-tasks
-/// cannot be tested apart and hands both to one agent. okena starts the
-/// session on the first of them — that is where the branch and worktrees come
-/// from — and links the rest to it too, telling the agent about them in its
-/// note.
+/// The group is the point: a coordinating agent decides that two tasks cannot
+/// be tested apart and hands both to one agent. okena gives each of them
+/// worktrees of its own on its own branch, names the session after the first,
+/// links it to all of them, and tells the agent which worktree is whose.
 fn start_work(args: &Value) -> Result<Value, String> {
     let tasks: Vec<String> = args
         .get("tasks")
@@ -865,46 +863,133 @@ fn start_work(args: &Value) -> Result<Value, String> {
     Ok(json!({ "started": response, "task": primary, "also": rest }))
 }
 
-/// The repositories the current session's worktrees were cut from.
+/// The repositories the current session works in.
 ///
 /// Read off the session's own workspace rather than asked for, so a
 /// coordinating agent does not have to know okena's project ids to start a
 /// sub-agent beside itself.
 fn sibling_repo_ids(session: &Session) -> Result<Vec<String>, String> {
-    let task = session.project.task_ref.as_ref().ok_or(
-        "this session is not linked to a task, so okena cannot tell which repos a \
-         sub-agent should work in",
-    )?;
     let token = super::ensure_token()?;
     let state = super::commands::fetch_state(&token)?;
-    let ids: Vec<String> = state
-        .projects
+    repo_ids_of(&session.project, &state.projects)
+}
+
+/// Which repos `session` works in, among `projects`.
+///
+/// The repos it was given, when it keeps them: a coordinator over picked tasks
+/// has no worktree to say. Otherwise the repos its worktrees were cut from —
+/// the worktrees of every task it covers, since each has its own.
+fn repo_ids_of(
+    session: &okena_core::api::ApiProject,
+    projects: &[okena_core::api::ApiProject],
+) -> Result<Vec<String>, String> {
+    if !session.repo_ids.is_empty() {
+        return Ok(session.repo_ids.clone());
+    }
+    if session.task_ref.is_none() {
+        return Err(
+            "this session is not linked to a task, so okena cannot tell which repos a \
+             sub-agent should work in"
+                .to_string(),
+        );
+    }
+    let covered: Vec<&str> = session
+        .task_ref
         .iter()
-        .filter(|p| {
-            p.task_ref
-                .as_ref()
-                .is_some_and(|t| t.id.external_id == task.id.external_id)
-        })
-        .filter_map(|p| {
-            p.worktree_info
-                .as_ref()
-                .map(|w| w.parent_project_id.clone())
-        })
+        .chain(&session.also_tasks)
+        .map(|t| t.id.external_id.as_str())
         .collect();
-    let mut unique = Vec::new();
-    for id in ids {
-        if !unique.contains(&id) {
-            unique.push(id);
+    let mut unique: Vec<String> = Vec::new();
+    for p in projects {
+        let covers = p
+            .task_ref
+            .as_ref()
+            .is_some_and(|t| covered.contains(&t.id.external_id.as_str()));
+        if let Some(w) = p.worktree_info.as_ref().filter(|_| covers)
+            && !unique.contains(&w.parent_project_id)
+        {
+            unique.push(w.parent_project_id.clone());
         }
     }
     if unique.is_empty() {
         return Err(
             "this session has no worktrees, so okena cannot tell which repos a \
-                    sub-agent should work in"
+             sub-agent should work in"
                 .to_string(),
         );
     }
     Ok(unique)
+}
+
+#[cfg(test)]
+mod repo_ids_tests {
+    use super::repo_ids_of;
+    use okena_core::api::ApiProject;
+    use serde_json::json;
+
+    fn task(id: &str) -> serde_json::Value {
+        json!({
+            "id": { "provider": "linear", "external_id": id },
+            "display_key": id.to_uppercase(), "title": "t", "url": "http://x",
+        })
+    }
+
+    fn project(extra: serde_json::Value) -> ApiProject {
+        let mut base = json!({
+            "id": "p", "name": "p", "path": "/p", "show_in_overview": true,
+            "layout": null, "terminal_names": {},
+        });
+        for (k, v) in extra.as_object().expect("an object") {
+            base[k] = v.clone();
+        }
+        serde_json::from_value(base).expect("an ApiProject")
+    }
+
+    fn worktree(id: &str, repo: &str, task_id: &str) -> ApiProject {
+        project(json!({
+            "id": id,
+            "worktree_info": { "parent_project_id": repo, "branch_name": "b" },
+            "task_ref": task(task_id),
+        }))
+    }
+
+    #[test]
+    fn a_coordinator_with_no_worktree_uses_the_repos_it_was_given() {
+        let coordinator = project(json!({
+            "id": "c1", "task_ref": task("u1"), "repo_ids": ["okena", "web"],
+        }));
+        assert_eq!(
+            repo_ids_of(&coordinator, std::slice::from_ref(&coordinator)).unwrap(),
+            ["okena", "web"]
+        );
+    }
+
+    #[test]
+    fn a_session_on_several_tasks_finds_repos_through_every_tasks_worktrees() {
+        let session = project(json!({
+            "id": "s1", "task_ref": task("u1"), "also_tasks": [task("u2")],
+        }));
+        let projects = [
+            session.clone(),
+            worktree("wt1", "okena", "u1"),
+            worktree("wt2", "web", "u2"),
+            worktree("wt3", "okena", "u2"),
+            worktree("other", "infra", "u9"),
+        ];
+        assert_eq!(repo_ids_of(&session, &projects).unwrap(), ["okena", "web"]);
+    }
+
+    #[test]
+    fn a_session_with_nothing_to_go_on_says_so() {
+        let unlinked = project(json!({ "id": "s1" }));
+        assert!(
+            repo_ids_of(&unlinked, &[])
+                .unwrap_err()
+                .contains("not linked")
+        );
+        let bare = project(json!({ "id": "s1", "task_ref": task("u1") }));
+        assert!(repo_ids_of(&bare, &[]).unwrap_err().contains("no worktrees"));
+    }
 }
 
 fn list_containers() -> Result<Value, String> {

@@ -38,6 +38,13 @@ pub struct RemoteFocusTarget {
     pub layout_path: Vec<usize>,
 }
 
+/// A daemon's project ids, prefixed as they are on this client.
+fn remote_ids(conn_id: &str, ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .map(|id| format!("remote:{}:{}", conn_id, id))
+        .collect()
+}
+
 /// Result of applying a set of remote snapshots to the workspace data.
 #[derive(Clone, Debug, Default)]
 pub struct RemoteSyncOutcome {
@@ -194,6 +201,8 @@ pub fn apply_remote_snapshot(
                     // translation — see the push path below.
                     existing.task_ref = api_project.task_ref.clone();
                     existing.also_tasks = api_project.also_tasks.clone();
+                    // Prefixed like `worktree_ids`: these are the daemon's project ids.
+                    existing.repo_ids = remote_ids(conn_id, &api_project.repo_ids);
                     existing.spec_change = api_project.spec_change.clone();
                     existing.knowledge_root = api_project.knowledge_root.clone();
                     existing.project_scan = api_project.project_scan.clone();
@@ -271,6 +280,7 @@ pub fn apply_remote_snapshot(
                         // every instance.
                         task_ref: api_project.task_ref.clone(),
                         also_tasks: api_project.also_tasks.clone(),
+                        repo_ids: remote_ids(conn_id, &api_project.repo_ids),
                         spec_change: api_project.spec_change.clone(),
                         knowledge_root: api_project.knowledge_root.clone(),
                         project_scan: api_project.project_scan.clone(),
@@ -599,6 +609,7 @@ mod tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             also_tasks: Vec::new(),
+            repo_ids: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,
@@ -726,6 +737,26 @@ mod tests {
             entry.status,
             okena_state::HookTerminalStatus::Failed { exit_code: 3 }
         ));
+    }
+
+    #[test]
+    fn a_sessions_repos_are_prefixed_on_add_and_on_update() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let snap = |repos: &[&str]| {
+            let mut p = api_project("coord", Some(terminal("t1")));
+            p.repo_ids = repos.iter().map(|r| r.to_string()).collect();
+            RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(vec![p], vec!["coord".into()], vec![])),
+            }
+        };
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(&["r1"])], WindowId::Main);
+        assert_eq!(data.projects[0].repo_ids, ["remote:c1:r1"]);
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(&["r1", "r2"])], WindowId::Main);
+        assert_eq!(data.projects[0].repo_ids, ["remote:c1:r1", "remote:c1:r2"]);
     }
 
     #[test]

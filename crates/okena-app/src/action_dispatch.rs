@@ -926,13 +926,14 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             coordinate,
             also,
             siblings,
+            branches,
             hand_picked,
         } => ActionRequest::TaskStartWork {
             provider,
             task_external_id,
             // Every assigned project is an okena-side id and needs stripping.
             project_ids: project_ids.iter().map(|id| s(id)).collect(),
-            // A filesystem path, a branch name and a program name — none are
+            // A filesystem path, branch names and a program name — none are
             // okena ids, so none are translated.
             agent_root,
             branch,
@@ -941,6 +942,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             coordinate,
             also,
             siblings,
+            branches,
             hand_picked,
         },
         ActionRequest::AgentRegisterAsset {

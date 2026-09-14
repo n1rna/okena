@@ -218,6 +218,9 @@ impl SpecsState {
 pub(crate) struct QueuedStart {
     pub(crate) task: Task,
     pub(crate) project_ids: Vec<String>,
+    /// The branch it was asked for, or `None` for the provider's own. Kept,
+    /// so a start that waited is not quietly renamed.
+    pub(crate) branch: Option<String>,
     pub(crate) agent_command: String,
     pub(crate) extras: StartExtras,
 }
@@ -232,6 +235,9 @@ pub(crate) struct StartExtras {
     pub(crate) siblings: Vec<String>,
     /// Other tasks this one agent covers too, by key.
     pub(crate) also: Vec<String>,
+    /// Branch names for the tasks in `also` and `siblings`, by key. Each gets
+    /// worktrees of its own, so each name has to reach the daemon.
+    pub(crate) branches: std::collections::BTreeMap<String, String>,
     /// The user picked these tasks together, rather than a parent having them
     /// as sub-tasks.
     pub(crate) hand_picked: bool,
@@ -259,6 +265,9 @@ pub(crate) struct StartWorkForm {
     /// Every task being started, in list order, when the dialog starts several
     /// ticked together. `task` is then the first of them. Empty for one task.
     pub(crate) selection: Vec<Task>,
+    /// One branch name per task in `selection`, in the same order. Each task
+    /// gets worktrees of its own on its branch, so each is named here.
+    pub(crate) branch_inputs: Vec<Entity<SimpleInputState>>,
 }
 
 /// The agents a task's launch dialog can configure.

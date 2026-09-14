@@ -2915,6 +2915,7 @@ mod workspace_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             also_tasks: Vec::new(),
+            repo_ids: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,
@@ -3972,6 +3973,7 @@ mod gpui_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             also_tasks: Vec::new(),
+            repo_ids: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,
@@ -4154,6 +4156,7 @@ mod gpui_tests {
                 projects: vec![ApiProject {
                     task_ref: None,
                     also_tasks: Vec::new(),
+                    repo_ids: Vec::new(),
                     agent: None,
                     agent_activity: Default::default(),
                     spec_change: None,

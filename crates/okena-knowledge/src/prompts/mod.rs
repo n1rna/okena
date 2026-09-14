@@ -433,6 +433,73 @@ mod tests {
     }
 
     #[test]
+    fn one_agent_on_several_tasks_is_told_to_keep_each_in_its_own_worktrees() {
+        let b = brief(
+            Flow::TasksStart,
+            None,
+            &vars(&[
+                ("key", "QBL-1 and QBL-2"),
+                ("tasks", "\n\n## QBL-1: a\n\n## QBL-2: b"),
+                ("note", ""),
+                ("verify", ""),
+            ]),
+        );
+        let text = b.text();
+        assert!(text.contains("QBL-1 and QBL-2"), "{text}");
+        assert!(text.contains("## QBL-2: b"), "{text}");
+        assert!(text.contains("that task's worktrees"), "{text}");
+        // There is no one branch to be on.
+        assert!(!text.contains("that branch"), "{text}");
+    }
+
+    #[test]
+    fn a_coordinator_over_picked_tasks_is_told_it_has_no_worktree() {
+        let text = builtin(Flow::TasksCoordinate);
+        assert!(!text.contains("{branch}"), "{text}");
+        assert!(text.contains("no worktree of your own"), "{text}");
+        assert!(text.contains("`okena_start_work` creates the worktrees"), "{text}");
+    }
+
+    #[test]
+    fn a_task_in_a_group_and_a_picked_sibling_name_their_branch_and_worktrees() {
+        let group = super::fragment(
+            "task-in-group",
+            None,
+            &vars(&[
+                ("key", "QBL-2"),
+                ("title", "Fix login"),
+                ("url", "http://x/2"),
+                ("branch", "fix/qbl-2-login"),
+                ("worktrees", "- okena (/wt/qbl-2)"),
+                ("description", ""),
+            ]),
+        );
+        assert!(group.is_complete(), "{:?}", group.unknown);
+        for needle in ["QBL-2: Fix login", "fix/qbl-2-login", "- okena (/wt/qbl-2)"] {
+            assert!(group.text.contains(needle), "{needle}: {}", group.text);
+        }
+
+        let sibling = super::fragment(
+            "picked-sibling",
+            None,
+            &vars(&[
+                ("key", "QBL-3"),
+                ("branch", "feat/qbl-3"),
+                ("worktrees", "/wt/qbl-3"),
+            ]),
+        );
+        assert!(sibling.is_complete(), "{:?}", sibling.unknown);
+        assert_eq!(sibling.text, "- QBL-3 on `feat/qbl-3`: /wt/qbl-3");
+
+        let note = super::fragment(
+            "picked-fan-out-note",
+            None,
+            &vars(&[("siblings", sibling.text.as_str())]),
+        );
+        assert!(note.text.contains("/wt/qbl-3"), "{}", note.text);
+    }
+
+    #[test]
     fn frontmatter_is_not_part_of_the_brief() {
         assert_eq!(body_of("---\nfor: x\n---\nBody here\n"), "Body here");
         assert_eq!(body_of("No frontmatter\n\n"), "No frontmatter");

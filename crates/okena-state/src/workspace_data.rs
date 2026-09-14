@@ -444,6 +444,14 @@ pub struct ProjectData {
     /// each of the others too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also_tasks: Vec<okena_core::tasks::TaskRef>,
+    /// The repositories a session was given, by project id, when it has no
+    /// worktrees to say so.
+    ///
+    /// A coordinator over picked tasks creates no checkout of its own, yet the
+    /// agents it starts must work in the repos the user chose for the run.
+    /// Empty for everything else, whose repos are its worktrees' parents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repo_ids: Vec<String>,
     /// Agent-reported state for this session: status and produced assets.
     ///
     /// Written by agents through okena's MCP server, never by the UI. Lives on
@@ -642,6 +650,7 @@ mod tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             also_tasks: Vec::new(),
+            repo_ids: Vec::new(),
             agent: None,
             spec_change: None,
             knowledge_root: None,
@@ -2326,6 +2335,19 @@ mod tests {
         let json = serde_json::to_value(&p).expect("serialize");
         assert!(json.get("also_tasks").is_none(), "{json}");
     }
+
+    #[test]
+    fn a_session_keeps_the_repos_it_was_given() {
+        let mut p = make_project("/tmp/p");
+        // Nothing to say for a project with worktrees, and a workspace.json
+        // from before the field still loads.
+        let json = serde_json::to_value(&p).expect("serialize");
+        assert!(json.get("repo_ids").is_none(), "{json}");
+        p.repo_ids = vec!["repo1".into(), "repo2".into()];
+        let back: ProjectData =
+            serde_json::from_value(serde_json::to_value(&p).expect("serialize")).expect("load");
+        assert_eq!(back.repo_ids, ["repo1", "repo2"]);
+    }
 }
 
 #[cfg(test)]
@@ -2344,6 +2366,7 @@ mod agent_session_tests {
             worktree_ids: Vec::new(),
             task_ref: None,
             also_tasks: Vec::new(),
+            repo_ids: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,
