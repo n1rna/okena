@@ -4,11 +4,14 @@
 //! These were previously reachable only by hand-editing `settings.json`.
 
 use crate::settings::{SettingsState, settings_entity};
-use crate::theme::{theme, with_alpha};
+use crate::theme::{ThemeColors, theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_ms};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use okena_workspace::settings::{
+    ClaudePermissionMode, CodexApprovals, CopilotMode, CopilotToolPermissions,
+};
 
 use super::SettingsPanel;
 use super::components::*;
@@ -20,11 +23,71 @@ use super::components::*;
 /// sessions that silently lack its tools.
 const AGENTS: &[&str] = &["claude", "copilot"];
 
+const EXTRA_ARGS_DESC: &str = "One argument per line. Added to every launch and restart of \
+                               this agent, before its brief.";
+
+fn codex_approvals_label(value: CodexApprovals) -> &'static str {
+    match value {
+        CodexApprovals::Auto => "Auto",
+        CodexApprovals::Bypass => "Bypass approvals and sandbox",
+    }
+}
+
+/// A stacked row offering "Not set" and every value of one agent option.
+#[allow(clippy::too_many_arguments)]
+fn choice_row<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    label: &str,
+    desc: &str,
+    current: Option<T>,
+    all: &'static [T],
+    name: fn(T) -> &'static str,
+    set: fn(&mut SettingsState, Option<T>, &mut Context<SettingsState>),
+    has_border: bool,
+    t: &ThemeColors,
+    cx: &App,
+) -> Stateful<Div> {
+    let chips: Vec<AnyElement> = std::iter::once(None)
+        .chain(all.iter().copied().map(Some))
+        .map(|value| {
+            let is_selected = current == value;
+            let text = value.map(name).unwrap_or("Not set");
+            div()
+                .id(SharedString::from(format!("{id}-{text}")))
+                .cursor_pointer()
+                .px(px(10.0))
+                .py(px(3.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(rgb(if is_selected {
+                    t.border_active
+                } else {
+                    t.border
+                }))
+                .when(is_selected, |d| d.bg(with_alpha(t.button_primary_bg, 0.15)))
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(if is_selected {
+                    t.text_primary
+                } else {
+                    t.text_secondary
+                }))
+                .child(text)
+                .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                    settings_entity(cx).update(cx, |state, cx| set(state, value, cx));
+                })
+                .into_any_element()
+        })
+        .collect();
+    settings_input_row(id, label, desc, t, cx, has_border)
+        .child(h_flex().gap(px(6.0)).flex_wrap().children(chips))
+}
+
 impl SettingsPanel {
     pub(super) fn render_harness(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let s = settings_entity(cx).read(cx).settings.clone();
         let h = &s.harness;
+        let agents = h.agents.clone();
         let selected_agent = h.agent_command.clone();
         let injection = h.agent_mcp_injection;
 
@@ -120,12 +183,100 @@ impl SettingsPanel {
                                     ),
                             )
                             .child(h_flex().gap(px(6.0)).flex_wrap().children(chips)),
-                    )
+                    ),
+            )
+            .child(section_header("Claude", &t, cx))
+            .child(
+                section_container(&t)
+                    .child(choice_row(
+                        "harness-claude-permission-mode",
+                        "Permission mode",
+                        "--permission-mode. Not set leaves it to Claude's own settings.",
+                        agents.claude.permission_mode,
+                        ClaudePermissionMode::ALL,
+                        ClaudePermissionMode::cli_value,
+                        SettingsState::set_claude_permission_mode,
+                        false,
+                        &t,
+                        cx,
+                    ))
+                    .child(self.render_toggle(
+                        "harness-claude-skip-permissions",
+                        "Skip all permission prompts (--dangerously-skip-permissions)",
+                        agents.claude.skip_permissions,
+                        true,
+                        |state, val, cx| state.set_claude_skip_permissions(val, cx),
+                        cx,
+                    ))
                     .child(hook_input_row(
-                        "harness-agent-args",
-                        "Agent arguments",
-                        "One per line. {key} {title} {url} {branch} are replaced from the task.",
-                        &self.harness_agent_args_input,
+                        "harness-claude-extra-args",
+                        "Extra arguments",
+                        EXTRA_ARGS_DESC,
+                        &self.harness_claude_extra_args_input,
+                        &t,
+                        true,
+                        cx,
+                    )),
+            )
+            .child(section_header("Copilot", &t, cx))
+            .child(
+                section_container(&t)
+                    .child(choice_row(
+                        "harness-copilot-mode",
+                        "Mode",
+                        "--mode. Not set starts Copilot in its default mode.",
+                        agents.copilot.mode,
+                        CopilotMode::ALL,
+                        CopilotMode::cli_value,
+                        SettingsState::set_copilot_mode,
+                        false,
+                        &t,
+                        cx,
+                    ))
+                    .child(choice_row(
+                        "harness-copilot-tools",
+                        "Tool permissions",
+                        "--allow-all-tools runs tools without asking; --allow-all also \
+                         allows every path and URL.",
+                        agents.copilot.tool_permissions,
+                        CopilotToolPermissions::ALL,
+                        CopilotToolPermissions::flag,
+                        SettingsState::set_copilot_tool_permissions,
+                        true,
+                        &t,
+                        cx,
+                    ))
+                    .child(hook_input_row(
+                        "harness-copilot-extra-args",
+                        "Extra arguments",
+                        EXTRA_ARGS_DESC,
+                        &self.harness_copilot_extra_args_input,
+                        &t,
+                        true,
+                        cx,
+                    )),
+            )
+            .child(section_header("Codex", &t, cx))
+            .child(
+                section_container(&t)
+                    .child(choice_row(
+                        "harness-codex-approvals",
+                        "Approvals and sandbox",
+                        "Auto is --sandbox workspace-write --ask-for-approval on-request. \
+                         Bypass is --dangerously-bypass-approvals-and-sandbox.",
+                        agents.codex.approvals,
+                        CodexApprovals::ALL,
+                        codex_approvals_label,
+                        SettingsState::set_codex_approvals,
+                        false,
+                        &t,
+                        cx,
+                    ))
+                    .child(hook_input_row(
+                        "harness-codex-extra-args",
+                        "Extra arguments",
+                        EXTRA_ARGS_DESC,
+                        &self.harness_codex_extra_args_input,
                         &t,
                         true,
                         cx,

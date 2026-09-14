@@ -111,7 +111,9 @@ pub struct SettingsPanel {
     specs: render_specs::SpecsPage,
     /// The Knowledge page: stores, adding one, and discovery.
     knowledge: render_knowledge::KnowledgePage,
-    pub(super) harness_agent_args_input: Entity<SimpleInputState>,
+    pub(super) harness_claude_extra_args_input: Entity<SimpleInputState>,
+    pub(super) harness_copilot_extra_args_input: Entity<SimpleInputState>,
+    pub(super) harness_codex_extra_args_input: Entity<SimpleInputState>,
     pub(super) harness_agent_mcp_args_input: Entity<SimpleInputState>,
     // File opener input
     pub(super) file_opener_input: Entity<SimpleInputState>,
@@ -927,21 +929,31 @@ impl SettingsPanel {
         let knowledge =
             render_knowledge::KnowledgePage::new(s.harness.knowledge.clone_dir.clone(), cx);
 
-        let harness_agent_args_input = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .placeholder("Work on {key}: {title}")
-                .multiline()
-                .highlight_vars()
-                .default_value(s.harness.agent_args.join("\n"))
-        });
-        cx.subscribe(
-            &harness_agent_args_input,
-            |_this, entity, _: &InputChangedEvent, cx| {
-                let val = entity.read(cx).value().to_string();
-                settings_entity(cx).update(cx, |state, cx| state.set_harness_agent_args(val, cx));
-            },
-        )
-        .detach();
+        // One per known agent, added to its launches alongside the brief.
+        let extra_args_input =
+            |agent: &'static str, value: &[String], placeholder: &'static str, cx: &mut Context<Self>| {
+                let default = value.join("\n");
+                let input = cx.new(|cx| {
+                    SimpleInputState::new(cx)
+                        .placeholder(placeholder)
+                        .multiline()
+                        .default_value(default)
+                });
+                cx.subscribe(&input, move |_this, entity, _: &InputChangedEvent, cx| {
+                    let val = entity.read(cx).value().to_string();
+                    settings_entity(cx)
+                        .update(cx, |state, cx| state.set_agent_extra_args(agent, val, cx));
+                })
+                .detach();
+                input
+            };
+        let agents = &s.harness.agents;
+        let harness_claude_extra_args_input =
+            extra_args_input("claude", &agents.claude.extra_args, "--verbose", cx);
+        let harness_copilot_extra_args_input =
+            extra_args_input("copilot", &agents.copilot.extra_args, "--no-ask-user", cx);
+        let harness_codex_extra_args_input =
+            extra_args_input("codex", &agents.codex.extra_args, "--search", cx);
 
         let harness_agent_mcp_args_input = cx.new(|cx| {
             SimpleInputState::new(cx)
@@ -1060,7 +1072,9 @@ impl SettingsPanel {
             harness_agent_root_input,
             specs,
             knowledge,
-            harness_agent_args_input,
+            harness_claude_extra_args_input,
+            harness_copilot_extra_args_input,
+            harness_codex_extra_args_input,
             harness_agent_mcp_args_input,
             file_opener_input,
             listen_address_input,

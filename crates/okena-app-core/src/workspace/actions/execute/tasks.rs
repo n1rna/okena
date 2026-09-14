@@ -422,18 +422,6 @@ pub(super) fn list(provider: String) -> ActionResult {
     }
 }
 
-/// Substitute task placeholders in an agent argument.
-///
-/// Kept textual and explicit rather than a template engine: the only inputs are
-/// four known fields, and a missing placeholder should leave the argument
-/// untouched rather than erroring.
-fn substitute(arg: &str, task: &okena_core::tasks::Task, branch: &str) -> String {
-    arg.replace("{key}", &task.display_key)
-        .replace("{title}", &task.title)
-        .replace("{url}", &task.url)
-        .replace("{branch}", branch)
-}
-
 /// The shell an agent session (or agent worktree) should run.
 ///
 /// `None` when no agent command is configured — starting work then just creates
@@ -462,25 +450,16 @@ fn agent_shell(
     if command.is_empty() {
         return None;
     }
-    // Configured arguments win: they are an explicit instruction about how to
-    // launch this agent, and more specific than any template. Without them the
-    // agent used to start on a task having been told nothing at all.
-    let mut args: Vec<String> =
-        match task_brief(settings, task, branch, context, note, shape, prompts) {
-            Some(brief) => super::specs::prompt_args(&command, &brief),
-            None => settings
-                .harness
-                .agent_args
-                .iter()
-                .map(|a| substitute(a, task, branch))
-                .collect(),
-        };
-    // Named, so a restart can resume this exact conversation. Before the
-    // brief rather than after: a flag after a positional prompt is not
-    // guaranteed to be read as a flag by every agent CLI.
-    let mut named = super::agent_resume::session_args(&command);
-    named.append(&mut args);
-    let mut args = named;
+    // Always briefed: an agent started on a task without its brief knows
+    // nothing of the task, its worktrees, or how to report and verify.
+    let brief = task_brief(task, branch, context, note, shape, prompts);
+    // Named, so a restart can resume this exact conversation, then the agent's
+    // own options. Both before the brief rather than after: a flag after a
+    // positional prompt is not guaranteed to be read as a flag by every agent
+    // CLI.
+    let mut args = super::agent_resume::session_args(&command);
+    args.extend(super::agent_options::option_args(&command, settings));
+    args.extend(super::specs::prompt_args(&command, &brief));
     // Hand the agent okena's MCP server so it can ask what task it is on and
     // report back without the user configuring anything.
     args.extend(super::agent_mcp::injection_args(&command, settings));
@@ -1460,7 +1439,7 @@ mod agent_root_tests {
 
 #[cfg(test)]
 pub(super) mod agent_shell_tests {
-    use super::{agent_shell, substitute};
+    use super::agent_shell;
     use crate::workspace::persistence::AppSettings;
     use okena_core::tasks::{Task, TaskId, TaskState};
     use okena_terminal::shell_config::ShellType;
@@ -1485,22 +1464,6 @@ pub(super) mod agent_shell_tests {
     }
 
     #[test]
-    fn substitutes_every_placeholder() {
-        let got = substitute("{key}: {title} ({url}) on {branch}", &task(), "b1");
-        assert_eq!(
-            got,
-            "LIN-42: Ship the harness (https://linear.app/x/issue/LIN-42) on b1"
-        );
-    }
-
-    #[test]
-    fn leaves_unknown_placeholders_alone() {
-        // A typo'd placeholder should reach the agent verbatim rather than
-        // silently becoming an empty string.
-        assert_eq!(substitute("{nope}", &task(), "b"), "{nope}");
-    }
-
-    #[test]
     fn no_agent_configured_means_no_launch() {
         // Starting work must not spawn an AI agent unless asked to.
         let s = AppSettings::default();
@@ -1514,22 +1477,35 @@ pub(super) mod agent_shell_tests {
         assert!(agent_shell(&s, None, &task(), "b", &[], None, None, None).is_none());
     }
 
-    #[test]
-    fn builds_a_custom_shell_with_substituted_args() {
-        let mut s = AppSettings::default();
-        s.harness.agent_command = Some("claude".into());
-        s.harness.agent_args = vec!["Work on {key}: {title}".into()];
-        match agent_shell(&s, None, &task(), "b1", &[], None, None, None).expect("configured") {
-            ShellType::Custom { path, args } => {
-                assert_eq!(path, "claude");
-                // Configured arguments are passed through untouched, after the
-                // conversation id okena names so a restart can resume it.
-                assert_eq!(args[0], "--session-id");
-                assert!(uuid::Uuid::parse_str(&args[1]).is_ok(), "{args:?}");
-                assert_eq!(args[2..], ["Work on LIN-42: Ship the harness".to_string()]);
-            }
+    /// `args` of a custom shell, or a panic.
+    pub(super) fn custom_args(shell: Option<ShellType>) -> Vec<String> {
+        match shell.expect("configured") {
+            ShellType::Custom { args, .. } => args,
             other => panic!("expected a custom shell, got {other:?}"),
         }
+    }
+
+    /// Settings with a fixed MCP flag, so where it lands in argv can be
+    /// asserted without a profile directory to write its config into.
+    pub(super) fn settings_with_mcp_marker() -> AppSettings {
+        let mut s = AppSettings::default();
+        s.harness.agent_mcp_args = Some(vec!["--mcp-config".into(), "marker".into()]);
+        s
+    }
+
+    #[test]
+    fn skip_permissions_goes_between_the_session_id_and_the_brief() {
+        let mut s = settings_with_mcp_marker();
+        s.harness.agent_command = Some("claude".into());
+        s.harness.agents.claude.skip_permissions = true;
+        let args = custom_args(agent_shell(&s, None, &task(), "b1", &[], None, None, None));
+        assert_eq!(args[0], "--session-id");
+        assert!(uuid::Uuid::parse_str(&args[1]).is_ok(), "{args:?}");
+        assert_eq!(args[2], "--dangerously-skip-permissions");
+        // The task-start brief, not something in its place.
+        assert!(args[3].contains("LIN-42"), "{args:?}");
+        assert!(args[3].contains("okena_test_plan"), "{args:?}");
+        assert_eq!(args[4..6], ["--mcp-config", "marker"]);
     }
 
     #[test]
@@ -1554,9 +1530,9 @@ pub(super) mod agent_shell_tests {
 
     #[test]
     fn a_command_with_no_configured_args_gets_the_task_start_brief() {
-        // This used to launch the agent having told it nothing at all: with no
-        // `agent_args` there was no prompt, and the agent opened in a worktree
-        // with no idea what it was for. The template fills that gap.
+        // Agents used to be launched having been told nothing at all, opening
+        // in a worktree with no idea what it was for. The template fills that
+        // gap.
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("codex".into());
         match agent_shell(&s, None, &task(), "b1", &[], None, None, None).expect("configured") {
@@ -1577,8 +1553,7 @@ pub(super) mod agent_shell_tests {
     #[test]
     fn a_started_task_is_told_to_plan_and_verify_its_work() {
         // With no per-project configuration: the built-in carries it.
-        let s = AppSettings::default();
-        let brief = super::task_brief(&s, &task(), "b1", &[], None, None, None).expect("a brief");
+        let brief = super::task_brief(&task(), "b1", &[], None, None, None);
         for needle in [
             "okena_test_plan",
             "okena_test_step_start",
@@ -1605,16 +1580,7 @@ pub(super) mod agent_shell_tests {
         )
         .expect("write");
         let root = Some(("acme".to_string(), dir.clone()));
-        let brief = super::task_brief(
-            &AppSettings::default(),
-            &task(),
-            "b1",
-            &[],
-            None,
-            None,
-            root,
-        )
-        .expect("a brief");
+        let brief = super::task_brief(&task(), "b1", &[], None, None, root);
         std::fs::remove_dir_all(&dir).ok();
         assert!(brief.contains("Verify LIN-42 on staging."), "{brief}");
         assert!(!brief.contains("okena_test_plan"), "{brief}");
@@ -1627,18 +1593,81 @@ pub(super) mod agent_shell_tests {
     }
 
     #[test]
-    fn configured_args_still_win_over_the_template() {
-        // They are an explicit instruction about how to launch this agent, and
-        // more specific than any template. Somebody who set them must keep
-        // getting exactly them.
-        let mut s = AppSettings::default();
-        s.harness.agent_command = Some("codex".into());
-        s.harness.agent_args = vec!["--task".into(), "{key}".into()];
-        match agent_shell(&s, None, &task(), "b1", &[], None, None, None).expect("configured") {
-            // Exactly them, ahead of the flags that wire okena in.
-            ShellType::Custom { args, .. } => assert_eq!(args[..2], ["--task", "LIN-42"]),
-            other => panic!("expected a custom shell, got {other:?}"),
+    fn options_and_extra_args_never_displace_the_brief() {
+        // Setting them used to launch the agent without its task.
+        let mut s = settings_with_mcp_marker();
+        s.harness.agents.codex.approvals = Some(okena_workspace::settings::CodexApprovals::Bypass);
+        s.harness.agents.codex.extra_args = vec!["--search".into()];
+        let args = custom_args(agent_shell(&s, Some("codex"), &task(), "b1", &[], None, None, None));
+        assert_eq!(
+            args[..2],
+            ["--dangerously-bypass-approvals-and-sandbox", "--search"]
+        );
+        assert!(args[2].contains("LIN-42"), "{args:?}");
+        assert_eq!(args[3..5], ["--mcp-config", "marker"]);
+    }
+
+    #[test]
+    fn picking_codex_carries_none_of_claudes_options() {
+        let mut s = settings_with_mcp_marker();
+        s.harness.agent_command = Some("claude".into());
+        s.harness.agents.claude.skip_permissions = true;
+        s.harness.agents.claude.permission_mode =
+            Some(okena_workspace::settings::ClaudePermissionMode::Plan);
+        s.harness.agents.claude.extra_args = vec!["--verbose".into()];
+        let args = custom_args(agent_shell(&s, Some("codex"), &task(), "b1", &[], None, None, None));
+        assert!(args[0].contains("LIN-42"), "brief comes first: {args:?}");
+        // Then only okena's wiring (MCP flags, Codex's notify hook).
+        assert_eq!(args[1..3], ["--mcp-config", "marker"]);
+        for claude_only in ["--dangerously-skip-permissions", "--permission-mode", "--verbose"] {
+            assert!(!args.iter().any(|a| a == claude_only), "{args:?}");
         }
+    }
+
+    #[test]
+    fn with_nothing_set_every_route_launches_as_before() {
+        // Session id, prompt, MCP flags — nothing else.
+        let mut s = settings_with_mcp_marker();
+        s.harness.agent_command = Some("claude".into());
+        let routes = [
+            custom_args(agent_shell(&s, None, &task(), "b1", &[], None, None, None)),
+            custom_args(super::custom_agent_shell(&s, None, "goal")),
+            custom_args(super::super::specs::spec_agent_shell(&s, None, "draft")),
+        ];
+        for args in routes {
+            assert_eq!(args[0], "--session-id", "{args:?}");
+            assert!(!args[2].starts_with("--"), "prompt follows the id: {args:?}");
+            assert_eq!(args[3..5], ["--mcp-config", "marker"], "{args:?}");
+        }
+    }
+
+    #[test]
+    fn custom_and_draft_sessions_carry_options_with_their_prompt() {
+        // Spec drafts, knowledge drafts, doc refine, project scans and links
+        // all launch through `spec_agent_shell`.
+        let mut s = settings_with_mcp_marker();
+        s.harness.agent_command = Some("claude".into());
+        s.harness.agents.claude.permission_mode =
+            Some(okena_workspace::settings::ClaudePermissionMode::AcceptEdits);
+        s.harness.agents.claude.extra_args = vec!["--verbose".into()];
+        for (args, prompt) in [
+            (custom_args(super::custom_agent_shell(&s, None, "goal")), "goal"),
+            (
+                custom_args(super::super::specs::spec_agent_shell(&s, None, "draft")),
+                "draft",
+            ),
+        ] {
+            assert_eq!(
+                args[2..6],
+                ["--permission-mode", "acceptEdits", "--verbose", prompt],
+                "{args:?}"
+            );
+            assert_eq!(args[6..8], ["--mcp-config", "marker"]);
+        }
+        // Copilot's prompt is a flag, and still arrives after the options.
+        s.harness.agents.copilot.mode = Some(okena_workspace::settings::CopilotMode::Autopilot);
+        let args = custom_args(super::super::specs::spec_agent_shell(&s, Some("copilot"), "draft"));
+        assert_eq!(args[..4], ["--mode", "autopilot", "--prompt", "draft"]);
     }
 
     #[test]
@@ -1707,18 +1736,15 @@ pub(super) mod agent_shell_tests {
 
     #[test]
     fn a_coordinator_is_given_repos_not_worktrees() {
-        let s = AppSettings::default();
         let picked = super::BriefShape::Picked("- LIN-42 (Task): Ship the harness".into());
         let given = [("okena".to_string(), "/p/okena".to_string())];
-        let brief = super::task_brief(&s, &task(), "", &given, None, Some(&picked), None)
-            .expect("a brief");
+        let brief = super::task_brief(&task(), "", &given, None, Some(&picked), None);
         assert!(brief.contains("Projects you were given:\n- okena (/p/okena)"), "{brief}");
         assert!(!brief.contains("Worktrees you were given"), "{brief}");
     }
 
     #[test]
     fn one_agent_on_several_tasks_is_told_whose_worktree_is_whose() {
-        let s = AppSettings::default();
         let first = task();
         let mut other = task();
         other.display_key = "LIN-7".into();
@@ -1742,15 +1768,13 @@ pub(super) mod agent_shell_tests {
             tasks: super::list_group(&listed, &None),
         };
         let brief = super::task_brief(
-            &s,
             &first,
             "chore/lin-42-ship-the-harness",
             &[],
             None,
             Some(&shape),
             None,
-        )
-        .expect("a brief");
+        );
         for needle in [
             "Work on LIN-42 and LIN-7, together.",
             "## LIN-42: Ship the harness",
@@ -2327,23 +2351,14 @@ fn custom_brief(goal: &str, context: &[(String, String)], prompts: PromptRoot) -
 }
 
 /// The opening prompt for starting work on a task.
-///
-/// `None` when `harness.agent_args` is configured: those are an explicit
-/// instruction about how to launch this agent, and they are more specific than
-/// any template. Without them, every agent used to start on a task with no
-/// prompt at all.
 fn task_brief(
-    settings: &AppSettings,
     task: &okena_core::tasks::Task,
     branch: &str,
     context: &[(String, String)],
     note: Option<&str>,
     shape: Option<&BriefShape>,
     prompts: PromptRoot,
-) -> Option<String> {
-    if !settings.harness.agent_args.is_empty() {
-        return None;
-    }
+) -> String {
     let mut vars = Vars::new();
     vars.insert("key", task.display_key.clone());
     vars.insert("title", task.title.clone());
@@ -2391,7 +2406,7 @@ fn task_brief(
             Flow::TaskStart
         }
     };
-    Some(briefs::build(flow, prompts.as_ref(), &vars).rendered.text)
+    briefs::build(flow, prompts.as_ref(), &vars).rendered.text
 }
 
 /// Shell for a custom agent session.
@@ -2411,8 +2426,10 @@ fn custom_agent_shell(
     if command.is_empty() {
         return None;
     }
-    // Named first, so a restart can resume this exact conversation.
+    // Named first, so a restart can resume this exact conversation; the
+    // agent's own options before the brief, which they never replace.
     let mut args = super::agent_resume::session_args(&command);
+    args.extend(super::agent_options::option_args(&command, settings));
     args.extend(super::specs::prompt_args(&command, brief));
     args.extend(super::agent_mcp::injection_args(&command, settings));
     Some(okena_terminal::shell_config::ShellType::Custom {

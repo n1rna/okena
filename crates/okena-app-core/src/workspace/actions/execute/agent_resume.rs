@@ -19,7 +19,7 @@ use std::path::Path;
 
 /// The program name of an agent command, lowercased: `/usr/bin/claude` →
 /// `claude`.
-fn program(command: &str) -> String {
+pub(super) fn program(command: &str) -> String {
     Path::new(command)
         .file_stem()
         .map(|s| s.to_string_lossy().to_ascii_lowercase())
@@ -79,8 +79,13 @@ pub fn resumable(shell: &ShellType, shares_dir: bool) -> bool {
     }
 }
 
-/// The shell that resumes a session launched as `shell`, with okena's MCP
-/// config handed over again. `None` when it cannot be resumed.
+/// The shell that resumes a session launched as `shell`, with the agent's
+/// options and okena's MCP config handed over again. `None` when it cannot be
+/// resumed.
+///
+/// The options are read from settings now, not from the stored launch args:
+/// those also hold the brief, and which of them are options is only known for
+/// the options that exist today.
 pub fn resume_shell(
     shell: &ShellType,
     settings: &crate::workspace::persistence::AppSettings,
@@ -89,6 +94,7 @@ pub fn resume_shell(
         return None;
     };
     let mut resumed = resume_args(path, args)?;
+    resumed.extend(super::agent_options::option_args(path, settings));
     resumed.extend(super::agent_mcp::injection_args(path, settings));
     Some(ShellType::Custom {
         path: path.clone(),
@@ -164,6 +170,39 @@ mod tests {
             "a named conversation is always exact"
         );
         assert!(!super::resumable(&ShellType::Default, false));
+    }
+
+    #[test]
+    fn a_restart_keeps_the_permission_mode_from_current_settings() {
+        use okena_terminal::shell_config::ShellType;
+        use okena_workspace::settings::{AppSettings, ClaudePermissionMode};
+        let mut s = AppSettings::default();
+        s.harness.agent_mcp_args = Some(strings(&["--mcp-config", "marker"]));
+        s.harness.agents.claude.permission_mode = Some(ClaudePermissionMode::AcceptEdits);
+        // Launched with an option since turned off: settings decide, not argv.
+        let launched = ShellType::Custom {
+            path: "claude".into(),
+            args: strings(&[
+                "--session-id",
+                "abc",
+                "--dangerously-skip-permissions",
+                "Work on QBL-1",
+            ]),
+        };
+        match super::resume_shell(&launched, &s).expect("resumable") {
+            ShellType::Custom { args, .. } => assert_eq!(
+                args[..6],
+                strings(&[
+                    "--resume",
+                    "abc",
+                    "--permission-mode",
+                    "acceptEdits",
+                    "--mcp-config",
+                    "marker"
+                ])
+            ),
+            other => panic!("expected a custom shell, got {other:?}"),
+        }
     }
 
     #[test]

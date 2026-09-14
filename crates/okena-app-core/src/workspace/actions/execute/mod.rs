@@ -18,6 +18,7 @@ mod knowledge;
 mod project;
 mod project_links;
 mod project_scan;
+mod agent_options;
 // Public so the Agents view can tell whether a session was handed okena's
 // MCP config, rather than guessing from the agent's name.
 pub mod agent_mcp;

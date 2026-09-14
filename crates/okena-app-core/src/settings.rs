@@ -514,15 +514,64 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Arguments passed to the agent. One per line in the UI, since an
-    /// argument may legitimately contain spaces.
-    pub fn set_harness_agent_args(&mut self, value: String, cx: &mut Context<Self>) {
-        self.settings.harness.agent_args = value
+    /// Claude's `--permission-mode`; `None` passes nothing.
+    pub fn set_claude_permission_mode(
+        &mut self,
+        value: Option<okena_workspace::settings::ClaudePermissionMode>,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.harness.agents.claude.permission_mode = value;
+        self.save_and_notify(cx);
+    }
+
+    pub fn set_claude_skip_permissions(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.harness.agents.claude.skip_permissions = value;
+        self.save_and_notify(cx);
+    }
+
+    pub fn set_copilot_mode(
+        &mut self,
+        value: Option<okena_workspace::settings::CopilotMode>,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.harness.agents.copilot.mode = value;
+        self.save_and_notify(cx);
+    }
+
+    pub fn set_copilot_tool_permissions(
+        &mut self,
+        value: Option<okena_workspace::settings::CopilotToolPermissions>,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.harness.agents.copilot.tool_permissions = value;
+        self.save_and_notify(cx);
+    }
+
+    pub fn set_codex_approvals(
+        &mut self,
+        value: Option<okena_workspace::settings::CodexApprovals>,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.harness.agents.codex.approvals = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Extra arguments for `agent` (`claude`, `copilot` or `codex`). One per
+    /// line in the UI, since an argument may legitimately contain spaces.
+    pub fn set_agent_extra_args(&mut self, agent: &str, value: String, cx: &mut Context<Self>) {
+        let args: Vec<String> = value
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .map(str::to_string)
             .collect();
+        let agents = &mut self.settings.harness.agents;
+        match agent {
+            "claude" => agents.claude.extra_args = args,
+            "copilot" => agents.copilot.extra_args = args,
+            "codex" => agents.codex.extra_args = args,
+            _ => return,
+        }
         self.save_and_notify(cx);
     }
 

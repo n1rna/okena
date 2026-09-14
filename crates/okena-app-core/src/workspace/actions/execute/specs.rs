@@ -555,8 +555,10 @@ pub(super) fn spec_agent_shell(
     if command.is_empty() {
         return None;
     }
-    // Named first, so a restart can resume this exact conversation.
+    // Named first, so a restart can resume this exact conversation; the
+    // agent's own options before the prompt, which they never replace.
     let mut args = super::agent_resume::session_args(&command);
+    args.extend(super::agent_options::option_args(&command, settings));
     args.extend(prompt_args(&command, prompt));
     args.extend(super::agent_mcp::injection_args(&command, settings));
     Some(okena_terminal::shell_config::ShellType::Custom {

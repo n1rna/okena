@@ -1,7 +1,5 @@
 //! Filling `{placeholder}` templates.
 //!
-//! The same syntax `harness.agent_args` already uses, so somebody who has
-//! written one of those can write a template without learning a second thing.
 //! Deliberately not a template *language*: no conditionals, no loops, no
 //! expressions. Three forms, and each is about *where text comes from*, never
 //! about computing it:
