@@ -1432,4 +1432,47 @@ mod mock_tests {
         assert_eq!(log[0].0, "IssuesById");
         assert_eq!(log[0].1["ids"], json!([UUID, UUID]));
     }
+
+    #[test]
+    fn issues_by_id_include_closed_ones_with_their_parents() {
+        // What an ancestor is: often finished, often somebody else's. The queue
+        // filters both out; reading by id must not.
+        const EPIC: &str = "0c6d1f5e-1b2a-4c3d-9e8f-0a1b2c3d4e5f";
+        const FEATURE: &str = "1d7e2a6f-2c3b-4d4e-8f9a-1b2c3d4e5f60";
+        let _net = NET.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = Sent::default();
+        let log = sent.clone();
+        let _mock = testing::mock(move |req| {
+            let body = req.json_body().cloned().unwrap_or(Value::Null);
+            if let Ok(mut l) = log.lock() {
+                l.push((
+                    body["query"].as_str().unwrap_or("").to_string(),
+                    body["variables"].clone(),
+                ));
+            }
+            ok(json!({ "data": { "issues": { "nodes": [
+                { "id": EPIC, "identifier": "QBL-1", "title": "Epic",
+                  "state": { "name": "Done", "type": "completed" } },
+                { "id": FEATURE, "identifier": "QBL-2", "title": "Feature",
+                  "state": { "name": "Canceled", "type": "canceled" },
+                  "parent": { "id": EPIC, "identifier": "QBL-1" } },
+            ] } } }))
+        });
+
+        let ids = [TaskId::new("linear", FEATURE), TaskId::new("linear", EPIC)];
+        let tasks = provider().get_tasks(&ids).expect("reads");
+
+        let keys: Vec<_> = tasks.iter().map(|t| t.display_key.as_str()).collect();
+        assert_eq!(keys, ["QBL-1", "QBL-2"]);
+        assert!(tasks.iter().all(|t| t.state.is_closed()), "{tasks:?}");
+        assert_eq!(tasks[1].parent_id.as_deref(), Some(EPIC));
+        let log = sent.lock().map(|s| s.clone()).unwrap_or_default();
+        assert_eq!(log.len(), 1, "one batch, no lookups: {log:?}");
+        assert!(log[0].0.contains("IssuesById"), "{}", log[0].0);
+        assert!(
+            !log[0].0.contains("state:"),
+            "no state filter on a read by id: {}",
+            log[0].0
+        );
+    }
 }
