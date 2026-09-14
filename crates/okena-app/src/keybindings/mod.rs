@@ -55,6 +55,7 @@ actions!(
         NewWindow,
         RestartDaemon,
         SaveDocument,
+        FocusTaskSearch,
     ]
 );
 
@@ -452,6 +453,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowSessionManager" => Some(KeyBinding::new(keystroke, ShowSessionManager, context)),
         "ShowHarness" => Some(KeyBinding::new(keystroke, ShowHarness, context)),
         "SaveDocument" => Some(KeyBinding::new(keystroke, SaveDocument, context)),
+        "FocusTaskSearch" => Some(KeyBinding::new(keystroke, FocusTaskSearch, context)),
         "ShowThemeSelector" => Some(KeyBinding::new(keystroke, ShowThemeSelector, context)),
         "ShowCommandPalette" => Some(KeyBinding::new(keystroke, ShowCommandPalette, context)),
         "ShowSettings" => Some(KeyBinding::new(keystroke, ShowSettings, context)),
