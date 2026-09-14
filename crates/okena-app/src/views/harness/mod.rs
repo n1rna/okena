@@ -16,6 +16,7 @@ mod sections;
 mod specs_view;
 mod store_git;
 mod task_filter;
+mod task_tree;
 mod tasks_view;
 mod testing_view;
 
@@ -63,6 +64,14 @@ pub(crate) struct TasksState {
     /// Task whose children are being fetched, so a slow provider does not
     /// spawn a request per frame.
     pub(crate) children_loading: Option<String>,
+    /// Ancestors of the listed tasks that are not in your queue themselves —
+    /// somebody else's, or closed — by provider id, up to the top of each
+    /// chain. Loaded only so the list can nest a task under its parents, where
+    /// they show as context rows.
+    pub(crate) ancestors: std::collections::HashMap<String, Task>,
+    /// Bumped on every ancestor load, so a slow walk for an older list or
+    /// another provider cannot replace a newer one.
+    pub(crate) ancestors_generation: u64,
     /// The task shown in the detail pane, by provider id.
     pub(crate) selected: Option<String>,
     /// A task opened from outside the list — an agent panel's task card —
@@ -424,6 +433,8 @@ impl HarnessPane {
                 collapsed: std::collections::HashSet::new(),
                 children: std::collections::HashMap::new(),
                 children_loading: None,
+                ancestors: std::collections::HashMap::new(),
+                ancestors_generation: 0,
                 selected: None,
                 opened: None,
                 description: markdown::MarkdownCache::default(),

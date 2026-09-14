@@ -51,6 +51,16 @@ pub(super) fn order_by_hierarchy(
     tasks: Vec<Task>,
     collapsed: &std::collections::HashSet<String>,
 ) -> Vec<TaskRow> {
+    order_rows(tasks, &Default::default(), collapsed)
+}
+
+/// [`order_by_hierarchy`], with the tasks in `context` marked as context rows:
+/// ancestors shown only to hold the tree together.
+pub(super) fn order_rows(
+    tasks: Vec<Task>,
+    context: &std::collections::HashSet<String>,
+    collapsed: &std::collections::HashSet<String>,
+) -> Vec<TaskRow> {
     use std::collections::{HashMap, HashSet};
 
     let present: HashSet<String> = tasks.iter().map(|t| t.id.external_id.clone()).collect();
@@ -129,6 +139,7 @@ pub(super) fn order_by_hierarchy(
         .into_iter()
         .filter_map(|(i, depth, root)| {
             slots[i].take().map(|task| TaskRow {
+                context: context.contains(&task.id.external_id),
                 task,
                 depth,
                 family: ids[root].clone(),
@@ -159,6 +170,10 @@ pub(super) struct TaskRow {
     /// External id of the top of its subtree in this lane. Rows are coloured
     /// by it, so a sub-task carries its parent's colour.
     pub family: String,
+    /// Shown only to hold the tree together: an ancestor of a task in this
+    /// section that is not itself one of the section's tasks — not yours, not
+    /// open, filtered out, or in the other section. Dimmed and uncounted.
+    pub context: bool,
 }
 
 /// Colour for a breakdown level.
@@ -600,6 +615,9 @@ impl HarnessPane {
         self.tasks.tasks.clear();
         self.tasks.children.clear();
         self.tasks.children_loading = None;
+        self.tasks.ancestors.clear();
+        // Any walk still running was for the old provider.
+        self.tasks.ancestors_generation += 1;
         self.tasks.selected = None;
         self.tasks.opened = None;
         self.tasks.checked.clear();
@@ -699,12 +717,15 @@ impl HarnessPane {
                             // reassigned, or filtered out by the provider.
                             // Leaving it would show detail for a task no
                             // longer in the list.
+                            // A context row stays selectable while its
+                            // ancestors are reloaded below.
                             if let Some(id) = this.tasks.selected.clone()
                                 && !selection_survives(
                                     &id,
                                     &this.tasks.tasks,
                                     this.tasks.opened.as_ref(),
                                 )
+                                && !this.tasks.ancestors.contains_key(&id)
                             {
                                 this.tasks.selected = None;
                             }
@@ -719,6 +740,7 @@ impl HarnessPane {
                             // satisfy reads as "you have no work" rather than
                             // "you are filtered to something that is gone".
                             this.tasks.filter.prune(&collect_facets(&this.tasks.tasks));
+                            this.load_ancestors(cx);
                         }
                         Err(e) => {
                             // A rejected credential is the one failure with a
@@ -731,6 +753,69 @@ impl HarnessPane {
                         }
                     }
                     this.tasks.loading = false;
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Load the ancestors of the listed tasks that your queue does not hold,
+    /// so the list can nest every task under its parents.
+    ///
+    /// A level at a time, each in one `TaskGetMany`, off the render thread.
+    /// The previous ancestors stay on screen until the walk lands, so a
+    /// refresh does not flatten the tree for the length of a round trip.
+    fn load_ancestors(&mut self, cx: &mut Context<Self>) {
+        self.tasks.ancestors_generation += 1;
+        let generation = self.tasks.ancestors_generation;
+        let listed = self.tasks.tasks.clone();
+        let client = self.client.clone();
+        let provider = self.tasks.provider.clone();
+
+        cx.spawn(async move |this, cx| {
+            let label = provider.clone();
+            let (found, error) = smol::unblock(move || {
+                super::task_tree::walk_ancestors(&listed, |ids| {
+                    client
+                        .post_action(ActionRequest::TaskGetMany {
+                            provider: provider.clone(),
+                            task_external_ids: ids,
+                        })
+                        .and_then(|v| v.ok_or_else(|| "the answer had no tasks".to_string()))
+                        .and_then(|v| {
+                            serde_json::from_value::<Vec<Task>>(v["tasks"].clone())
+                                .map_err(|e| format!("unexpected tasks: {e}"))
+                        })
+                })
+            })
+            .await;
+
+            match error.as_deref() {
+                None => {}
+                // A daemon from before the batch: the list stays as flat as
+                // it always was there, which is not worth a toast.
+                Some(e) if crate::views::known_tasks::is_batch_unknown(e) => {
+                    log::debug!("[tasks] the daemon cannot read tasks in bulk; parents not loaded")
+                }
+                Some(e) => log::warn!("[tasks] could not load the parents of {label} tasks: {e}"),
+            }
+
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if this.tasks.ancestors_generation != generation {
+                        return;
+                    }
+                    // Nothing loaded because the walk failed at once: what
+                    // was on screen is a better tree than none.
+                    if found.is_empty() && error.is_some() {
+                        return;
+                    }
+                    crate::views::known_tasks::remember(&found, cx);
+                    this.tasks.ancestors = found
+                        .into_iter()
+                        .map(|t| (t.id.external_id.clone(), t))
+                        .collect();
                     cx.notify();
                 });
             });
@@ -1618,6 +1703,7 @@ impl HarnessPane {
             .tasks
             .iter()
             .chain(self.tasks.children.values().flatten())
+            .chain(self.tasks.ancestors.values())
             .chain(self.tasks.opened.iter())
             .find(|t| t.id.external_id == external_id)
             .cloned()
@@ -2160,6 +2246,17 @@ impl HarnessPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
+        // Everything a section can borrow a context row from: the rest of your
+        // queue, whatever section or filter it is in, and the ancestors loaded
+        // for it.
+        let loaded: std::collections::HashMap<&str, &Task> = self
+            .tasks
+            .tasks
+            .iter()
+            .chain(self.tasks.ancestors.values())
+            .map(|t| (t.id.external_id.as_str(), t))
+            .collect();
+        let lookup = |id: &str| loaded.get(id).copied();
 
         let mut body = v_flex()
             .id("tasks-list")
@@ -2192,7 +2289,7 @@ impl HarnessPane {
                     cx,
                 ));
             }
-            for row in order_by_hierarchy(active, &self.tasks.collapsed) {
+            for row in super::task_tree::section_rows(active, lookup, &self.tasks.collapsed) {
                 body = body.child(self.render_task_row(&row, cx));
             }
         }
@@ -2219,7 +2316,7 @@ impl HarnessPane {
                     cx,
                 ));
             }
-            for row in order_by_hierarchy(rest, &self.tasks.collapsed) {
+            for row in super::task_tree::section_rows(rest, lookup, &self.tasks.collapsed) {
                 body = body.child(self.render_task_row(&row, cx));
             }
         }
@@ -3439,15 +3536,25 @@ impl HarnessPane {
         let selected = self.tasks.selected.as_deref() == Some(task.id.external_id.as_str());
         let select_id = task.id.external_id.clone();
         let active = is_active(links.agents_running);
-        let checked = !active && self.tasks.checked.contains(&task.id.external_id);
-        // A ticked box can always be unticked; only an unticked one is refused.
-        let block = if checked {
-            None
+        // A context row is not one of this section's tasks, so there is
+        // nothing to tick: it keeps the box's width so keys stay aligned.
+        let checkbox = if row.context {
+            div().size(px(13.0)).flex_shrink_0().into_any_element()
         } else {
-            self.check_block(task, active)
+            let checked = !active && self.tasks.checked.contains(&task.id.external_id);
+            // A ticked box can always be unticked; only an unticked one is refused.
+            let block = if checked {
+                None
+            } else {
+                self.check_block(task, active)
+            };
+            self.render_checkbox(&task.id.external_id, checked, block, cx)
+                .into_any_element()
         };
-        let checkbox = self.render_checkbox(&task.id.external_id, checked, block, cx);
         h_flex()
+            // Dimmed rather than hidden or turned into a heading: it is a real
+            // task you can open, just not one of this section's.
+            .when(row.context, |d| d.opacity(0.55))
             .id(SharedString::from(format!(
                 "task-row-{}",
                 task.id.external_id
