@@ -257,9 +257,10 @@ putting a file at `templates/<flow>.md`; its frontmatter should say
 | Flow | When | Variables |
 |---|---|---|
 | `task-start` | Starting work on a task, in its worktrees | `key`, `title`, `url`, `branch`, `description`, `projects`, `note`, `verify` |
-| `task-verify` | How the agent on a task plans its steps and proves each one through the `okena_test_*` tools. Never sent alone: rendered into `task-start` as `verify`, so either can be overridden without the other | `key`, `title` |
+| `tasks-start` | One agent starting work on several tasks — picked together, or a group a coordinator started with `okena_start_work`. Every task has worktrees of its own on its own branch, and `tasks` lists each with them | `key` (every key as one phrase), `tasks`, `note`, `verify` |
+| `task-verify` | How the agent on a task plans its steps and proves each one through the `okena_test_*` tools. Never sent alone: rendered into `task-start` or `tasks-start` as `verify`, so either can be overridden without the other | `key`, `title` |
 | `task-coordinate` | Splitting a task among sub-agents and starting them, from a `coordinate/…` branch of its own | `key`, `title`, `description`, `branch`, `children`, `projects`, `note` |
-| `tasks-coordinate` | Splitting several hand-picked tasks among agents and starting them, from a `coordinate/…` branch of its own | `key`, `title`, `branch`, `tasks`, `projects`, `note` |
+| `tasks-coordinate` | Splitting several hand-picked tasks among agents and starting them. It has no worktree: it runs in the project's own checkout, or above several, and `projects` lists the repos its agents work in | `key`, `title`, `tasks`, `projects`, `note` |
 | `break-down` | Splitting a task into sub-tasks over MCP | `key`, `parent_id`, `title`, `kind`, `url`, `description`, `child_kind` |
 | `task-create` | Drafting a new task | `title`, `kind`, `container`, `parent`, `description` |
 | `task-refine` | Rewriting an existing task's title and description in place, after asking what it would otherwise guess | `key`, `title`, `kind`, `url`, `description` |
@@ -302,8 +303,10 @@ the partial it picks.
 | `knowledge-commit-store`, `knowledge-commit-project` | Who commits knowledge |
 | `fan-out-note` | Each agent of a fan-out (`{parent}`, `{siblings}`) |
 | `group-note` | An agent given several sub-tasks by a coordinator (`{also}`) |
-| `picked-fan-out-note` | Each agent when hand-picked tasks start one per agent (`{siblings}`) |
+| `picked-fan-out-note` | Each agent when hand-picked tasks start one per agent (`{siblings}`, one `picked-sibling` line each) |
+| `picked-sibling` | One other task in that note, with where its agent works (`{key}`, `{branch}`, `{worktrees}`) |
 | `picked-group-note` | One agent given several hand-picked tasks (`{also}`) |
+| `task-in-group` | One task in `tasks-start`'s list (`{key}`, `{title}`, `{url}`, `{branch}`, `{worktrees}`, `{description}`) |
 | `coordinate-child` | One task in a coordinator's list (`{key}`, `{kind}`, `{title}`, `{summary}`) |
 | `scan-update`, `scan-repair`, `scan-from-docs`, `scan-from-code` | A project scan's starting point (`{manifest}`; `{list}` of problems or docs) |
 

@@ -696,6 +696,7 @@ mod tests {
         ProjectData {
             task_ref: None,
             also_tasks: Vec::new(),
+            repo_ids: Vec::new(),
             spec_change: None,
             knowledge_root: None,
             project_scan: None,

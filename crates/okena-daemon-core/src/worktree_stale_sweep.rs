@@ -129,6 +129,7 @@ mod tests {
         ProjectData {
             task_ref: None,
             also_tasks: Vec::new(),
+            repo_ids: Vec::new(),
             agent: None,
             spec_change: None,
             knowledge_root: None,

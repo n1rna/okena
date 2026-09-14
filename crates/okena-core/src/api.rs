@@ -424,6 +424,10 @@ pub struct ApiProject {
     /// unchanged, like it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also_tasks: Vec<crate::tasks::TaskRef>,
+    /// Repositories a worktree-less session was given, by project id. Plain
+    /// ids like `worktree_ids`, prefixed the same way on a remote client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repo_ids: Vec<String>,
     /// Agent-reported status and produced assets for this session. Like
     /// `task_ref`, it holds no okena-side ids, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1531,6 +1535,15 @@ pub enum ActionRequest {
         /// was fanned out. okena words that in the `fan-out-note` partial.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         siblings: Vec<String>,
+        /// Branch names for tasks in `also` and `siblings`, keyed exactly as
+        /// they are given there. `branch` names this task's own.
+        ///
+        /// Every task gets worktrees of its own on its own branch, so a name the
+        /// user edited — or suffixed because an earlier run took it — has to
+        /// reach the daemon per task. A task missing here keeps the provider's
+        /// own branch name.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        branches: std::collections::BTreeMap<String, String>,
         /// The user picked this task, `also` and `siblings` together, rather
         /// than a coordinator grouping a parent's sub-tasks.
         ///
@@ -2426,6 +2439,7 @@ mod tests {
                 worktree_ids: vec![],
                 task_ref: None,
                 also_tasks: Vec::new(),
+                repo_ids: Vec::new(),
                 agent: None,
                 agent_activity: Default::default(),
                 spec_change: None,
@@ -2997,6 +3011,34 @@ mod tests {
             let json = serde_json::to_string(&action).unwrap();
             let _parsed: ActionRequest = serde_json::from_str(&json).unwrap();
         }
+    }
+
+    #[test]
+    fn a_start_names_each_tasks_branch_and_an_older_one_still_decodes() {
+        // An older client sends no `branches`: every task keeps the provider's.
+        let old: ActionRequest = serde_json::from_value(serde_json::json!({
+            "action": "task_start_work", "provider": "linear",
+            "task_external_id": "u1", "project_ids": ["p1"], "also": ["QBL-2"],
+        }))
+        .unwrap();
+        let ActionRequest::TaskStartWork { branches, .. } = old else {
+            panic!("expected a start");
+        };
+        assert!(branches.is_empty());
+
+        let named: ActionRequest = serde_json::from_value(serde_json::json!({
+            "action": "task_start_work", "provider": "linear",
+            "task_external_id": "u1", "project_ids": ["p1"], "also": ["QBL-2"],
+            "branches": { "QBL-2": "feat/qbl-2-renamed" },
+        }))
+        .unwrap();
+        let ActionRequest::TaskStartWork { branches, .. } = named else {
+            panic!("expected a start");
+        };
+        assert_eq!(
+            branches.get("QBL-2").map(String::as_str),
+            Some("feat/qbl-2-renamed")
+        );
     }
 
     #[test]

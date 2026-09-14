@@ -446,7 +446,7 @@ fn agent_shell(
     branch: &str,
     context: &[(String, String)],
     note: Option<&str>,
-    coordination: Option<&Coordination>,
+    shape: Option<&BriefShape>,
     prompts: PromptRoot,
 ) -> Option<okena_terminal::shell_config::ShellType> {
     // An explicit override wins, including an explicit empty string, which is
@@ -466,7 +466,7 @@ fn agent_shell(
     // launch this agent, and more specific than any template. Without them the
     // agent used to start on a task having been told nothing at all.
     let mut args: Vec<String> =
-        match task_brief(settings, task, branch, context, note, coordination, prompts) {
+        match task_brief(settings, task, branch, context, note, shape, prompts) {
             Some(brief) => super::specs::prompt_args(&command, &brief),
             None => settings
                 .harness
@@ -530,31 +530,56 @@ fn session_root(worktree_paths: &[String], above: Option<String>) -> Option<Stri
     }
 }
 
+/// A `TaskStartWork`, unpacked.
+pub(super) struct StartWork {
+    pub(super) provider: String,
+    pub(super) task_external_id: String,
+    pub(super) project_ids: Vec<String>,
+    pub(super) agent_root: Option<String>,
+    pub(super) branch: Option<String>,
+    pub(super) agent_command: Option<String>,
+    pub(super) note: Option<String>,
+    pub(super) coordinate: bool,
+    pub(super) also: Vec<String>,
+    pub(super) siblings: Vec<String>,
+    pub(super) branches: std::collections::BTreeMap<String, String>,
+    pub(super) hand_picked: bool,
+}
+
 /// Start work on a task across one or more projects.
+///
+/// Every task the start covers gets worktrees of its own, one per project, on
+/// its own branch: the task itself and each one in `also`. One agent on three
+/// tasks used to work all of them on the first one's branch, so their changes
+/// landed as one. A coordinator over picked tasks gets none — it changes
+/// nothing, and each agent it starts gets its worktrees from that start.
 ///
 /// Order matters: worktrees are created first and links written second, so a
 /// failure part-way leaves usable checkouts rather than links pointing at
 /// nothing.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn start_work(
     ws: &mut Workspace,
     window_id: WindowId,
-    provider: String,
-    task_external_id: String,
-    project_ids: Vec<String>,
-    agent_root: Option<String>,
-    branch_override: Option<String>,
-    agent_command: Option<String>,
-    note: Option<String>,
-    coordinate: bool,
-    also: Vec<String>,
-    siblings: Vec<String>,
-    hand_picked: bool,
+    req: StartWork,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    let StartWork {
+        provider,
+        task_external_id,
+        project_ids,
+        agent_root,
+        branch: branch_override,
+        agent_command,
+        note,
+        coordinate,
+        also,
+        siblings,
+        branches,
+        hand_picked,
+    } = req;
     if project_ids.is_empty() {
         return ActionResult::Err("pick at least one project to work in".into());
     }
@@ -584,23 +609,34 @@ pub(super) fn start_work(
         Err(e) => return ActionResult::Err(e),
     };
 
+    // A coordinator over tasks the user picked has no worktree: every branch
+    // it could take is one of its agents', and it changes nothing anyway.
+    let lone_coordinator = coordinate && hand_picked;
+
+    // A name the user gave wins, when it says anything.
+    let named = |b: Option<&String>| {
+        b.map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
+    };
+
     // okena's `<kind>/<key>-<title>` name is the default; the user can still
     // name it themselves.
-    let branch = branch_override
-        .map(|b| b.trim().to_string())
-        .filter(|b| !b.is_empty())
-        .unwrap_or_else(|| {
+    let branch = if lone_coordinator {
+        String::new()
+    } else {
+        named(branch_override.as_ref()).unwrap_or_else(|| {
             let own = p.branch_name(&task);
-            // A coordinator makes no changes, so it takes a branch of its own
-            // and leaves every task's — its own task's too — to the agents it
-            // starts. Otherwise the group holding its task could not start.
+            // A coordinator of a task's sub-tasks makes no changes, so it
+            // takes a branch of its own and leaves every task's — its own
+            // task's too — to the agents it starts.
             if coordinate {
                 okena_core::tasks::coordinator_branch(&own)
             } else {
                 own
             }
-        });
-    if branch.is_empty() {
+        })
+    };
+    if !lone_coordinator && branch.is_empty() {
         return ActionResult::Err(format!(
             "could not derive a branch name for {}",
             task.display_key
@@ -612,13 +648,9 @@ pub(super) fn start_work(
     let prompts = briefs::prompt_root(&ws.data.projects, settings);
     let task_ref = okena_core::tasks::TaskRef::from(&task);
 
-    // Everything the agent is told beyond its task. The agent-written note
-    // arrives as-is — an agent wrote those words. okena's own notes are
-    // partials, so how it describes a group or a fan-out is editable.
-    //
     // Every task the session covers beyond its own, read so each is linked
-    // too: a session belongs to every task it works on, not only the one its
-    // branch is named after.
+    // and gets its worktrees: a session belongs to every task it works on,
+    // not only the one it is named after.
     let mut also_tasks = Vec::new();
     for key in &also {
         match fetch_task(&*p, &provider, key) {
@@ -631,13 +663,44 @@ pub(super) fn start_work(
         .map(okena_core::tasks::TaskRef::from)
         .collect();
 
+    // The repos this start was pointed at, as the brief names them.
+    let given: Vec<(String, String)> = project_ids
+        .iter()
+        .filter_map(|id| ws.project(id))
+        .map(|p| (p.name.clone(), p.path.clone()))
+        .collect();
+
+    // Picked tasks started one per agent are told where the others work:
+    // each sibling's branch, and the worktrees its own start creates — worked
+    // out here, since those starts run after this one.
+    let siblings: Vec<String> = if hand_picked {
+        let mut listed = Vec::new();
+        for key in &siblings {
+            let sibling_branch = match named(branches.get(key)) {
+                Some(b) => b,
+                None => match fetch_task(&*p, &provider, key) {
+                    Ok(t) => p.branch_name(&t),
+                    Err(e) => return ActionResult::Err(e),
+                },
+            };
+            let paths: Vec<String> = given
+                .iter()
+                .map(|(_, path)| worktree_path_for(path, &sibling_branch, settings))
+                .collect();
+            listed.push(picked_sibling(key, &sibling_branch, &paths, &prompts));
+        }
+        listed
+    } else {
+        siblings
+    };
+
+    // Everything the agent is told beyond its task. The agent-written note
+    // arrives as-is — an agent wrote those words. okena's own notes are
+    // partials, so how it describes a group or a fan-out is editable.
+    //
     // A coordinator over picked tasks has them listed in its brief instead:
     // they are what it splits, not a group it was handed to do.
-    let grouped: &[String] = if coordinate && hand_picked {
-        &[]
-    } else {
-        &also
-    };
+    let grouped: &[String] = if lone_coordinator { &[] } else { &also };
     let note = compose_note(note, grouped, &siblings, hand_picked, &task, &prompts);
 
     // A coordinator is told what it is splitting: the task's children, or the
@@ -655,12 +718,12 @@ pub(super) fn start_work(
         let picked: Vec<okena_core::tasks::Task> = std::iter::once(task.clone())
             .chain(also_tasks.iter().cloned())
             .collect();
-        Some(Coordination::Picked(list_children(&picked, &prompts)))
+        Some(BriefShape::Picked(list_children(&picked, &prompts)))
     } else {
         let id = okena_core::tasks::TaskId::new(provider.clone(), task.id.external_id.clone());
         match p.list_children(&id) {
             Ok(children) if !children.is_empty() => {
-                Some(Coordination::Children(list_children(&children, &prompts)))
+                Some(BriefShape::Children(list_children(&children, &prompts)))
             }
             Ok(_) => {
                 return ActionResult::Err(format!(
@@ -671,73 +734,110 @@ pub(super) fn start_work(
             Err(e) => return ActionResult::Err(describe(e)),
         }
     };
-    let first_project_path = ws
-        .project(&project_ids[0])
-        .map(|p| p.path.clone())
+    let first_project_path = given
+        .first()
+        .map(|(_, path)| path.clone())
         .unwrap_or_default();
 
-    // ── Worktrees, one per assigned project, all on the same branch ──────────
-    let mut created: Vec<serde_json::Value> = Vec::new();
     let mut failed: Vec<serde_json::Value> = Vec::new();
 
-    for project_id in &project_ids {
-        let project_name = ws
-            .project(project_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| project_id.clone());
-
-        let result = super::project::create_worktree(
-            ws,
-            window_id,
-            project_id.clone(),
-            branch.clone(),
-            // New work by definition. An existing branch surfaces as a create
-            // error rather than silently attaching to someone else's work.
-            true,
-            // Never the agent. A worktree copies its repo's layout, so an
-            // agent set as the worktree's shell started once per terminal in
-            // that layout — four identical agents for a four-pane repo — and
-            // again in every terminal opened there later. The worktree stays
-            // the human's; the agent gets the session below.
-            None,
-            backend,
-            terminals,
-            settings,
-            cx,
-        );
-
-        match result {
-            ActionResult::Ok(Some(payload)) => {
-                let new_id = payload
-                    .get("project_id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                match new_id {
-                    Some(new_id) => {
-                        link_task(ws, &new_id, &task_ref, &also_refs);
-                        created.push(serde_json::json!({
-                            "project": project_name,
-                            "project_id": new_id,
-                            "path": payload.get("path").cloned(),
-                        }));
-                    }
-                    None => failed.push(serde_json::json!({
-                        "project": project_name,
-                        "error": "worktree creation returned no project id",
-                    })),
-                }
+    // ── Which task gets worktrees on which branch ────────────────────────────
+    let mut work: Vec<(okena_core::tasks::Task, String)> = Vec::new();
+    if !lone_coordinator {
+        work.push((task.clone(), branch.clone()));
+        for (key, t) in also.iter().zip(&also_tasks) {
+            match named(branches.get(key)).unwrap_or_else(|| p.branch_name(t)) {
+                b if b.is_empty() => failed.push(serde_json::json!({
+                    "task": t.display_key,
+                    "project": t.display_key,
+                    "error": "could not derive a branch name",
+                })),
+                b => work.push((t.clone(), b)),
             }
-            ActionResult::Ok(None) => failed.push(serde_json::json!({
-                "project": project_name,
-                "error": "worktree creation returned no project",
-            })),
-            ActionResult::Err(e) => {
-                failed.push(serde_json::json!({ "project": project_name, "error": e }))
+        }
+    }
+    let several = work.len() > 1;
+
+    // ── Worktrees, one per task per assigned project ─────────────────────────
+    let mut created: Vec<serde_json::Value> = Vec::new();
+
+    for (work_task, work_branch) in &work {
+        let work_ref = okena_core::tasks::TaskRef::from(work_task);
+        for project_id in &project_ids {
+            let project_name = ws
+                .project(project_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| project_id.clone());
+            // Named for its task too when there are several, so a failure
+            // says whose worktree it was.
+            let label = if several {
+                format!("{} in {project_name}", work_task.display_key)
+            } else {
+                project_name.clone()
+            };
+
+            let result = super::project::create_worktree(
+                ws,
+                window_id,
+                project_id.clone(),
+                work_branch.clone(),
+                // New work by definition. An existing branch surfaces as a
+                // create error rather than silently attaching to someone
+                // else's work.
+                true,
+                // Never the agent. A worktree copies its repo's layout, so an
+                // agent set as the worktree's shell started once per terminal
+                // in that layout — four identical agents for a four-pane repo
+                // — and again in every terminal opened there later. The
+                // worktree stays the human's; the agent gets the session below.
+                None,
+                backend,
+                terminals,
+                settings,
+                cx,
+            );
+
+            match result {
+                ActionResult::Ok(Some(payload)) => {
+                    let new_id = payload
+                        .get("project_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    match new_id {
+                        Some(new_id) => {
+                            // Its own task only: this checkout holds that
+                            // task's branch, whichever session works in it.
+                            link_task(ws, &new_id, &work_ref, &[]);
+                            created.push(serde_json::json!({
+                                "task": work_task.display_key,
+                                "branch": work_branch,
+                                "project": project_name,
+                                "project_id": new_id,
+                                "path": payload.get("path").cloned(),
+                            }));
+                        }
+                        None => failed.push(serde_json::json!({
+                            "task": work_task.display_key,
+                            "project": label,
+                            "error": "worktree creation returned no project id",
+                        })),
+                    }
+                }
+                ActionResult::Ok(None) => failed.push(serde_json::json!({
+                    "task": work_task.display_key,
+                    "project": label,
+                    "error": "worktree creation returned no project",
+                })),
+                ActionResult::Err(e) => failed.push(serde_json::json!({
+                    "task": work_task.display_key,
+                    "project": label,
+                    "error": e,
+                })),
             }
         }
     }
 
-    if created.is_empty() {
+    if !lone_coordinator && created.is_empty() {
         let detail = failed
             .iter()
             .filter_map(|f| {
@@ -759,36 +859,66 @@ pub(super) fn start_work(
     //
     // The brief names the worktrees, not the repos they were cut from — the
     // agent is meant to change the checkout, and pointing it at the original
-    // repo sent it to the wrong directory.
-    let worktrees: Vec<(String, String)> = created
-        .iter()
-        .filter_map(|c| {
-            let name = c.get("project")?.as_str()?.to_string();
-            let path = c.get("path")?.as_str()?.to_string();
-            Some((name, path))
-        })
-        .collect();
+    // repo sent it to the wrong directory. A coordinator has no worktrees, so
+    // it is told the repos its agents will work in.
+    let worktrees_of = |key: Option<&str>| -> Vec<(String, String)> {
+        created
+            .iter()
+            .filter(|c| key.is_none() || c.get("task").and_then(|v| v.as_str()) == key)
+            .filter_map(|c| {
+                let name = c.get("project")?.as_str()?.to_string();
+                let path = c.get("path")?.as_str()?.to_string();
+                Some((name, path))
+            })
+            .collect()
+    };
+    let worktrees = worktrees_of(None);
+    // One agent on several tasks is told which worktrees are whose.
+    let group = several.then(|| {
+        let keys: Vec<&str> = work.iter().map(|(t, _)| t.display_key.as_str()).collect();
+        let listed: Vec<_> = work
+            .iter()
+            .map(|(t, b)| (t, b.as_str(), worktrees_of(Some(&t.display_key))))
+            .collect();
+        BriefShape::Group {
+            key: join_keys(&keys),
+            tasks: list_group(&listed, &prompts),
+        }
+    });
+    let shape = coordination.or(group);
+    let context: &[(String, String)] = if lone_coordinator { &given } else { &worktrees };
     let shell = agent_shell(
         settings,
         agent_command.as_deref(),
         &task,
         &branch,
-        &worktrees,
+        context,
         note.as_deref(),
-        coordination.as_ref(),
+        shape.as_ref(),
         prompts.clone(),
     );
     let mut agent_session: Option<serde_json::Value> = None;
     // No agent and one worktree: nothing would run in a session, so there is
-    // no session. Several worktrees still get one — it is the place above them.
-    let wants_session = shell.is_some() || created.len() > 1;
-    let worktree_paths: Vec<String> = worktrees.iter().map(|(_, p)| p.clone()).collect();
-    if wants_session
-        && let Some(root) = session_root(
+    // no session. Several worktrees still get one — it is the place above
+    // them — and a coordinator always does: it is the whole of what starts.
+    let wants_session = lone_coordinator || shell.is_some() || created.len() > 1;
+    let root = if lone_coordinator {
+        let paths: Vec<String> = given.iter().map(|(_, path)| path.clone()).collect();
+        coordinator_root(agent_root, &paths, settings)
+    } else {
+        let worktree_paths: Vec<String> = worktrees.iter().map(|(_, p)| p.clone()).collect();
+        session_root(
             &worktree_paths,
             resolve_agent_root(agent_root, settings, &first_project_path),
         )
-    {
+    };
+    if lone_coordinator && root.is_none() {
+        return ActionResult::Err(
+            "set a projects root in Settings → Harness for a coordinator over several projects"
+                .into(),
+        );
+    }
+    if wants_session && let Some(root) = root {
         // No "(agent)" suffix: the sidebar badges the row with what it is,
         // and a name repeating the badge said the same thing twice.
         let name = task.display_key.clone();
@@ -805,6 +935,11 @@ pub(super) fn start_work(
                 link_task(ws, &session_id, &task_ref, &also_refs);
                 if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id) {
                     p.agent_purpose = Some(okena_core::harness::AgentPurpose::Work);
+                    // With no worktree to say which repos it was given, a
+                    // coordinator keeps them: its agents start there.
+                    if lone_coordinator {
+                        p.repo_ids = project_ids.clone();
+                    }
                 }
                 // Set before spawning: the terminal reads the project's default
                 // shell as it starts.
@@ -842,14 +977,120 @@ pub(super) fn start_work(
 
     ws.notify_data(cx);
 
+    let branches: Vec<serde_json::Value> = work
+        .iter()
+        .map(|(t, b)| serde_json::json!({ "task": t.display_key, "branch": b }))
+        .collect();
     ActionResult::Ok(Some(serde_json::json!({
         "task": task_ref,
         "also_tasks": also_refs,
-        "branch": branch,
+        "branch": (!branch.is_empty()).then_some(branch),
+        "branches": branches,
         "created": created,
         "failed": failed,
         "agent_session": agent_session,
     })))
+}
+
+/// Where a coordinator over picked tasks runs, having no worktree of its own.
+///
+/// An explicit root wins. Otherwise one project's own checkout — the agent
+/// reads it to place the tasks and changes nothing — or, for several, the
+/// directory a multi-project session already runs in.
+fn coordinator_root(
+    explicit: Option<String>,
+    project_paths: &[String],
+    settings: &AppSettings,
+) -> Option<String> {
+    if let Some(root) = explicit.filter(|r| !r.trim().is_empty()) {
+        return Some(root);
+    }
+    match project_paths {
+        [only] => Some(only.clone()),
+        _ => resolve_agent_root(
+            None,
+            settings,
+            project_paths.first().map(String::as_str).unwrap_or_default(),
+        ),
+    }
+}
+
+/// The directory a worktree of `project_path` on `branch` gets: the path
+/// `create_worktree` picks, worked out without creating anything.
+fn worktree_path_for(project_path: &str, branch: &str, settings: &AppSettings) -> String {
+    let (git_root, subdir) =
+        okena_git::resolve_git_root_and_subdir(std::path::Path::new(project_path));
+    okena_git::compute_target_paths(
+        &git_root,
+        &subdir,
+        &settings.worktree.path_template,
+        branch,
+    )
+    .1
+}
+
+/// Several keys as one phrase: `A`, `A and B`, `A, B and C`.
+fn join_keys(keys: &[&str]) -> String {
+    match keys {
+        [] => String::new(),
+        [only] => only.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// `- name (path)` lines, as the brief lists worktrees everywhere.
+fn worktree_lines(worktrees: &[(String, String)]) -> String {
+    worktrees
+        .iter()
+        .map(|(name, path)| format!("- {name} ({path})"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A task of a group, its branch, and its own `(name, path)` worktrees.
+type GroupedTask<'a> = (&'a okena_core::tasks::Task, &'a str, Vec<(String, String)>);
+
+/// Each task of a group with its branch and the worktrees that are its own,
+/// one `task-in-group` partial apiece.
+fn list_group(
+    tasks: &[GroupedTask<'_>],
+    prompts: &PromptRoot,
+) -> String {
+    let listed = tasks
+        .iter()
+        .map(|(t, branch, worktrees)| {
+            briefs::fragment(
+                "task-in-group",
+                prompts.as_ref(),
+                &Vars::from([
+                    ("key", t.display_key.clone()),
+                    ("title", t.title.clone()),
+                    ("url", t.url.clone()),
+                    ("branch", branch.to_string()),
+                    ("worktrees", worktree_lines(worktrees)),
+                    (
+                        "description",
+                        briefs::block(t.description.as_deref().unwrap_or_default()),
+                    ),
+                ]),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    briefs::block(&listed)
+}
+
+/// One other picked task in a one-per-task note, with where its agent works.
+fn picked_sibling(key: &str, branch: &str, paths: &[String], prompts: &PromptRoot) -> String {
+    briefs::fragment(
+        "picked-sibling",
+        prompts.as_ref(),
+        &Vars::from([
+            ("key", key.to_string()),
+            ("branch", branch.to_string()),
+            ("worktrees", paths.join(", ")),
+        ]),
+    )
 }
 
 /// Read one task by provider id or display key.
@@ -878,19 +1119,24 @@ fn fetch_task(
     }
 }
 
-/// What a coordinating agent is splitting, already listed for its brief.
-enum Coordination {
-    /// A task's sub-tasks.
+/// What a brief is built around beyond the one task it is named after,
+/// already listed.
+enum BriefShape {
+    /// A task's sub-tasks, for the agent coordinating them.
     Children(String),
-    /// Tasks the user picked together, the one it starts on first.
+    /// Tasks the user picked together, for the agent coordinating them.
     Picked(String),
+    /// Several tasks one agent works on, each in worktrees of its own: every
+    /// key as one phrase, and each task with its branch and worktrees.
+    Group { key: String, tasks: String },
 }
 
 /// The note an agent starts with: what an agent wrote, then what okena adds.
 ///
 /// `hand_picked` says the user put these tasks together rather than a
 /// coordinator or a parent, which is a different thing to tell an agent: they
-/// share no parent, and nobody decided they cannot be verified apart.
+/// share no parent, and nobody decided they cannot be verified apart. Its
+/// `siblings` are `picked-sibling` lines rather than bare keys.
 fn compose_note(
     written: Option<String>,
     also: &[String],
@@ -917,10 +1163,12 @@ fn compose_note(
     }
     if !siblings.is_empty() {
         if hand_picked {
+            // Already one `picked-sibling` line each, with its branch and
+            // worktrees.
             parts.push(briefs::fragment(
                 "picked-fan-out-note",
                 prompts.as_ref(),
-                &Vars::from([("siblings", siblings.join(", "))]),
+                &Vars::from([("siblings", siblings.join("\n"))]),
             ));
         } else {
             let parent = task
@@ -1055,6 +1303,7 @@ mod tests {
             coordinate: false,
             also: Vec::new(),
             siblings: Vec::new(),
+            branches: Default::default(),
             hand_picked: false,
         };
         assert!(execute_task_provider_action(&start).is_none());
@@ -1412,7 +1661,7 @@ pub(super) mod agent_shell_tests {
     fn a_coordinator_over_picked_tasks_is_briefed_with_every_one() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("codex".into());
-        let picked = super::Coordination::Picked(
+        let picked = super::BriefShape::Picked(
             "- LIN-42 (Task): Ship the harness\n- LIN-7 (Defect): Fix the login".into(),
         );
         match agent_shell(&s, None, &task(), "b1", &[], None, Some(&picked), None)
@@ -1420,12 +1669,20 @@ pub(super) mod agent_shell_tests {
         {
             ShellType::Custom { args, .. } => {
                 let brief = args.first().expect("a brief was passed");
-                for needle in ["LIN-42", "LIN-7", "Fix the login", "b1", "okena_start_work"] {
+                for needle in [
+                    "LIN-42",
+                    "LIN-7",
+                    "Fix the login",
+                    "okena_start_work",
+                    "no worktree of your own",
+                ] {
                     assert!(
                         brief.contains(needle),
                         "brief is missing {needle}:\n{brief}"
                     );
                 }
+                // It has no branch, and is told of none.
+                assert!(!brief.contains("b1"), "{brief}");
                 // Not the sub-task brief: these share no parent.
                 assert!(!brief.contains("sub-tasks"), "{brief}");
                 // Verifying is the work agents' job, not the coordinator's.
@@ -1446,6 +1703,139 @@ pub(super) mod agent_shell_tests {
             .expect("a note");
         assert!(grouped.contains("LIN-7"), "{grouped}");
         assert!(!grouped.contains("verified apart"), "{grouped}");
+    }
+
+    #[test]
+    fn a_coordinator_is_given_repos_not_worktrees() {
+        let s = AppSettings::default();
+        let picked = super::BriefShape::Picked("- LIN-42 (Task): Ship the harness".into());
+        let given = [("okena".to_string(), "/p/okena".to_string())];
+        let brief = super::task_brief(&s, &task(), "", &given, None, Some(&picked), None)
+            .expect("a brief");
+        assert!(brief.contains("Projects you were given:\n- okena (/p/okena)"), "{brief}");
+        assert!(!brief.contains("Worktrees you were given"), "{brief}");
+    }
+
+    #[test]
+    fn one_agent_on_several_tasks_is_told_whose_worktree_is_whose() {
+        let s = AppSettings::default();
+        let first = task();
+        let mut other = task();
+        other.display_key = "LIN-7".into();
+        other.title = "Fix the login".into();
+        other.url = "https://linear.app/x/issue/LIN-7".into();
+        other.description = Some("Login fails on Safari.".into());
+        let listed = [
+            (
+                &first,
+                "chore/lin-42-ship-the-harness",
+                vec![("okena".to_string(), "/wt/lin-42".to_string())],
+            ),
+            (
+                &other,
+                "fix/lin-7-fix-the-login",
+                vec![("okena".to_string(), "/wt/lin-7".to_string())],
+            ),
+        ];
+        let shape = super::BriefShape::Group {
+            key: super::join_keys(&["LIN-42", "LIN-7"]),
+            tasks: super::list_group(&listed, &None),
+        };
+        let brief = super::task_brief(
+            &s,
+            &first,
+            "chore/lin-42-ship-the-harness",
+            &[],
+            None,
+            Some(&shape),
+            None,
+        )
+        .expect("a brief");
+        for needle in [
+            "Work on LIN-42 and LIN-7, together.",
+            "## LIN-42: Ship the harness",
+            "Branch: chore/lin-42-ship-the-harness",
+            "- okena (/wt/lin-42)",
+            "## LIN-7: Fix the login",
+            "Branch: fix/lin-7-fix-the-login",
+            "- okena (/wt/lin-7)",
+            "Login fails on Safari.",
+            "that task's worktrees",
+            "okena_test_plan",
+        ] {
+            assert!(brief.contains(needle), "brief is missing {needle}:\n{brief}");
+        }
+        // Each section names only its own worktree.
+        let lin42 = &brief[brief.find("## LIN-42").unwrap()..brief.find("## LIN-7").unwrap()];
+        assert!(!lin42.contains("/wt/lin-7"), "{brief}");
+        assert!(!brief.contains("{verify}"), "{brief}");
+        assert_eq!(brief.matches("okena_report_status").count(), 1, "{brief}");
+    }
+
+    #[test]
+    fn a_picked_sibling_is_named_with_its_branch_and_worktrees() {
+        let line = super::picked_sibling(
+            "LIN-7",
+            "fix/lin-7",
+            &["/wt/okena-fix-lin-7".into(), "/wt/web-fix-lin-7".into()],
+            &None,
+        );
+        let note = super::compose_note(None, &[], &[line], true, &task(), &None).expect("a note");
+        assert!(
+            note.contains("- LIN-7 on `fix/lin-7`: /wt/okena-fix-lin-7, /wt/web-fix-lin-7"),
+            "{note}"
+        );
+        assert!(!note.contains("parent"), "{note}");
+    }
+
+    #[test]
+    fn keys_read_as_one_phrase() {
+        assert_eq!(super::join_keys(&[]), "");
+        assert_eq!(super::join_keys(&["A"]), "A");
+        assert_eq!(super::join_keys(&["A", "B"]), "A and B");
+        assert_eq!(super::join_keys(&["A", "B", "C"]), "A, B and C");
+    }
+
+    #[test]
+    fn a_siblings_worktree_is_where_its_own_start_puts_it() {
+        let dir = std::env::temp_dir().join(format!("okena-sibling-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let project = dir.to_string_lossy().into_owned();
+        let s = AppSettings::default();
+        let (root, subdir) = okena_git::resolve_git_root_and_subdir(&dir);
+        let (_, expected) = okena_git::compute_target_paths(
+            &root,
+            &subdir,
+            &s.worktree.path_template,
+            "fix/lin-7",
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        let got = super::worktree_path_for(&project, "fix/lin-7", &s);
+        assert_eq!(got, expected);
+        assert!(got.contains("fix-lin-7"), "{got}");
+    }
+
+    #[test]
+    fn a_coordinator_runs_in_its_one_project_or_above_several() {
+        let mut s = AppSettings::default();
+        s.harness.agent_root = Some("/configured".into());
+        let one = ["/p/okena".to_string()];
+        let two = ["/p/okena".to_string(), "/p/web".to_string()];
+        // One project: its own checkout, whatever the configured root says.
+        assert_eq!(
+            super::coordinator_root(None, &one, &s).as_deref(),
+            Some("/p/okena")
+        );
+        assert_eq!(
+            super::coordinator_root(None, &two, &s).as_deref(),
+            Some("/configured")
+        );
+        s.harness.agent_root = None;
+        assert_eq!(super::coordinator_root(None, &two, &s).as_deref(), Some("/p"));
+        assert_eq!(
+            super::coordinator_root(Some("/explicit".into()), &one, &s).as_deref(),
+            Some("/explicit")
+        );
     }
 
     #[test]
@@ -1948,7 +2338,7 @@ fn task_brief(
     branch: &str,
     context: &[(String, String)],
     note: Option<&str>,
-    coordination: Option<&Coordination>,
+    shape: Option<&BriefShape>,
     prompts: PromptRoot,
 ) -> Option<String> {
     if !settings.harness.agent_args.is_empty() {
@@ -1963,21 +2353,35 @@ fn task_brief(
         "description",
         briefs::block(task.description.as_deref().unwrap_or_default()),
     );
+    // A coordinator over picked tasks has no worktrees; it is given repos.
+    let heading = match shape {
+        Some(BriefShape::Picked(_)) => "given-projects",
+        _ => "given-worktrees",
+    };
     vars.insert(
         "projects",
-        briefs::project_block("given-worktrees", context, prompts.as_ref()),
+        briefs::project_block(heading, context, prompts.as_ref()),
     );
     vars.insert("note", briefs::block(note.unwrap_or_default()));
     // A coordinator is briefed to split the work rather than do it, so it gets
     // that flow's template — not the work brief with the split tucked in.
-    let flow = match coordination {
-        Some(Coordination::Children(listed)) => {
+    let flow = match shape {
+        Some(BriefShape::Children(listed)) => {
             vars.insert("children", listed.clone());
             Flow::TaskCoordinate
         }
-        Some(Coordination::Picked(listed)) => {
+        Some(BriefShape::Picked(listed)) => {
             vars.insert("tasks", listed.clone());
             Flow::TasksCoordinate
+        }
+        // One agent on several tasks has no one branch: every task is listed
+        // with its own, and it plans and verifies them all.
+        Some(BriefShape::Group { key, tasks }) => {
+            vars.insert("key", key.clone());
+            vars.insert("tasks", tasks.clone());
+            let verify = briefs::build(Flow::TaskVerify, prompts.as_ref(), &vars);
+            vars.insert("verify", briefs::block(&verify.rendered.text));
+            Flow::TasksStart
         }
         // Only the agent doing the work plans and verifies it; a coordinator
         // hands that on to the agents it starts.
@@ -2056,21 +2460,33 @@ pub(super) fn teardown_plan(
         .as_ref()
         .filter(|_| anchor.worktree_info.is_none())?;
 
+    // A coordinator over picked tasks has no checkout of its own. The
+    // worktrees under its tasks are its agents', and go with theirs.
+    if !anchor.repo_ids.is_empty() {
+        return Some(TeardownPlan {
+            worktrees: Vec::new(),
+            sessions: vec![(anchor.id.clone(), anchor.name.clone())],
+        });
+    }
+
+    // One agent on several tasks has worktrees under each of them.
+    let covered: Vec<&str> = anchor
+        .linked_tasks()
+        .map(|t| t.id.external_id.as_str())
+        .collect();
     let mut plan = TeardownPlan {
         worktrees: Vec::new(),
         sessions: Vec::new(),
     };
     for p in projects.iter() {
-        let linked = p
-            .task_ref
-            .as_ref()
-            .is_some_and(|t| t.id.external_id == task.id.external_id);
-        if !linked {
+        let Some(own) = p.task_ref.as_ref() else {
             continue;
-        }
+        };
         if p.worktree_info.is_some() {
-            plan.worktrees.push((p.id.clone(), p.name.clone()));
-        } else {
+            if covered.contains(&own.id.external_id.as_str()) {
+                plan.worktrees.push((p.id.clone(), p.name.clone()));
+            }
+        } else if own.id.external_id == task.id.external_id {
             plan.sessions.push((p.id.clone(), p.name.clone()));
         }
     }
@@ -2283,6 +2699,39 @@ mod teardown_tests {
             worktree("wt2", "u1"),
         ];
         assert!(teardown_plan(&projects, "wt1").is_none());
+    }
+
+    #[test]
+    fn one_agent_on_several_tasks_takes_every_tasks_worktrees() {
+        let mut session = task_session("s1", "u1");
+        session.also_tasks = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": { "provider": "linear", "external_id": "u2" },
+                "display_key": "QBL-2", "title": "t", "url": "http://x",
+            }))
+            .unwrap(),
+        ];
+        let projects = vec![
+            session,
+            worktree("wt1", "u1"),
+            worktree("wt2", "u2"),
+            worktree("other", "u9"),
+        ];
+        let plan = teardown_plan(&projects, "s1").expect("a session");
+        assert_eq!(ids(&plan.sessions), ["s1"]);
+        assert_eq!(ids(&plan.worktrees), ["wt1", "wt2"]);
+    }
+
+    #[test]
+    fn a_coordinator_over_picked_tasks_takes_nothing_on_disk() {
+        // It has no worktree. Those under its tasks belong to the agents it
+        // started, which are torn down on their own.
+        let mut coordinator = task_session("c1", "u1");
+        coordinator.repo_ids = vec!["repo1".into()];
+        let projects = vec![repo("repo1"), coordinator, worktree("wt1", "u1")];
+        let plan = teardown_plan(&projects, "c1").expect("a session");
+        assert_eq!(ids(&plan.sessions), ["c1"]);
+        assert!(plan.worktrees.is_empty(), "{:?}", plan.worktrees);
     }
 
     #[test]

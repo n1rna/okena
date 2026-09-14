@@ -16,6 +16,10 @@ use std::fmt;
 pub enum Flow {
     /// Starting work on a task, with worktrees.
     TaskStart,
+    /// Starting one agent on several tasks at once, each in worktrees of its
+    /// own. Apart from [`Flow::TaskStart`] because there is no one branch to
+    /// name: the agent is told which worktrees belong to which task.
+    TasksStart,
     /// How an agent working on a task plans its steps and proves each one
     /// through okena's verification tools. Never sent alone: it is rendered
     /// into [`Flow::TaskStart`]'s `verify`, and is a flow of its own so a team
@@ -30,8 +34,8 @@ pub enum Flow {
     TaskCoordinate,
     /// Deciding how a set of tasks the user picked by hand splits among
     /// agents, and starting them. Apart from [`Flow::TaskCoordinate`] because
-    /// the tasks share no parent, and the coordinator holds the first one's
-    /// branch rather than a parent's.
+    /// the tasks share no parent, and the coordinator has no worktree at all:
+    /// it runs in the checkout it was started in and changes nothing there.
     TasksCoordinate,
     /// Drafting a new task from a title and a kind.
     TaskCreate,
@@ -62,6 +66,7 @@ impl Flow {
     pub const fn id(self) -> &'static str {
         match self {
             Flow::TaskStart => "task-start",
+            Flow::TasksStart => "tasks-start",
             Flow::TaskVerify => "task-verify",
             Flow::TaskBreakDown => "break-down",
             Flow::TaskCoordinate => "task-coordinate",
@@ -81,6 +86,7 @@ impl Flow {
     pub const fn label(self) -> &'static str {
         match self {
             Flow::TaskStart => "Start work on a task",
+            Flow::TasksStart => "Start work on several tasks",
             Flow::TaskVerify => "Plan and verify a task",
             Flow::TaskBreakDown => "Break a task down",
             Flow::TaskCoordinate => "Split a task among agents",
@@ -133,6 +139,15 @@ impl Flow {
                 // store can override either without the other.
                 "verify",
             ],
+            Flow::TasksStart => &[
+                // Every task's key, as one phrase: "QBL-1, QBL-2 and QBL-3".
+                "key",
+                // Each task with its link, branch, worktrees and description,
+                // one `task-in-group` partial apiece.
+                "tasks",
+                "note",
+                "verify",
+            ],
             Flow::TaskVerify => &["key", "title"],
             Flow::TaskCoordinate => &[
                 "key",
@@ -146,9 +161,10 @@ impl Flow {
                 "projects",
                 "note",
             ],
-            // `key` and `title` are the first picked task's; `branch` is the
-            // coordinator's own; `tasks` lists every picked task.
-            Flow::TasksCoordinate => &["key", "title", "branch", "tasks", "projects", "note"],
+            // `key` and `title` are the first picked task's; `tasks` lists
+            // every picked task; `projects` the repos its agents will work in.
+            // No `branch`: the coordinator has none.
+            Flow::TasksCoordinate => &["key", "title", "tasks", "projects", "note"],
             Flow::TaskBreakDown => &[
                 "key",
                 // The provider's own id, which is what `okena_create_task`
@@ -202,6 +218,7 @@ impl Flow {
     pub const fn all() -> &'static [Flow] {
         &[
             Flow::TaskStart,
+            Flow::TasksStart,
             Flow::TaskVerify,
             Flow::TaskBreakDown,
             Flow::TaskCoordinate,

@@ -13,6 +13,7 @@ use std::path::Path;
 pub const fn file(flow: Flow) -> &'static str {
     match flow {
         Flow::TaskStart => include_str!("templates/task-start.md"),
+        Flow::TasksStart => include_str!("templates/tasks-start.md"),
         Flow::TaskVerify => include_str!("templates/task-verify.md"),
         Flow::TaskBreakDown => include_str!("templates/break-down.md"),
         Flow::TaskCoordinate => include_str!("templates/task-coordinate.md"),
@@ -90,6 +91,14 @@ pub const PARTIALS: &[(&str, &str)] = &[
     (
         "picked-group-note",
         include_str!("templates/partials/picked-group-note.md"),
+    ),
+    (
+        "picked-sibling",
+        include_str!("templates/partials/picked-sibling.md"),
+    ),
+    (
+        "task-in-group",
+        include_str!("templates/partials/task-in-group.md"),
     ),
     (
         "coordinate-child",

@@ -239,6 +239,42 @@ pub(super) fn next_branch(provider_branch: &str, taken: bool) -> String {
     format!("{provider_branch}-2")
 }
 
+/// Each ticked task's branch, by key, leaving out any left blank: those keep
+/// the provider's own name.
+pub(super) fn branch_map(
+    tasks: &[Task],
+    names: &[String],
+) -> std::collections::BTreeMap<String, String> {
+    tasks
+        .iter()
+        .zip(names)
+        .filter_map(|(task, name)| {
+            let name = name.trim();
+            (!name.is_empty()).then(|| (task.display_key.clone(), name.to_string()))
+        })
+        .collect()
+}
+
+/// What starting the ticked tasks will create, and where.
+///
+/// Never a branch name: several tasks have several, and naming the first read
+/// as if only it were being started. `projects` is how many will be worked in,
+/// when that is already known.
+pub(super) fn selection_subtitle(
+    strategy: SelectionStrategy,
+    tasks: usize,
+    projects: Option<usize>,
+    place: &str,
+) -> String {
+    match (strategy, projects) {
+        (SelectionStrategy::Coordinated, _) => {
+            format!("The coordinator creates worktrees as it starts agents · {place}")
+        }
+        (_, Some(n)) => format!("{} worktrees · {place}", tasks * n),
+        (_, None) => format!("A worktree per task · {place}"),
+    }
+}
+
 /// Whether a task belongs in the Active section.
 ///
 /// One question, asked of okena rather than of the provider: is an agent
@@ -406,14 +442,15 @@ impl StartStrategy {
 /// only reading the tasks will tell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SelectionStrategy {
-    /// One agent on all of them, on the first task's branch.
+    /// One agent on all of them, each task in worktrees of its own on its own
+    /// branch.
     #[default]
     Single,
     /// One agent per task, each on its own branch.
     PerTask,
-    /// One agent on a coordinating branch of its own, briefed to group the
-    /// tasks and start an agent per group. It changes nothing itself, so every
-    /// task's branch stays free for those agents.
+    /// One agent with no worktree, briefed to group the tasks and start an
+    /// agent per group. It changes nothing itself, and each group's worktrees
+    /// are created as it starts that group.
     Coordinated,
 }
 
@@ -433,20 +470,22 @@ impl SelectionStrategy {
         }
     }
 
-    /// What choosing it will do with `count` tasks, the first being `first`.
-    pub(super) fn hint(self, count: usize, first: &str) -> String {
+    /// What choosing it will do with `count` tasks.
+    pub(super) fn hint(self, count: usize) -> String {
         match self {
-            SelectionStrategy::Single => {
-                format!("One session on {first}'s branch, working on all {count} tasks.")
-            }
+            SelectionStrategy::Single => format!(
+                "One session working on all {count} tasks, each in a worktree of its \
+                 own on its own branch."
+            ),
             SelectionStrategy::PerTask => format!(
                 "{count} sessions, one per task, each on its own branch. \
                  Pick this when they can be built and tested apart."
             ),
             SelectionStrategy::Coordinated => format!(
-                "One coordinating session on a branch of its own, told to read the \
-                 {count} tasks and start an agent for each group that can be tested \
-                 independently."
+                "One coordinating session with no worktree of its own, told to read \
+                 the {count} tasks and start an agent for each group that can be \
+                 tested independently. Each group's worktrees are created as it \
+                 starts them."
             ),
         }
     }
@@ -460,7 +499,9 @@ impl SelectionStrategy {
     pub(super) const fn template(self) -> &'static str {
         match self {
             SelectionStrategy::Coordinated => "tasks-coordinate",
-            SelectionStrategy::Single | SelectionStrategy::PerTask => "task-start",
+            // One agent is told which of its worktrees belongs to which task.
+            SelectionStrategy::Single => "tasks-start",
+            SelectionStrategy::PerTask => "task-start",
         }
     }
 }
@@ -861,6 +902,7 @@ impl HarnessPane {
             branch_input,
             brief_source: None,
             selection: Vec::new(),
+            branch_inputs: Vec::new(),
         });
         cx.notify();
         self.load_brief_source(task, cx);
@@ -993,7 +1035,7 @@ impl HarnessPane {
         self.start_work(
             &next.task,
             next.project_ids,
-            None,
+            next.branch,
             next.agent_command,
             next.extras,
             cx,
@@ -1158,18 +1200,17 @@ impl HarnessPane {
     /// when that cannot be told.
     fn quick_start_selection(&mut self, agent_command: String, cx: &mut Context<Self>) {
         let picked = self.checked_tasks(cx);
-        let Some(first) = picked.first() else {
+        if picked.is_empty() {
             return;
-        };
-        // One branch from the first task, unless each task gets its own: if
-        // an earlier run took it, only the dialog can give this one a name.
-        let first_taken = self.tasks.selection_strategy != SelectionStrategy::PerTask
-            && self.links_for(first, cx).signals.linked;
+        }
+        // Each task on its own branch; one an earlier run took gets the next
+        // name, as a second start on it would.
+        let names = self.selection_branches(&picked, cx);
         match self.quick_start_projects(cx) {
-            Some(project_ids) if !first_taken => {
-                self.start_selection(&picked, project_ids, None, agent_command, cx)
+            Some(project_ids) => {
+                self.start_selection(&picked, project_ids, names, agent_command, cx)
             }
-            _ => self.open_selection_form(picked, cx),
+            None => self.open_selection_form(picked, cx),
         }
     }
 
@@ -1185,6 +1226,17 @@ impl HarnessPane {
                 .placeholder("Branch / worktree name")
                 .default_value(branch)
         });
+        let branch_inputs = self
+            .selection_branches(&picked, cx)
+            .into_iter()
+            .map(|name| {
+                cx.new(|cx| {
+                    SimpleInputState::new(cx)
+                        .placeholder("Branch / worktree name")
+                        .default_value(name)
+                })
+            })
+            .collect();
         let project_ids = self.quick_start_projects(cx).unwrap_or_default();
         self.tasks.start_form = Some(super::StartWorkForm {
             task: first.clone(),
@@ -1193,9 +1245,19 @@ impl HarnessPane {
             branch_input,
             brief_source: None,
             selection: picked,
+            branch_inputs,
         });
         cx.notify();
         self.load_brief_source(&first, cx);
+    }
+
+    /// The branch each ticked task starts on: its own, or the next name when
+    /// an earlier run already took it.
+    fn selection_branches(&self, picked: &[Task], cx: &Context<Self>) -> Vec<String> {
+        picked
+            .iter()
+            .map(|task| next_branch(&task.branch_name, self.links_for(task, cx).signals.linked))
+            .collect()
     }
 
     /// The branch the dialog offers for starting `task`.
@@ -1230,14 +1292,16 @@ impl HarnessPane {
     /// Put agents on tasks picked together, split as the selection says.
     ///
     /// Every agent works in `project_ids`: where is chosen once for the run.
-    /// `branch` names the first task's branch; one per task ignores it, since
-    /// each task keeps its own. The ticks clear once the starts are asked for,
-    /// and the tasks move to Active as their agents come up.
+    /// `names` is each task's branch, in `picked` order, and every task gets
+    /// worktrees of its own on it; a blank one keeps the provider's own. A
+    /// coordinator takes none — it has no worktree, and each group it starts
+    /// gets its own. The ticks clear once the starts are asked for, and the
+    /// tasks move to Active as their agents come up.
     fn start_selection(
         &mut self,
         picked: &[Task],
         project_ids: Vec<String>,
-        branch: Option<String>,
+        names: Vec<String>,
         agent_command: String,
         cx: &mut Context<Self>,
     ) {
@@ -1246,14 +1310,18 @@ impl HarnessPane {
         };
         let keys: Vec<String> = picked.iter().map(|t| t.display_key.clone()).collect();
         let rest = keys[1..].to_vec();
+        let branches = branch_map(picked, &names);
+        let own = |task: &Task| branches.get(&task.display_key).cloned();
         match self.tasks.selection_strategy {
+            // One agent, and a worktree per task on the branch named here.
             SelectionStrategy::Single => self.start_work(
                 first,
                 project_ids,
-                branch,
+                own(first),
                 agent_command,
                 super::StartExtras {
                     also: rest,
+                    branches: branches.clone(),
                     hand_picked: true,
                     ..Default::default()
                 },
@@ -1261,24 +1329,27 @@ impl HarnessPane {
             ),
             SelectionStrategy::PerTask => {
                 for task in picked {
-                    let siblings = keys
+                    let siblings: Vec<String> = keys
                         .iter()
                         .filter(|k| **k != task.display_key)
                         .cloned()
                         .collect();
-                    // A task an earlier run already took the branch of gets
-                    // the next name, as a second start on it would.
-                    let taken = self.links_for(task, cx).signals.linked;
-                    let branch = taken.then(|| next_branch(&task.branch_name, true));
+                    // Where the others work, so each agent's brief can say.
+                    let sibling_branches = branches
+                        .iter()
+                        .filter(|(key, _)| siblings.contains(key))
+                        .map(|(key, branch)| (key.clone(), branch.clone()))
+                        .collect();
                     // Queued behind each other by `start_work`: git's index
                     // lock is the reason they go one at a time.
                     self.start_work(
                         task,
                         project_ids.clone(),
-                        branch,
+                        own(task),
                         agent_command.clone(),
                         super::StartExtras {
                             siblings,
+                            branches: sibling_branches,
                             hand_picked: true,
                             ..Default::default()
                         },
@@ -1291,7 +1362,7 @@ impl HarnessPane {
             SelectionStrategy::Coordinated => self.start_work(
                 first,
                 project_ids,
-                branch,
+                None,
                 agent_command,
                 super::StartExtras {
                     coordinate: true,
@@ -1381,14 +1452,15 @@ impl HarnessPane {
                 }
                 let branch = form.branch_input.read(cx).value().trim().to_string();
                 let selection = form.selection.clone();
+                // Each ticked task's branch, as the dialog last showed it.
+                let names: Vec<String> = form
+                    .branch_inputs
+                    .iter()
+                    .map(|input| input.read(cx).value().trim().to_string())
+                    .collect();
                 self.tasks.start_form = None;
                 if !selection.is_empty() {
-                    // The field names the first task's branch; one per task
-                    // has no field, each keeping its own.
-                    let branch = (self.tasks.selection_strategy != SelectionStrategy::PerTask
-                        && !branch.is_empty())
-                    .then_some(branch);
-                    self.start_selection(&selection, project_ids, branch, agent_command, cx);
+                    self.start_selection(&selection, project_ids, names, agent_command, cx);
                     cx.notify();
                     return;
                 }
@@ -1434,6 +1506,7 @@ impl HarnessPane {
             self.tasks.queued_starts.push(super::QueuedStart {
                 task: task.clone(),
                 project_ids,
+                branch,
                 agent_command,
                 extras,
             });
@@ -1475,6 +1548,7 @@ impl HarnessPane {
                         coordinate: extras.coordinate,
                         also: extras.also,
                         siblings: extras.siblings,
+                        branches: extras.branches,
                         hand_picked: extras.hand_picked,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing start-work result".to_string()))
@@ -1490,10 +1564,17 @@ impl HarnessPane {
                     this.drain_starts(cx);
                     match result {
                         Ok(value) => {
-                            let branch = value
-                                .get("branch")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("worktree");
+                            // Several tasks have several branches, and a
+                            // coordinator over picked tasks has none.
+                            let branches = value
+                                .get("branches")
+                                .and_then(|v| v.as_array())
+                                .map_or(0, |a| a.len());
+                            let branch = match value.get("branch").and_then(|v| v.as_str()) {
+                                _ if branches > 1 => format!("{branches} branches"),
+                                Some(branch) => branch.to_string(),
+                                None => "coordinator".to_string(),
+                            };
                             let made = value
                                 .get("created")
                                 .and_then(|v| v.as_array())
@@ -2883,12 +2964,13 @@ impl HarnessPane {
     /// split always offered.
     fn render_selection_launcher(&self, picked: &[Task], cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let Some(first) = picked.first() else {
+        if picked.is_empty() {
             return div().into_any_element();
-        };
+        }
         let count = picked.len();
         let strategy = self.tasks.selection_strategy;
-        let place = match self.quick_start_projects(cx) {
+        let projects = self.quick_start_projects(cx);
+        let place = match &projects {
             Some(ids) => {
                 let ws = self.workspace.read(cx);
                 let names: Vec<String> = ids
@@ -2899,21 +2981,18 @@ impl HarnessPane {
             }
             None => "pick where to work".to_string(),
         };
-        let subtitle = match strategy {
-            SelectionStrategy::PerTask => format!("{count} branches · {place}"),
-            SelectionStrategy::Single => format!("{} · {place}", first.branch_name),
-            SelectionStrategy::Coordinated => format!(
-                "{} · {place}",
-                okena_core::tasks::coordinator_branch(&first.branch_name)
-            ),
-        };
+        let subtitle = selection_subtitle(strategy, count, projects.as_ref().map(Vec::len), &place);
 
         let mut options =
             crate::views::agent_session::launch_options(self.tasks.default_agent.as_deref(), &t);
-        options.push(crate::views::agent_session::no_agent_option(
-            "Worktrees only",
-            &t,
-        ));
+        // A coordinator creates no worktree, so without an agent it would
+        // start nothing at all.
+        if strategy != SelectionStrategy::Coordinated {
+            options.push(crate::views::agent_session::no_agent_option(
+                "Worktrees only",
+                &t,
+            ));
+        }
         // Starts queue behind one another, so the launcher is busy until the
         // last of a run has gone.
         let busy = self.tasks.starting.is_some() || !self.tasks.queued_starts.is_empty();
@@ -2927,7 +3006,7 @@ impl HarnessPane {
         .options(options)
         .preferred(self.tasks.default_agent.clone())
         .modes(self.selection_modes())
-        .mode_hint(strategy.hint(count, &first.display_key))
+        .mode_hint(strategy.hint(count))
         .on_mode(cx.listener(|this, id: &SharedString, _window, cx| {
             if let Some(choice) = SelectionStrategy::from_label(id) {
                 this.tasks.selection_strategy = choice;
@@ -3803,8 +3882,19 @@ impl HarnessPane {
             .collect();
 
         let count = selected.len();
+        let coordinating_selection =
+            selecting && selection_strategy == SelectionStrategy::Coordinated;
+        // Several ticked tasks get a worktree each, in every selected project.
+        let worktrees = count * picked.len().max(1);
         let project_hint = match (flow, count) {
             (super::LaunchFlow::Work, 0) => "No projects selected".to_string(),
+            (super::LaunchFlow::Work, _) if coordinating_selection => {
+                "Where the coordinator's agents will work. It creates no worktree itself."
+                    .to_string()
+            }
+            (super::LaunchFlow::Work, _) if selecting => {
+                format!("{worktrees} worktrees · one per task in each project")
+            }
             (super::LaunchFlow::Work, 1) => "1 worktree".to_string(),
             (super::LaunchFlow::Work, n) => {
                 format!("{n} worktrees · agent session rooted above them")
@@ -3829,6 +3919,8 @@ impl HarnessPane {
                 },
                 match count {
                     0 => "Pick a project to start".to_string(),
+                    _ if coordinating_selection => "Start the coordinator".to_string(),
+                    _ if selecting => format!("Start across {worktrees} worktrees"),
                     1 => "Start in 1 worktree".to_string(),
                     n => format!("Start across {n} worktrees"),
                 },
@@ -3845,7 +3937,9 @@ impl HarnessPane {
 
         let mut options =
             crate::views::agent_session::launch_options(self.tasks.default_agent.as_deref(), &t);
-        if work {
+        // Not for a coordinator over picked tasks: it creates no worktree, so
+        // without an agent it would start nothing at all.
+        if work && !coordinating_selection {
             options.push(crate::views::agent_session::no_agent_option(
                 "Worktrees only",
                 &t,
@@ -3865,7 +3959,7 @@ impl HarnessPane {
             Vec::new()
         };
         let mode_hint = if selecting {
-            Some(selection_strategy.hint(picked.len(), &form.task.display_key))
+            Some(selection_strategy.hint(picked.len()))
         } else {
             (!modes.is_empty()).then(|| self.strategy_for(&external_id).hint(children))
         };
@@ -3885,12 +3979,6 @@ impl HarnessPane {
              makes no changes there, so every task's branch stays free for the \
              agents it starts."
                 .to_string()
-        } else if selecting {
-            format!(
-                "The branch of {}, the first task, where the agent works. Used for \
-                 every selected project.",
-                form.task.display_key,
-            )
         } else {
             "Used for every selected project. The provider's own name keeps its \
              branch-to-issue link working."
@@ -3985,7 +4073,7 @@ impl HarnessPane {
                             .child(project_hint),
                     ),
             );
-        if work && !(selecting && selection_strategy == SelectionStrategy::PerTask) {
+        if work && !selecting {
             body = body.child(
                 v_flex()
                     .gap(px(5.0))
@@ -4009,16 +4097,67 @@ impl HarnessPane {
                             .child(branch_hint),
                     ),
             );
-        } else if selecting {
+        } else if coordinating_selection {
             body = body.child(
                 v_flex()
                     .gap(px(5.0))
-                    .child(self.form_label("Branches", cx))
+                    .child(self.form_label("Worktrees", cx))
                     .child(
                         div()
                             .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
-                            .child("Each task gets its own branch, named after it."),
+                            .child(
+                                "The coordinator has no worktree of its own. Each \
+                                 group's worktrees are created as it starts that \
+                                 group's agent.",
+                            ),
+                    ),
+            );
+        } else if work && selecting {
+            // A branch per ticked task, each editable: every task gets a
+            // worktree of its own on it, in every selected project.
+            let rows: Vec<AnyElement> = picked
+                .iter()
+                .zip(&form.branch_inputs)
+                .map(|(task, input)| {
+                    h_flex()
+                        .gap(px(8.0))
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .w(px(90.0))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_secondary))
+                                .child(task.display_key.clone()),
+                        )
+                        .child(
+                            okena_ui::input::input_container(&t, None)
+                                .flex_1()
+                                .min_w_0()
+                                .px(px(8.0))
+                                .py(px(5.0))
+                                .child(SimpleInput::new(input).text_size(ui_text(13.0, cx))),
+                        )
+                        .into_any_element()
+                })
+                .collect();
+            body = body.child(
+                v_flex()
+                    .gap(px(5.0))
+                    .child(self.form_label("Branches / worktree names", cx))
+                    .children(rows)
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(
+                                "Each task gets a worktree of its own on its branch, in \
+                                 every selected project. The provider's own name keeps \
+                                 its branch-to-issue link working.",
+                            ),
                     ),
             );
         }
@@ -4459,7 +4598,10 @@ mod section_tests {
 #[cfg(test)]
 mod selection_tests {
     // Explicit imports: the `gpui::*` glob shadows `#[test]` with `gpui::test`.
-    use super::{Relation, SelectionStrategy, blocking_relative, in_list_order};
+    use super::{
+        Relation, SelectionStrategy, blocking_relative, branch_map, in_list_order,
+        selection_subtitle,
+    };
     use std::collections::{HashMap, HashSet};
 
     fn hierarchy<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
@@ -4539,19 +4681,68 @@ mod selection_tests {
     }
 
     #[test]
-    fn only_the_coordinator_is_briefed_from_the_selection_template() {
+    fn each_selection_mode_is_briefed_from_its_own_template() {
         assert_eq!(
             SelectionStrategy::Coordinated.template(),
             "tasks-coordinate"
         );
-        assert_eq!(SelectionStrategy::Single.template(), "task-start");
+        // One agent is told which of its worktrees belongs to which task.
+        assert_eq!(SelectionStrategy::Single.template(), "tasks-start");
         assert_eq!(SelectionStrategy::PerTask.template(), "task-start");
     }
 
     #[test]
     fn the_one_per_task_hint_says_how_many_sessions_it_will_make() {
-        let hint = SelectionStrategy::PerTask.hint(3, "QBL-1");
+        let hint = SelectionStrategy::PerTask.hint(3);
         assert!(hint.starts_with("3 sessions"), "{hint}");
+    }
+
+    #[test]
+    fn the_selection_launcher_never_names_one_tasks_branch() {
+        assert_eq!(
+            selection_subtitle(SelectionStrategy::Single, 3, Some(1), "in okena"),
+            "3 worktrees · in okena"
+        );
+        assert_eq!(
+            selection_subtitle(SelectionStrategy::PerTask, 3, Some(2), "in okena, web"),
+            "6 worktrees · in okena, web"
+        );
+        assert_eq!(
+            selection_subtitle(SelectionStrategy::Coordinated, 3, Some(1), "in okena"),
+            "The coordinator creates worktrees as it starts agents · in okena"
+        );
+        assert_eq!(
+            selection_subtitle(SelectionStrategy::Single, 3, None, "pick where to work"),
+            "A worktree per task · pick where to work"
+        );
+        // Nor does any hint put the work on a branch of the coordinator's own.
+        for strategy in SelectionStrategy::ALL {
+            let hint = strategy.hint(3);
+            assert!(!hint.contains("branch of its own"), "{hint}");
+        }
+    }
+
+    #[test]
+    fn each_ticked_tasks_branch_is_sent_by_key_and_a_blank_one_is_left_alone() {
+        let task = |key: &str| -> okena_core::tasks::Task {
+            serde_json::from_value(serde_json::json!({
+                "id": { "provider": "linear", "external_id": key.to_lowercase() },
+                "display_key": key, "title": "t", "state": "todo", "state_name": "Todo",
+                "url": "http://x", "branch_name": format!("feat/{}", key.to_lowercase()),
+                "updated_at": "",
+            }))
+            .unwrap()
+        };
+        let picked = [task("QBL-12"), task("QBL-14"), task("QBL-15")];
+        let names = [
+            "feat/qbl-12".to_string(),
+            "   ".to_string(),
+            " fix/qbl-15-renamed ".to_string(),
+        ];
+        let map = branch_map(&picked, &names);
+        assert_eq!(map.len(), 2, "{map:?}");
+        assert_eq!(map["QBL-12"], "feat/qbl-12");
+        assert_eq!(map["QBL-15"], "fix/qbl-15-renamed");
     }
 }
 

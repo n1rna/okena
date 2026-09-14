@@ -791,6 +791,7 @@ mod action_timeout_tests {
             coordinate: false,
             also: Vec::new(),
             siblings: Vec::new(),
+            branches: Default::default(),
             hand_picked: false,
         }
     }
