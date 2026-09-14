@@ -302,9 +302,12 @@ impl Render for HarnessPane {
         // than part of it. Leaving happens by selecting a project or an
         // overview, the same way every other view is left.
         v_flex()
+            .relative()
             .size_full()
             .bg(rgb(t.bg_primary))
             .child(div().flex_1().min_h_0().child(body))
+            // Over whichever view opened it.
+            .children(self.render_context_dialog(cx))
     }
 }
 

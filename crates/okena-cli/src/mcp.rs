@@ -409,6 +409,51 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "okena_context_search",
+            "description":
+                "Search the context this session may use: project map entries (areas, \
+                 concepts, exposed and consumed interfaces, CI, infrastructure), OpenSpec \
+                 specs and changes, knowledge docs, skills and agents — from this \
+                 session's projects and the knowledge stores they follow. Returns each \
+                 item's kind, title, description, owner and absolute `path`; read one \
+                 with `okena_context_read`. An empty query lists what is used most.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Words to match against titles, map ids and paths."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "Most items to return. Defaults to 50."
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_context_read",
+            "description":
+                "Read one context file by the absolute `path` okena_context_search \
+                 returned. A change's path is its folder: read a file inside it, such as \
+                 its proposal.md. Only files under this session's projects' roots and \
+                 the stores they follow can be read; anything else is refused.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path, as okena_context_search returned it."
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "okena_test_plan",
             "description":
                 "Plan how you will verify your work, before you run anything: submit \
@@ -585,6 +630,8 @@ fn call_tool(params: &Value) -> Result<Value, Value> {
         "okena_comment_task" => comment_task(&args),
         "okena_start_work" => start_work(&args),
         "okena_register_asset" => register_asset(&args),
+        "okena_context_search" => context_search(&args),
+        "okena_context_read" => context_read(&args),
         "okena_test_plan" => test_plan(&args),
         "okena_test_step_start" => test_step_start(&args),
         "okena_test_step_result" => test_step_result(&args),
@@ -1366,6 +1413,46 @@ fn test_run_finish(args: &Value) -> Result<Value, String> {
     report_run("agent_test_run_finish", run_finish_fields(args)?)
 }
 
+// ─── Launch context ──────────────────────────────────────────────────────────
+//
+// Both carry only the terminal, never a project list: the daemon works out the
+// session's projects and the stores they follow from it, so an agent cannot
+// widen its own scope by naming more.
+
+/// The daemon action behind `okena_context_search`.
+fn context_search_body(args: &Value, terminal_id: &str) -> Value {
+    let mut body = json!({
+        "action": "context_search",
+        "query": str_arg(args, "query").unwrap_or_default(),
+        "terminal_id": terminal_id,
+    });
+    if let Some(limit) = args.get("limit").and_then(|l| l.as_u64()) {
+        body["limit"] = json!(limit.clamp(1, 100));
+    }
+    body
+}
+
+/// The daemon action behind `okena_context_read`.
+fn context_read_body(args: &Value, terminal_id: &str) -> Result<Value, String> {
+    let path = str_arg(args, "path")
+        .ok_or("`path` is required — pass a `path` okena_context_search returned")?;
+    Ok(json!({
+        "action": "context_read",
+        "terminal_id": terminal_id,
+        "path": path,
+    }))
+}
+
+fn context_search(args: &Value) -> Result<Value, String> {
+    let terminal = session_terminal(std::env::var("OKENA_TERMINAL_ID").ok())?;
+    action(&context_search_body(args, &terminal))
+}
+
+fn context_read(args: &Value) -> Result<Value, String> {
+    let terminal = session_terminal(std::env::var("OKENA_TERMINAL_ID").ok())?;
+    action(&context_read_body(args, &terminal)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1385,6 +1472,53 @@ mod tests {
             cols: None,
             rows: None,
         }
+    }
+
+    #[test]
+    fn context_lookups_cross_as_the_sessions_terminal_and_nothing_wider() {
+        use okena_core::api::ActionRequest;
+        let search = super::context_search_body(
+            &json!({ "query": " checkout ", "limit": 1000, "project_ids": ["other"] }),
+            "term-1",
+        );
+        match serde_json::from_value(search).expect("a search the daemon accepts") {
+            ActionRequest::ContextSearch {
+                query,
+                project_ids,
+                terminal_id,
+                limit,
+            } => {
+                assert_eq!(query, "checkout");
+                // Scope comes from the terminal; a project list from the agent
+                // is not passed on.
+                assert!(project_ids.is_empty());
+                assert_eq!(terminal_id.as_deref(), Some("term-1"));
+                assert_eq!(limit, Some(100));
+            }
+            other => panic!("not a context search: {other:?}"),
+        }
+
+        let read = super::context_read_body(&json!({ "path": "/x/docs/a.md" }), "term-1")
+            .expect("a path was given");
+        assert!(matches!(
+            serde_json::from_value(read).expect("a read the daemon accepts"),
+            ActionRequest::ContextRead { ref terminal_id, ref path }
+                if terminal_id == "term-1" && path == "/x/docs/a.md"
+        ));
+        assert!(super::context_read_body(&json!({}), "term-1").is_err());
+    }
+
+    #[test]
+    fn the_context_tools_are_offered() {
+        let defs = tool_definitions();
+        let names: Vec<&str> = defs
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(names.contains(&"okena_context_search"), "{names:?}");
+        assert!(names.contains(&"okena_context_read"), "{names:?}");
     }
 
     #[test]
@@ -1596,6 +1730,8 @@ mod tests {
             names,
             [
                 "okena_comment_task",
+                "okena_context_read",
+                "okena_context_search",
                 "okena_create_subtask",
                 "okena_create_task",
                 "okena_get_task",

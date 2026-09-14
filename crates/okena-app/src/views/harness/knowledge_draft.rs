@@ -30,6 +30,8 @@ pub(crate) struct DraftForm {
     /// The entries each draft's root had when it started, by daemon project
     /// id — how its Drafting row knows the files it wrote have shown up.
     pub(crate) baselines: HashMap<String, HashSet<String>>,
+    /// Projects and context for the agent, once its dialog has been opened.
+    pub(crate) pickers: Option<Entity<crate::views::components::launch_pickers::LaunchPickers>>,
 }
 
 impl DraftForm {
@@ -47,6 +49,7 @@ impl DraftForm {
             error: None,
             notice: None,
             baselines: HashMap::new(),
+            pickers: None,
         }
     }
 }
@@ -102,10 +105,13 @@ impl HarnessPane {
 
         let client = self.client.clone();
         let root = self.knowledge_draft_target();
+        let context =
+            super::context_dialog::picked_context(self.knowledge_draft.pickers.as_ref(), cx);
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 client
                     .post_action(ActionRequest::KnowledgeDraft {
+                        context,
                         root,
                         request,
                         agent_command: Some(agent),
@@ -124,6 +130,7 @@ impl HarnessPane {
                             this.knowledge_draft
                                 .request
                                 .update(cx, |i, cx| i.set_value("", cx));
+                            super::context_dialog::clear_picked_context(this.knowledge_draft.pickers.clone(), cx);
                             let name = v
                                 .get("name")
                                 .and_then(|n| n.as_str())
@@ -289,6 +296,13 @@ impl HarnessPane {
         ))
         .launch_alongside_sessions()
         .busy(starting.then_some("Starting…"))
+        // Projects and context are picked in a dialog, not on the form.
+        .on_configure(
+            "Choose projects and context…",
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.open_context_dialog(super::context_dialog::ContextTarget::KnowledgeDraft, cx);
+            }),
+        )
         .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
             this.start_knowledge_draft(command.to_string(), cx);
         }))

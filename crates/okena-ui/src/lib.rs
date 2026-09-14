@@ -9,6 +9,7 @@ pub mod agent_launcher;
 pub mod badge;
 pub mod button;
 pub mod chip;
+pub mod chip_search;
 pub mod click_detector;
 pub mod code_block;
 pub mod color_dot;

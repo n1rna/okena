@@ -120,6 +120,17 @@ pub const PARTIALS: &[(&str, &str)] = &[
         "scan-from-code",
         include_str!("templates/partials/scan-from-code.md"),
     ),
+    // Launch context (QBL-406): the heading over what was picked, and the
+    // line naming what was loaded into the session instead of listed.
+    ("context", include_str!("templates/partials/context.md")),
+    (
+        "context-installed",
+        include_str!("templates/partials/context-installed.md"),
+    ),
+    (
+        "context-lookup",
+        include_str!("templates/partials/context-lookup.md"),
+    ),
 ];
 
 /// The skill that tells an agent how to map a repository (ADR-0005).

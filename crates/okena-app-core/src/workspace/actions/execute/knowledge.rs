@@ -403,8 +403,18 @@ fn sync(
 /// The prose is a template now (`knowledge-draft`). What stays here is what a
 /// template cannot decide: what kind of root this is, and therefore who is
 /// expected to commit.
-fn draft_brief(request: &str, root: &KnowledgeRoot, prompts: PromptRoot) -> String {
+fn draft_brief(
+    request: &str,
+    root: &KnowledgeRoot,
+    context_items: &[okena_core::context::ContextItem],
+    loaded: bool,
+    prompts: PromptRoot,
+) -> String {
     let mut vars = Vars::new();
+    vars.insert(
+        "context",
+        briefs::context_block(context_items, loaded, prompts.as_ref()),
+    );
     vars.insert("request", request.to_string());
     vars.insert("path", root.path.clone());
     vars.insert(
@@ -437,8 +447,9 @@ fn draft_shell(
     settings: &AppSettings,
     agent_command: Option<&str>,
     prompt: &str,
+    install: &super::agent_context::Install,
 ) -> Result<okena_terminal::shell_config::ShellType, String> {
-    super::specs::spec_agent_shell(settings, agent_command, prompt).ok_or_else(|| {
+    super::specs::spec_agent_shell(settings, agent_command, prompt, install).ok_or_else(|| {
         "no agent to start — pick one, or set the agent command in Settings → Harness".to_string()
     })
 }
@@ -454,6 +465,7 @@ pub(super) fn draft(
     root: Option<String>,
     request: String,
     agent_command: Option<String>,
+    context_refs: Vec<okena_core::context::ContextRef>,
     backend: &dyn okena_terminal::backend::TerminalBackend,
     terminals: &okena_terminal::TerminalsRegistry,
     settings: &AppSettings,
@@ -463,20 +475,27 @@ pub(super) fn draft(
     if request.is_empty() {
         return ActionResult::Err("say what to write first".into());
     }
+    let context_items =
+        super::context::resolve_for_launch(&ws.data.projects, settings, &context_refs);
     let projects = knowledge_project_sources(&ws.data.projects, settings);
     let registry = registry::registry_path(&get_config_dir());
     let root = match resolve_root(&registry, &projects, root.as_deref()) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
+    let command = super::agent_context::launch_command(settings, agent_command.as_deref());
+    let install = super::agent_context::install(&command, &context_items);
     let shell = match draft_shell(
         settings,
         agent_command.as_deref(),
         &draft_brief(
             &request,
             &root,
+            &context_items,
+            install.loaded(),
             briefs::prompt_root(&ws.data.projects, settings),
         ),
+        &install,
     ) {
         Ok(s) => s,
         Err(e) => return ActionResult::Err(e),
@@ -509,6 +528,7 @@ pub(super) fn draft(
         p.agent_purpose = Some(okena_core::harness::AgentPurpose::KnowledgeDraft {
             root: root.key.clone(),
         });
+        p.context_projects = super::context::scope_projects(&[], &context_items);
         p.default_shell = Some(shell);
     }
     if let ActionResult::Err(e) = super::spawn_uninitialized_terminals(
@@ -558,6 +578,8 @@ mod draft_tests {
         let brief = draft_brief(
             "document how CI caches work",
             &root(KnowledgeRootKind::Store),
+            &[],
+            false,
             None,
         );
         for needle in [
@@ -578,7 +600,7 @@ mod draft_tests {
             );
         }
 
-        let project = draft_brief("x", &root(KnowledgeRootKind::Project), None);
+        let project = draft_brief("x", &root(KnowledgeRootKind::Project), &[], false, None);
         assert!(!project.contains("knowledge/<short-topic>"));
         assert!(project.contains("Leave committing to me"));
     }
@@ -586,9 +608,12 @@ mod draft_tests {
     #[test]
     fn a_draft_needs_an_agent_to_start() {
         let settings = AppSettings::default();
-        assert!(draft_shell(&settings, None, "p").is_err_and(|e| e.contains("Settings → Harness")));
-        assert!(draft_shell(&settings, Some("  "), "p").is_err());
-        assert!(draft_shell(&settings, Some("claude"), "p").is_ok());
+        assert!(
+            draft_shell(&settings, None, "p", &Default::default())
+                .is_err_and(|e| e.contains("Settings → Harness"))
+        );
+        assert!(draft_shell(&settings, Some("  "), "p", &Default::default()).is_err());
+        assert!(draft_shell(&settings, Some("claude"), "p", &Default::default()).is_ok());
     }
 }
 

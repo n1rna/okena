@@ -504,6 +504,15 @@ pub struct ProjectData {
     /// which works those out from their markers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_purpose: Option<okena_core::harness::AgentPurpose>,
+    /// The projects an agent session was pointed at, by id: the ones chosen
+    /// in its launcher, and those owning the context it was handed.
+    ///
+    /// What its own context lookups (`okena_context_search`,
+    /// `okena_context_read`) are scoped to — together with the stores those
+    /// projects follow. Stored because a free-form session keeps no other
+    /// record of them, and the scope must survive a daemon restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_projects: Vec<String>,
     /// Folder icon color for this project
     #[serde(default)]
     pub folder_color: FolderColor,
@@ -658,6 +667,7 @@ mod tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             folder_color: Default::default(),
             hooks: Default::default(),
             connection_id: None,
@@ -2373,6 +2383,7 @@ mod agent_session_tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),

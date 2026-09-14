@@ -10,6 +10,7 @@
 #![allow(clippy::expect_used)]
 
 mod briefs;
+mod context;
 mod doc_refine;
 mod document_files;
 mod files;
@@ -22,6 +23,8 @@ mod agent_options;
 // Public so the Agents view can tell whether a session was handed okena's
 // MCP config, rather than guessing from the agent's name.
 pub mod agent_mcp;
+// Skills and agents picked at launch, handed over the way each agent takes them.
+mod agent_context;
 // Public so the agent panel can tell whether a session can be resumed.
 pub mod agent_resume;
 mod review;
@@ -46,6 +49,7 @@ use okena_workspace::context::WorkspaceCx;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use context::{context_catalog, read_in_scope, session_scope};
 pub use knowledge::{execute_knowledge_action, knowledge_project_sources};
 pub use project::{
     MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
@@ -840,6 +844,7 @@ pub fn execute_action(
             task_draft,
             task,
             purpose,
+            context,
         } => tasks::start_custom_session(
             ws,
             window_id,
@@ -851,6 +856,7 @@ pub fn execute_action(
             task_draft,
             task,
             purpose,
+            context,
             backend,
             terminals,
             settings,
@@ -858,6 +864,13 @@ pub fn execute_action(
         ),
         ActionRequest::PromptRender { flow, vars } => {
             briefs::render_action(&flow, &vars, &ws.data.projects, settings)
+        }
+        // The live index is the daemon's, which routes these before this
+        // match. A caller without one has nothing to search.
+        ActionRequest::ContextSearch { .. }
+        | ActionRequest::ContextHit { .. }
+        | ActionRequest::ContextRead { .. } => {
+            ActionResult::Err("launch context is searched by the daemon".into())
         }
         // ── Engineering harness: OpenSpec ──────────────────────────────────
         // The daemon runs the listing and the store git off the workspace lock
@@ -909,6 +922,7 @@ pub fn execute_action(
             idea,
             name,
             agent_command,
+            context,
         } => specs::draft_change(
             ws,
             window_id,
@@ -916,6 +930,7 @@ pub fn execute_action(
             name,
             agent_command,
             root,
+            context,
             backend,
             terminals,
             settings,
@@ -926,6 +941,7 @@ pub fn execute_action(
             path,
             request,
             agent_command,
+            context,
         } => doc_refine::refine_spec_document(
             ws,
             window_id,
@@ -933,6 +949,7 @@ pub fn execute_action(
             path,
             request,
             agent_command,
+            context,
             backend,
             terminals,
             settings,
@@ -966,12 +983,14 @@ pub fn execute_action(
             root,
             request,
             agent_command,
+            context,
         } => knowledge::draft(
             ws,
             window_id,
             root,
             request,
             agent_command,
+            context,
             backend,
             terminals,
             settings,
@@ -982,6 +1001,7 @@ pub fn execute_action(
             path,
             request,
             agent_command,
+            context,
         } => doc_refine::refine_knowledge_document(
             ws,
             window_id,
@@ -989,6 +1009,7 @@ pub fn execute_action(
             path,
             request,
             agent_command,
+            context,
             backend,
             terminals,
             settings,
@@ -1074,6 +1095,7 @@ pub fn execute_action(
             siblings,
             branches,
             hand_picked,
+            context,
         } => tasks::start_work(
             ws,
             window_id,
@@ -1090,6 +1112,7 @@ pub fn execute_action(
                 siblings,
                 branches,
                 hand_picked,
+                context,
             },
             backend,
             terminals,
@@ -1835,6 +1858,7 @@ mod reconnect_shell_tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig::default(),

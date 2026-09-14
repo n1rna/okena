@@ -26,6 +26,8 @@ pub(crate) struct DocRefine {
     pub(crate) request: Entity<SimpleInputState>,
     /// A start is in flight, which blocks a second one.
     pub(crate) starting: bool,
+    /// Projects and context for the agent, once its dialog has been opened.
+    pub(crate) pickers: Option<Entity<crate::views::components::launch_pickers::LaunchPickers>>,
 }
 
 impl DocRefine {
@@ -35,6 +37,7 @@ impl DocRefine {
         Self {
             request,
             starting: false,
+            pickers: None,
         }
     }
 }
@@ -179,6 +182,17 @@ impl HarnessPane {
             // The agent writes the file on disk; edits held here would
             // either overwrite its work on save or be lost under it.
             .disabled(dirty.then_some("Save your edits first"))
+            // Projects and context are picked in a dialog, not on the card.
+            .on_configure(
+                "Choose projects and context…",
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    let target = match section {
+                        HarnessSection::Specs => super::context_dialog::ContextTarget::SpecRefine,
+                        _ => super::context_dialog::ContextTarget::KnowledgeRefine,
+                    };
+                    this.open_context_dialog(target, cx);
+                }),
+            )
             .on_launch(
                 cx.listener(move |this, command: &SharedString, _window, cx| {
                     this.start_document_refine(section, command.to_string(), cx);
@@ -224,14 +238,20 @@ impl HarnessPane {
         cx.notify();
 
         let agent_command = Some(agent);
+        let context = super::context_dialog::picked_context(
+            self.doc_refine_mut(section).pickers.as_ref(),
+            cx,
+        );
         let action = match section {
             HarnessSection::Specs => ActionRequest::SpecRefineDocument {
+                context,
                 root,
                 path,
                 request,
                 agent_command,
             },
             _ => ActionRequest::KnowledgeRefineDocument {
+                context,
                 root,
                 path,
                 request,
@@ -251,10 +271,14 @@ impl HarnessPane {
                     let state = this.doc_refine_mut(section);
                     state.starting = false;
                     let input = state.request.clone();
+                    let pickers = state.pickers.clone();
                     // Not opening it: the card lists it, and you are reading
                     // the file it is about to change.
                     match result {
-                        Ok(_) => input.update(cx, |i, cx| i.set_value("", cx)),
+                        Ok(_) => {
+                            input.update(cx, |i, cx| i.set_value("", cx));
+                            super::context_dialog::clear_picked_context(pickers, cx);
+                        }
                         Err(e) => this.report_error(e, cx),
                     }
                     cx.notify();

@@ -103,9 +103,13 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // A listing runs `git status` in every store, and a tree reads the
         // head of every entry: more than the fast bucket allows on a large
         // store.
+        // A context search runs discovery and reads the roots it has not
+        // cached yet: a first search over a large workspace outlasts the fast
+        // bucket.
         ActionRequest::KnowledgeStores
         | ActionRequest::KnowledgeTree { .. }
-        | ActionRequest::SpecStores => ActionClientKind::Search,
+        | ActionRequest::SpecStores
+        | ActionRequest::ContextSearch { .. } => ActionClientKind::Search,
         // Task-provider calls cross the internet. The provider's own HTTP
         // timeout is 20 s, so the fast bucket would abandon the request before
         // the provider had given up — reporting a transport failure for what is
@@ -793,6 +797,7 @@ mod action_timeout_tests {
             siblings: Vec::new(),
             branches: Default::default(),
             hand_picked: false,
+            context: Vec::new(),
         }
     }
 
@@ -816,6 +821,7 @@ mod action_timeout_tests {
             idea: "add login".into(),
             name: None,
             agent_command: None,
+            context: Vec::new(),
         };
         assert!(matches!(
             client_kind_for(&action),

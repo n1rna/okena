@@ -119,8 +119,13 @@ pub(super) fn scan_links(
         Err(e) => return ActionResult::Err(e),
     };
     let brief = links_brief(&listed, &skill, &prompts);
-    let Some(shell) = super::specs::spec_agent_shell(settings, agent_command.as_deref(), &brief)
-    else {
+    let Some(shell) = super::specs::spec_agent_shell(
+        settings,
+        agent_command.as_deref(),
+        &brief,
+        // A scan is handed no picked context.
+        &Default::default(),
+    ) else {
         return ActionResult::Err(
             "no agent to start — pick one, or set the agent command in Settings → Harness".into(),
         );

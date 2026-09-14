@@ -11,6 +11,7 @@
 
 pub mod dropdown;
 pub mod file_icon;
+pub mod launch_pickers;
 pub mod list_overlay;
 pub mod modal_backdrop;
 pub mod path_autocomplete;

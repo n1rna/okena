@@ -11,6 +11,7 @@
 use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
+use crate::views::components::launch_pickers::{LaunchPickers, LaunchPickersEvent};
 use crate::views::components::{SimpleInput, SimpleInputState};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowId, Workspace};
@@ -35,9 +36,10 @@ pub struct NewAgentDialog {
     goal_input: Entity<SimpleInputState>,
     name_input: Entity<SimpleInputState>,
     root_input: Entity<SimpleInputState>,
-    /// Projects the agent is pointed at. Order is the user's click order, which
-    /// is also the order they appear in the brief.
-    selected: Vec<String>,
+    /// Projects the agent is pointed at and the context it is handed, as
+    /// chips. Projects keep the order they were picked in, which is also the
+    /// order they appear in the brief.
+    pickers: Entity<LaunchPickers>,
     /// The configured agent, drawn as the launcher's default.
     default_agent: Option<String>,
     heading: Option<String>,
@@ -76,6 +78,19 @@ impl NewAgentDialog {
             SimpleInputState::new(cx)
                 .placeholder("Optional — the selected project, or your projects root")
         });
+        let pickers = cx.new(|cx| {
+            LaunchPickers::new(
+                "new-agent",
+                client.clone(),
+                workspace.clone(),
+                "Named in the brief with their paths. One project runs the agent inside \
+                 it; several run it above them.",
+                cx,
+            )
+        });
+        // The launch button counts the projects.
+        cx.subscribe(&pickers, |_, _, _: &LaunchPickersEvent, cx| cx.notify())
+            .detach();
         Self {
             client,
             workspace,
@@ -85,7 +100,7 @@ impl NewAgentDialog {
             goal_input,
             name_input,
             root_input,
-            selected: Vec::new(),
+            pickers,
             default_agent,
             heading: prefill.heading,
             task: prefill.task,
@@ -96,29 +111,6 @@ impl NewAgentDialog {
 
     fn close(&mut self, cx: &mut Context<Self>) {
         cx.emit(NewAgentDialogEvent::Close);
-    }
-
-    /// Projects offerable as context: real repos, not sessions or worktrees.
-    ///
-    /// A worktree belongs to work already in flight and a session is an agent,
-    /// so neither is something to point a new agent at.
-    fn candidates(&self, cx: &App) -> Vec<(String, String)> {
-        self.workspace
-            .read(cx)
-            .projects()
-            .iter()
-            .filter(|p| p.worktree_info.is_none() && !p.is_any_agent_session())
-            .map(|p| (p.id.clone(), p.name.clone()))
-            .collect()
-    }
-
-    fn toggle_project(&mut self, id: String, cx: &mut Context<Self>) {
-        if let Some(pos) = self.selected.iter().position(|s| *s == id) {
-            self.selected.remove(pos);
-        } else {
-            self.selected.push(id);
-        }
-        cx.notify();
     }
 
     /// Start the session with `agent_command`; empty opens a plain shell.
@@ -134,7 +126,12 @@ impl NewAgentDialog {
         }
         let name = self.name_input.read(cx).value().trim().to_string();
         let root = self.root_input.read(cx).value().trim().to_string();
-        let project_ids = self.selected.clone();
+        let (project_ids, context) = {
+            let pickers = self.pickers.read(cx);
+            // As the daemon names them: posted straight through the client,
+            // past the dispatcher that would otherwise strip a remote prefix.
+            (pickers.daemon_project_ids(cx), pickers.context_refs(cx))
+        };
         let task = self.task.clone();
         // A session about a task is started from where you were reading the
         // task; jumping into its terminal would lose that place. Its launcher
@@ -166,6 +163,7 @@ impl NewAgentDialog {
                         task,
                         // Free-form: no card started it, so none lists it.
                         purpose: None,
+                        context,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing session result".to_string()))
             })
@@ -240,37 +238,7 @@ impl Render for NewAgentDialog {
             window.focus(&focus_handle, cx);
         }
 
-        let mut projects = h_flex().gap(px(6.0)).flex_wrap();
-        for (id, name) in self.candidates(cx) {
-            let selected = self.selected.contains(&id);
-            projects = projects.child(
-                div()
-                    .id(SharedString::from(format!("new-agent-project-{id}")))
-                    .cursor_pointer()
-                    .px(px(10.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
-                    .when(selected, |d| {
-                        d.bg(with_alpha(t.button_primary_bg, 0.2))
-                            .text_color(rgb(t.text_primary))
-                    })
-                    .when(!selected, |d| {
-                        d.bg(rgb(t.bg_secondary))
-                            .text_color(rgb(t.text_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                    })
-                    .text_size(ui_text_ms(cx))
-                    .child(name)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.toggle_project(id.clone(), cx);
-                        }),
-                    ),
-            );
-        }
-
-        let project_count = self.selected.len();
+        let project_count = self.pickers.read(cx).project_ids(cx).len();
         let launcher = AgentLauncher::new(
             "new-agent-launcher",
             match project_count {
@@ -372,17 +340,8 @@ impl Render for NewAgentDialog {
                                         cx,
                                     )),
                             )
-                            .child(
-                                v_flex()
-                                    .gap(px(6.0))
-                                    .child(self.field_label("Projects", cx))
-                                    .child(projects)
-                                    .child(self.field_hint(
-                                        "Named in the brief with their paths. One project \
-                                         runs the agent inside it; several run it above them.",
-                                        cx,
-                                    )),
-                            )
+                            // Projects, then the context they rank first.
+                            .child(self.pickers.clone())
                             .child(
                                 v_flex()
                                     .gap(px(5.0))

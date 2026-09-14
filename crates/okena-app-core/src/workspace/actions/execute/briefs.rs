@@ -86,6 +86,63 @@ pub(super) fn project_block(
     block(&fragment(heading, root, &Vars::from([("list", list)])))
 }
 
+/// The `context` block of a brief: what was picked at launch, by owner, each
+/// with its kind, title, description and absolute path — the agent reads what
+/// it needs; nothing is inlined.
+///
+/// With `loaded`, skills and agents were installed into the session itself,
+/// so they are named in the `context-installed` line instead of listed. Lines
+/// are structure; the heading and that line are words, so they are partials.
+pub(super) fn context_block(
+    items: &[okena_core::context::ContextItem],
+    loaded: bool,
+    root: Option<&(String, PathBuf)>,
+) -> String {
+    let mut owners: Vec<(&str, Vec<String>)> = Vec::new();
+    let mut named: Vec<String> = Vec::new();
+    for item in items {
+        let kind = item.reference.kind;
+        if loaded && kind.is_installable() {
+            named.push(format!("{} ({})", item.title, kind.label().to_lowercase()));
+            continue;
+        }
+        let what = match &item.map_id {
+            Some(id) => format!("{} `{id}`", kind.label()),
+            None => kind.label().to_string(),
+        };
+        let mut line = format!("  - {what}: {}", item.title);
+        if !item.description.is_empty() {
+            line.push_str(" — ");
+            line.push_str(&item.description);
+        }
+        line.push_str(&format!(" (`{}`)", item.path));
+        match owners
+            .iter_mut()
+            .find(|(owner, _)| *owner == item.owner_name)
+        {
+            Some((_, lines)) => lines.push(line),
+            None => owners.push((&item.owner_name, vec![line])),
+        }
+    }
+    let mut parts = Vec::new();
+    if !owners.is_empty() {
+        let list = owners
+            .iter()
+            .map(|(owner, lines)| format!("- {owner}:\n{}", lines.join("\n")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        parts.push(fragment("context", root, &Vars::from([("list", list)])));
+    }
+    if !named.is_empty() {
+        parts.push(fragment(
+            "context-installed",
+            root,
+            &Vars::from([("list", named.join(", "))]),
+        ));
+    }
+    block(&parts.join("\n\n"))
+}
+
 /// Render one partial against the configured root.
 ///
 /// Where code has to choose between wordings — a store or a folder, who

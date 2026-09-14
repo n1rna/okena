@@ -604,6 +604,22 @@ fn export_file_stem(connection_id: &str, terminal_id: &str) -> String {
 }
 
 /// Strip the `remote:{connection_id}:` prefix from terminal and project IDs before sending to server.
+/// Context refs with any okena-side project id stripped for the daemon.
+fn strip_context_refs(
+    refs: Vec<okena_core::context::ContextRef>,
+    s: impl Fn(&str) -> String,
+) -> Vec<okena_core::context::ContextRef> {
+    use okena_core::context::ContextOwner;
+    refs.into_iter()
+        .map(|mut r| {
+            if let ContextOwner::Project { project_id } = &r.owner {
+                r.owner = ContextOwner::project(s(project_id));
+            }
+            r
+        })
+        .collect()
+}
+
 fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest {
     let s = |id: &str| strip_prefix(id, connection_id);
     match action {
@@ -928,6 +944,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             siblings,
             branches,
             hand_picked,
+            context,
         } => ActionRequest::TaskStartWork {
             provider,
             task_external_id,
@@ -944,6 +961,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             siblings,
             branches,
             hand_picked,
+            context: strip_context_refs(context, s),
         },
         ActionRequest::AgentRegisterAsset {
             project_id,
@@ -1054,6 +1072,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             task_draft,
             task,
             purpose,
+            context,
         } => ActionRequest::AgentStartSession {
             goal,
             name,
@@ -1063,6 +1082,30 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             task_draft,
             task,
             purpose,
+            context: strip_context_refs(context, s),
+        },
+        // Launch context: chosen projects, a context ref's owning project and
+        // a terminal are okena-side ids. Store root keys and paths are the
+        // daemon's own and cross unchanged.
+        ActionRequest::ContextSearch {
+            query,
+            project_ids,
+            terminal_id,
+            limit,
+        } => ActionRequest::ContextSearch {
+            query,
+            project_ids: project_ids.iter().map(|id| s(id)).collect(),
+            terminal_id: terminal_id.as_deref().map(s),
+            limit,
+        },
+        ActionRequest::ContextHit { item } => ActionRequest::ContextHit {
+            item: strip_context_refs(vec![item.clone()], s)
+                .pop()
+                .unwrap_or(item),
+        },
+        ActionRequest::ContextRead { terminal_id, path } => ActionRequest::ContextRead {
+            terminal_id: s(&terminal_id),
+            path,
         },
         // Spec actions carry no ids — root keys and paths are the daemon's
         // own, discovered and checked on its side.
@@ -1103,11 +1146,13 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             idea,
             name,
             agent_command,
+            context,
         } => ActionRequest::SpecDraftChange {
             root,
             idea,
             name,
             agent_command,
+            context: strip_context_refs(context, s),
         },
         passthrough @ (ActionRequest::SpecStoreFetch { .. }
         | ActionRequest::SpecStorePull { .. }
@@ -1116,8 +1161,20 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::SpecFileCreate { .. }
         | ActionRequest::SpecFolderCreate { .. }
         | ActionRequest::SpecFileRename { .. }
-        | ActionRequest::SpecFileDelete { .. }
-        | ActionRequest::SpecRefineDocument { .. }) => passthrough,
+        | ActionRequest::SpecFileDelete { .. }) => passthrough,
+        ActionRequest::SpecRefineDocument {
+            root,
+            path,
+            request,
+            agent_command,
+            context,
+        } => ActionRequest::SpecRefineDocument {
+            root,
+            path,
+            request,
+            agent_command,
+            context: strip_context_refs(context, s),
+        },
         // Knowledge actions likewise carry only root keys the daemon
         // discovered, paths and URLs.
         passthrough @ (ActionRequest::KnowledgeStores
@@ -1135,9 +1192,31 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::KnowledgeStoreFetch { .. }
         | ActionRequest::KnowledgeStorePull { .. }
         | ActionRequest::KnowledgeStoreCommit { .. }
-        | ActionRequest::KnowledgeStorePush { .. }
-        | ActionRequest::KnowledgeDraft { .. }
-        | ActionRequest::KnowledgeRefineDocument { .. }) => passthrough,
+        | ActionRequest::KnowledgeStorePush { .. }) => passthrough,
+        ActionRequest::KnowledgeRefineDocument {
+            root,
+            path,
+            request,
+            agent_command,
+            context,
+        } => ActionRequest::KnowledgeRefineDocument {
+            root,
+            path,
+            request,
+            agent_command,
+            context: strip_context_refs(context, s),
+        },
+        ActionRequest::KnowledgeDraft {
+            root,
+            request,
+            agent_command,
+            context,
+        } => ActionRequest::KnowledgeDraft {
+            root,
+            request,
+            agent_command,
+            context: strip_context_refs(context, s),
+        },
         // Project ids are client-side and must be stripped for the daemon.
         ActionRequest::ProjectScan {
             project_id,

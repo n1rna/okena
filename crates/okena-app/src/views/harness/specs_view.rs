@@ -252,10 +252,12 @@ impl HarnessPane {
         let agent_command = Some(agent_command);
         let name = (!name.is_empty()).then_some(name);
         let root = self.draft_target();
+        let context = super::context_dialog::picked_context(self.specs.pickers.as_ref(), cx);
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 client
                     .post_action(ActionRequest::SpecDraftChange {
+                        context,
                         root,
                         idea,
                         name,
@@ -283,6 +285,10 @@ impl HarnessPane {
                             for input in [&this.specs.idea_input, &this.specs.name_input] {
                                 input.update(cx, |i, cx| i.set_value("", cx));
                             }
+                            super::context_dialog::clear_picked_context(
+                                this.specs.pickers.clone(),
+                                cx,
+                            );
                             // Open the root it went into, with the change
                             // expanded: the user just made it.
                             if let Some(root) = v.get("root").and_then(|r| r.as_str()) {
@@ -1113,6 +1119,13 @@ impl HarnessPane {
         ))
         .launch_alongside_sessions()
         .busy(drafting.then_some("Starting…"))
+        // Projects and context are picked in a dialog, not on the form.
+        .on_configure(
+            "Choose projects and context…",
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                this.open_context_dialog(super::context_dialog::ContextTarget::SpecDraft, cx);
+            }),
+        )
         .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
             this.draft_spec_change(command.to_string(), cx);
         }))
