@@ -49,7 +49,10 @@ pub use clone::{
     CloneProgress, clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,
     parse_clone_progress, start_clone_repository, validate_clone_url,
 };
-pub use github::{github_repo_key, github_repo_slug, has_github_remote};
+pub use github::{
+    GithubRepo, github_repo, github_repo_key, has_github_remote, normalize_github_host,
+    set_enterprise_hosts,
+};
 pub use paths::{
     compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path,
     project_path_in_worktree, resolve_git_root_and_subdir,

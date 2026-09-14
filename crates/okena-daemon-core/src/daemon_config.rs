@@ -152,7 +152,17 @@ impl ConfigBackend for DaemonConfig {
         // Persist to disk first; only replace the held value on success so a
         // save failure leaves the in-memory settings unchanged.
         (self.persist_settings)(new)?;
-        *self.settings.lock() = new.clone();
+        let hosts_changed = {
+            let mut held = self.settings.lock();
+            let changed = held.github_enterprise_hosts != new.github_enterprise_hosts;
+            *held = new.clone();
+            changed
+        };
+        // Only on a change: the host list is process-wide, and a store that
+        // leaves it alone has nothing to tell the GitHub poller.
+        if hosts_changed {
+            okena_git::repository::set_enterprise_hosts(&new.github_enterprise_hosts);
+        }
         self.refresh_palette();
         Ok(())
     }
@@ -205,6 +215,44 @@ mod tests {
 
     fn config_with(settings: AppSettings) -> DaemonConfig {
         DaemonConfig::new(Arc::new(Mutex::new(settings)))
+    }
+
+    #[test]
+    fn a_github_host_added_in_settings_is_polled_until_it_is_removed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        for args in [
+            &["init", "-q"][..],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://ghe.settings-only.example/team/app.git",
+            ],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .status()
+                .expect("git runs");
+            assert!(status.success());
+        }
+        let settings = Arc::new(Mutex::new(default_settings()));
+        let mut cfg = DaemonConfig::with_persistence(settings.clone(), Arc::new(|_| Ok(())));
+        assert!(!okena_git::repository::has_github_remote(repo));
+
+        assert!(matches!(
+            cfg.set_settings(json!({"github_enterprise_hosts": ["ghe.settings-only.example"]})),
+            CommandResult::Ok(_)
+        ));
+        assert!(okena_git::repository::has_github_remote(repo));
+
+        assert!(matches!(
+            cfg.set_settings(json!({"github_enterprise_hosts": []})),
+            CommandResult::Ok(_)
+        ));
+        assert!(settings.lock().github_enterprise_hosts.is_empty());
+        assert!(!okena_git::repository::has_github_remote(repo));
     }
 
     #[test]

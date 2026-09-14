@@ -142,6 +142,26 @@ If the file contains invalid JSON, Okena recovers as many fields as possible and
 | `codex_integration` | bool | `false` | Show Codex status indicator in the status bar |
 | `auto_update_enabled` | bool | `true` | Check for updates automatically |
 
+#### GitHub
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `github_enterprise_hosts` | string[] | `[]` | GitHub Enterprise hosts to treat as GitHub (Settings → GitHub), e.g. `github.acme.corp`. Entries may be bare hosts or URLs. |
+
+PR, CI and readiness status work for repos on any GitHub host: `github.com`, a
+GHE.com tenant (`*.ghe.com`), a host gh is logged into (gh's `hosts.yml`),
+`GH_HOST`, or a host in `github_enterprise_hosts`. Repos on other hosts are
+skipped without a request. Endpoints and tokens follow gh:
+
+| Host | API | Token env vars |
+|------|-----|----------------|
+| `github.com` | `https://api.github.com/` | `GH_TOKEN`, `GITHUB_TOKEN` |
+| `<tenant>.ghe.com` | `https://api.<tenant>.ghe.com/` | `GH_TOKEN`, `GITHUB_TOKEN` |
+| GHE Server | `https://<host>/api/v3/`, `/api/graphql` | `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN` |
+
+Without an env var the token comes from `gh auth token --hostname <host>`. A
+repo whose host has no token shows no PR or CI.
+
 #### Claude Extension Settings
 
 The Claude extension reads credentials from `~/.claude/.credentials.json` by default. If you maintain multiple Claude Code accounts (for example, a personal account and a work account in a different directory), you can override this via `extension_settings`:

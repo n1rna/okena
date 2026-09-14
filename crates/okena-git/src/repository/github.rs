@@ -5,13 +5,13 @@
 //! shared [`okena_transport::http`] bus so connections are reused.
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use gix::bstr::ByteSlice;
 use okena_core::process::{command, safe_output_with_timeout};
 use okena_transport::http::{self, HttpRequest, HttpResponse};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
 
 /// Per-request cap, matching the old per-`gh`-invocation timeout.
@@ -24,19 +24,24 @@ const DEFAULT_HOST: &str = "github.com";
 
 /// A GitHub repository: `owner/name` on a normalised `host`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GithubRepo {
+pub struct GithubRepo {
     pub host: String,
     pub owner: String,
     pub name: String,
 }
 
-/// Whether the repo has any remote pointing at github.com (https or ssh).
+/// Whether the repo has any remote on a known GitHub host (https or ssh) —
+/// see [`KnownHosts`].
 ///
 /// Used to gate PR/CI polling: repos with no GitHub remote (local-only,
 /// GitLab, Bitbucket, …) can never have GitHub PRs/checks, so every lookup
 /// for them just fails after a round-trip. Skipping them is the bulk of the
 /// poller's fan-out on a machine with many non-GitHub projects.
 pub fn has_github_remote(path: &Path) -> bool {
+    has_remote_on(path, &KnownHosts::current())
+}
+
+fn has_remote_on(path: &Path, known: &KnownHosts) -> bool {
     let Some(repo) = crate::gix_helpers::open(path) else {
         return false;
     };
@@ -47,7 +52,7 @@ pub fn has_github_remote(path: &Path) -> bool {
         };
         for dir in [gix::remote::Direction::Fetch, gix::remote::Direction::Push] {
             if let Some(host) = remote.url(dir).and_then(|u| u.host())
-                && (host == "github.com" || host.ends_with(".github.com"))
+                && known.contains(&normalize_github_host(host))
             {
                 return true;
             }
@@ -56,14 +61,169 @@ pub fn has_github_remote(path: &Path) -> bool {
     false
 }
 
-/// Lowercase, with any `*.github.com` alias folded to `github.com` — gh's
-/// `NormalizeHostname`.
-fn normalize_host(host: &str) -> String {
-    let host = host.to_ascii_lowercase();
+/// Hosts listed in Settings as GitHub Enterprise hosts, normalised. The daemon
+/// installs them with [`set_enterprise_hosts`] whenever settings are stored.
+static CONFIGURED_HOSTS: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+/// Replace the GitHub Enterprise hosts taken from Settings. Entries may be
+/// bare hosts or URLs; anything past the host is ignored.
+pub fn set_enterprise_hosts(hosts: &[String]) {
+    let mut normalized: Vec<String> = Vec::new();
+    for host in hosts.iter().filter_map(|entry| host_from_setting(entry)) {
+        if !normalized.contains(&host) {
+            normalized.push(host);
+        }
+    }
+    *CONFIGURED_HOSTS.write() = normalized;
+}
+
+/// `github.acme.corp` from `github.acme.corp`, `https://github.acme.corp/`
+/// or `git@github.acme.corp`.
+fn host_from_setting(entry: &str) -> Option<String> {
+    let entry = entry.trim();
+    let rest = entry.split_once("://").map_or(entry, |(_, rest)| rest);
+    let authority = rest.split(['/', ':']).next()?;
+    let host = authority.rsplit('@').next()?;
+    (!host.is_empty()).then(|| normalize_github_host(host))
+}
+
+/// The hosts okena treats as GitHub: github.com, any GHE.com tenant, the hosts
+/// gh is logged into, `GH_HOST`, and the enterprise hosts listed in Settings.
+#[derive(Debug, Default)]
+struct KnownHosts {
+    gh_host: Option<String>,
+    logged_in: Vec<String>,
+    configured: Vec<String>,
+}
+
+impl KnownHosts {
+    fn current() -> Self {
+        Self {
+            gh_host: std::env::var("GH_HOST")
+                .ok()
+                .filter(|host| !host.trim().is_empty())
+                .map(|host| normalize_github_host(&host)),
+            logged_in: gh_logged_in_hosts(),
+            configured: CONFIGURED_HOSTS.read().clone(),
+        }
+    }
+
+    /// Whether the normalised `host` is a GitHub host.
+    fn contains(&self, host: &str) -> bool {
+        matches!(host_kind(host), HostKind::Dotcom | HostKind::Tenancy)
+            || self.gh_host.as_deref() == Some(host)
+            || self.logged_in.iter().any(|known| known == host)
+            || self.configured.iter().any(|known| known == host)
+    }
+}
+
+/// gh's config directory, per go-gh's `config.ConfigDir`: `GH_CONFIG_DIR`,
+/// else `$XDG_CONFIG_HOME/gh`, else `%AppData%/GitHub CLI` on Windows, else
+/// `~/.config/gh`.
+fn gh_config_dir(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let var = |name: &str| var(name).filter(|value| !value.is_empty());
+    if let Some(dir) = var("GH_CONFIG_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    if let Some(dir) = var("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(dir).join("gh"));
+    }
+    if cfg!(windows)
+        && let Some(dir) = var("AppData")
+    {
+        return Some(PathBuf::from(dir).join("GitHub CLI"));
+    }
+    dirs::home_dir().map(|home| home.join(".config").join("gh"))
+}
+
+/// The hosts a gh `hosts.yml` lists: its top-level keys.
+fn parse_gh_hosts(yaml: &str) -> Vec<String> {
+    yaml.lines()
+        .filter(|line| !line.starts_with([' ', '\t', '#', '-']))
+        .filter_map(|line| line.split_once(':').map(|(key, _)| key))
+        .map(|key| key.trim().trim_matches(['"', '\'']))
+        .filter(|key| !key.is_empty())
+        .map(normalize_github_host)
+        .collect()
+}
+
+/// `hosts.yml` as last read, by path and modification time.
+struct GhHostsFile {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    hosts: Vec<String>,
+}
+
+static GH_HOSTS: Mutex<Option<GhHostsFile>> = Mutex::new(None);
+
+/// The hosts gh is logged into, from its `hosts.yml` — re-read only when the
+/// file changes, so a `gh auth login --hostname` is picked up.
+fn gh_logged_in_hosts() -> Vec<String> {
+    let Some(path) = gh_config_dir(|name| std::env::var(name).ok()).map(|dir| dir.join("hosts.yml"))
+    else {
+        return Vec::new();
+    };
+    let modified = std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .ok();
+    let mut cache = GH_HOSTS.lock();
+    if let Some(file) = cache.as_ref()
+        && file.path == path
+        && file.modified == modified
+    {
+        return file.hosts.clone();
+    }
+    let hosts = modified
+        .and_then(|_| std::fs::read_to_string(&path).ok())
+        .map(|yaml| parse_gh_hosts(&yaml))
+        .unwrap_or_default();
+    *cache = Some(GhHostsFile {
+        path,
+        modified,
+        hosts: hosts.clone(),
+    });
+    hosts
+}
+
+/// Suffix of the GHE.com tenancy hosts gh knows, such as `acme.ghe.com`.
+const TENANCY_SUFFIX: &str = ".ghe.com";
+
+/// Lowercase, with any `*.github.com` alias folded to `github.com` and any
+/// subdomain of a GHE.com tenant (`api.acme.ghe.com`) folded to the tenant —
+/// gh's `NormalizeHostname`.
+pub fn normalize_github_host(host: &str) -> String {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if host.ends_with(".github.com") {
-        DEFAULT_HOST.to_string()
+        return DEFAULT_HOST.to_string();
+    }
+    if let Some(labels) = host.strip_suffix(TENANCY_SUFFIX)
+        && !labels.is_empty()
+    {
+        let tenant = labels.rsplit('.').next().unwrap_or(labels);
+        return format!("{tenant}{TENANCY_SUFFIX}");
+    }
+    host
+}
+
+/// How gh talks to a host: its API endpoints and which token env vars apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostKind {
+    /// `github.com`.
+    Dotcom,
+    /// A GHE.com tenant, `<tenant>.ghe.com` — gh's "tenancy" host.
+    Tenancy,
+    /// Self-hosted GitHub Enterprise Server.
+    Server,
+}
+
+/// The kind of a normalised host.
+fn host_kind(host: &str) -> HostKind {
+    if host == DEFAULT_HOST {
+        HostKind::Dotcom
+    } else if host.len() > TENANCY_SUFFIX.len() && host.ends_with(TENANCY_SUFFIX) {
+        HostKind::Tenancy
     } else {
-        host
+        HostKind::Server
     }
 }
 
@@ -78,7 +238,7 @@ fn repo_from_url(url: &gix::Url) -> Option<GithubRepo> {
     let name = segments.next().filter(|s| !s.is_empty())?;
     let name = name.strip_suffix(".git").unwrap_or(name);
     Some(GithubRepo {
-        host: normalize_host(host),
+        host: normalize_github_host(host),
         owner: owner.to_string(),
         name: name.to_string(),
     })
@@ -153,13 +313,16 @@ fn repo_from_full_name(full_name: &str, host: &str) -> Option<GithubRepo> {
     })
 }
 
-/// The base repository: only remotes on `host` count, a `gh repo set-default`
-/// choice wins, else the highest-priority remote name by
+/// The base repository: only remotes on a GitHub host count, a `gh repo
+/// set-default` choice wins, else the highest-priority remote name by
 /// [`remote_name_score`] (ties keep `git remote` order).
-fn select_base_repo(candidates: Vec<RemoteCandidate>, host: &str) -> Option<GithubRepo> {
+fn select_base_repo(
+    candidates: Vec<RemoteCandidate>,
+    is_github_host: impl Fn(&str) -> bool,
+) -> Option<GithubRepo> {
     let mut candidates: Vec<RemoteCandidate> = candidates
         .into_iter()
-        .filter(|candidate| candidate.repo.host == host)
+        .filter(|candidate| is_github_host(&candidate.repo.host))
         .collect();
     candidates.sort_by_key(|candidate| std::cmp::Reverse(remote_name_score(&candidate.name)));
     for candidate in &candidates {
@@ -175,36 +338,35 @@ fn select_base_repo(candidates: Vec<RemoteCandidate>, host: &str) -> Option<Gith
         .map(|candidate| candidate.repo)
 }
 
-/// The one host gh considers remotes on: `GH_HOST` when set, else github.com.
-fn host_filter() -> String {
-    std::env::var("GH_HOST")
-        .ok()
-        .map(|host| host.trim().to_string())
-        .filter(|host| !host.is_empty())
-        .map(|host| normalize_host(&host))
-        .unwrap_or_else(|| DEFAULT_HOST.to_string())
-}
-
-/// The GitHub repository `gh` would run against for this checkout.
+/// The GitHub repository `gh` would run against for this checkout, among
+/// remotes on any known GitHub host.
 pub(crate) fn resolve_base_repo(path: &Path) -> Option<GithubRepo> {
     let repo = crate::gix_helpers::open(path)?;
-    select_base_repo(remote_candidates(&repo), &host_filter())
+    let known = KnownHosts::current();
+    select_base_repo(remote_candidates(&repo), |host| known.contains(host))
 }
 
-/// `owner/name` of the GitHub repository `gh` would run against for this
-/// checkout — the repository its pull request links name.
-pub fn github_repo_slug(path: &Path) -> Option<(String, String)> {
-    resolve_base_repo(path).map(|repo| (repo.owner, repo.name))
+/// The GitHub repository `gh` would run against for this checkout — the
+/// repository its pull request links name, host included.
+pub fn github_repo(path: &Path) -> Option<GithubRepo> {
+    resolve_base_repo(path)
 }
 
-/// `owner/name`, lowercased, of the github.com repository `gh` would run
-/// against for this checkout — the key a repository's open pull requests are
-/// fetched and shared under, so every checkout of it asks once. `None` for a
-/// checkout whose base repository is not on github.com.
+/// The key, lowercased, of the GitHub repository `gh` would run against for
+/// this checkout — the key a repository's open pull requests are fetched and
+/// shared under, so every checkout of it asks once. `owner/name` on
+/// github.com, `host/owner/name` on any other host.
 pub fn github_repo_key(path: &Path) -> Option<String> {
-    let repo = resolve_base_repo(path)?;
-    (repo.host == DEFAULT_HOST)
-        .then(|| format!("{}/{}", repo.owner, repo.name).to_ascii_lowercase())
+    resolve_base_repo(path).map(|repo| repo_key(&repo))
+}
+
+fn repo_key(repo: &GithubRepo) -> String {
+    let key = if repo.host == DEFAULT_HOST {
+        format!("{}/{}", repo.owner, repo.name)
+    } else {
+        format!("{}/{}/{}", repo.host, repo.owner, repo.name)
+    };
+    key.to_ascii_lowercase()
 }
 
 /// The GitHub repository behind `origin`, where this checkout's own branches
@@ -228,14 +390,19 @@ struct TokenEntry {
 /// instead of one per query.
 static TOKENS: Mutex<Option<HashMap<String, TokenEntry>>> = Mutex::new(None);
 
+/// The env vars gh reads a token for `host` from, in order: gh's
+/// `TokenFromEnvOrConfig`, where only a GHE Server host is "enterprise" — a
+/// GHE.com tenant reads the same ones as github.com.
+fn token_env_vars(host: &str) -> [&'static str; 2] {
+    match host_kind(host) {
+        HostKind::Dotcom | HostKind::Tenancy => ["GH_TOKEN", "GITHUB_TOKEN"],
+        HostKind::Server => ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"],
+    }
+}
+
 /// The env override gh itself honours before touching its keyring.
-fn env_token(host: &str) -> Option<String> {
-    let names = if host == DEFAULT_HOST {
-        ["GH_TOKEN", "GITHUB_TOKEN"]
-    } else {
-        ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
-    };
-    names.iter().find_map(|name| {
+pub(crate) fn env_token(host: &str) -> Option<String> {
+    token_env_vars(host).iter().find_map(|name| {
         std::env::var(name)
             .ok()
             .map(|value| value.trim().to_string())
@@ -293,27 +460,39 @@ fn token_for(host: &str) -> Option<String> {
     cached_token(cache, host, || gh_cli_token(host))
 }
 
+/// Put `token` in the cache for `host` as if `gh auth token` had answered it,
+/// so a test neither spawns gh nor depends on the machine's logins.
+#[cfg(test)]
+pub(crate) fn seed_token(host: &str, token: Option<&str>) {
+    TOKENS.lock().get_or_insert_with(HashMap::new).insert(
+        host.to_string(),
+        TokenEntry {
+            token: token.map(String::from),
+            fetched_at: Instant::now(),
+        },
+    );
+}
+
 fn forget_token(host: &str) {
     if let Some(cache) = TOKENS.lock().as_mut() {
         cache.remove(host);
     }
 }
 
-/// gh's `RESTPrefix`: api.github.com for github.com, `/api/v3/` elsewhere.
+/// gh's `RESTPrefix`: `api.<host>/` for github.com and GHE.com tenants,
+/// `<host>/api/v3/` for GHE Server.
 fn rest_prefix(host: &str) -> String {
-    if host == DEFAULT_HOST {
-        "https://api.github.com/".to_string()
-    } else {
-        format!("https://{host}/api/v3/")
+    match host_kind(host) {
+        HostKind::Dotcom | HostKind::Tenancy => format!("https://api.{host}/"),
+        HostKind::Server => format!("https://{host}/api/v3/"),
     }
 }
 
 /// gh's `GraphQLEndpoint`.
 fn graphql_endpoint(host: &str) -> String {
-    if host == DEFAULT_HOST {
-        "https://api.github.com/graphql".to_string()
-    } else {
-        format!("https://{host}/api/graphql")
+    match host_kind(host) {
+        HostKind::Dotcom | HostKind::Tenancy => format!("https://api.{host}/graphql"),
+        HostKind::Server => format!("https://{host}/api/graphql"),
     }
 }
 
@@ -571,7 +750,7 @@ pub(crate) mod tests {
             candidate("backup", repo("github.com", "x", "y"), None),
         ];
         assert_eq!(
-            select_base_repo(candidates, "github.com"),
+            select_base_repo(candidates, only("github.com")),
             Some(repo("github.com", "me", "fork"))
         );
 
@@ -581,7 +760,7 @@ pub(crate) mod tests {
             candidate("upstream", repo("github.com", "org", "main"), None),
         ];
         assert_eq!(
-            select_base_repo(candidates, "github.com"),
+            select_base_repo(candidates, only("github.com")),
             Some(repo("github.com", "org", "main"))
         );
 
@@ -591,7 +770,7 @@ pub(crate) mod tests {
             candidate("beta", repo("github.com", "b", "b"), None),
         ];
         assert_eq!(
-            select_base_repo(candidates, "github.com"),
+            select_base_repo(candidates, only("github.com")),
             Some(repo("github.com", "a", "a"))
         );
     }
@@ -603,7 +782,7 @@ pub(crate) mod tests {
             candidate("upstream", repo("github.com", "org", "main"), None),
         ];
         assert_eq!(
-            select_base_repo(candidates, "github.com"),
+            select_base_repo(candidates, only("github.com")),
             Some(repo("github.com", "me", "fork"))
         );
 
@@ -613,7 +792,7 @@ pub(crate) mod tests {
             Some("other/target"),
         )];
         assert_eq!(
-            select_base_repo(candidates, "github.com"),
+            select_base_repo(candidates, only("github.com")),
             Some(repo("github.com", "other", "target"))
         );
 
@@ -623,7 +802,7 @@ pub(crate) mod tests {
             Some("github.com/other/target"),
         )];
         assert_eq!(
-            select_base_repo(candidates, "github.com"),
+            select_base_repo(candidates, only("github.com")),
             Some(repo("github.com", "other", "target"))
         );
     }
@@ -635,14 +814,14 @@ pub(crate) mod tests {
             candidate("origin", repo("github.com", "me", "fork"), None),
         ];
         assert_eq!(
-            select_base_repo(candidates.clone(), "github.com"),
+            select_base_repo(candidates.clone(), only("github.com")),
             Some(repo("github.com", "me", "fork"))
         );
         assert_eq!(
-            select_base_repo(candidates, "ghe.example.com"),
+            select_base_repo(candidates, only("ghe.example.com")),
             Some(repo("ghe.example.com", "org", "main"))
         );
-        assert_eq!(select_base_repo(Vec::new(), "github.com"), None);
+        assert_eq!(select_base_repo(Vec::new(), only("github.com")), None);
     }
 
     #[test]
@@ -665,7 +844,7 @@ pub(crate) mod tests {
         );
         let candidates = remote_candidates(&gix::open(&path).expect("repo"));
         assert_eq!(
-            select_base_repo(candidates, "github.com"),
+            select_base_repo(candidates, only("github.com")),
             Some(repo("github.com", "me", "fork"))
         );
 
@@ -674,8 +853,179 @@ pub(crate) mod tests {
         // Opened directly: the shared handle cache would hide the config edit.
         let candidates = remote_candidates(&gix::open(&path).expect("repo"));
         assert_eq!(
-            select_base_repo(candidates, "github.com"),
+            select_base_repo(candidates, only("github.com")),
             Some(repo("github.com", "org", "main"))
+        );
+    }
+
+    fn only(host: &str) -> impl Fn(&str) -> bool + '_ {
+        move |candidate| candidate == host
+    }
+
+    /// gh's `hosts.yml` as `gh auth login --hostname` leaves it.
+    const HOSTS_YML: &str = "github.com:\n    git_protocol: ssh\n    users:\n        me:\n    user: me\nGHE.Internal.Example:\n    users:\n        me:\n    user: me\n";
+
+    fn known_hosts() -> KnownHosts {
+        KnownHosts {
+            gh_host: Some("gh-host.example".into()),
+            logged_in: parse_gh_hosts(HOSTS_YML),
+            configured: vec!["settings.example".into()],
+        }
+    }
+
+    #[test]
+    fn github_hosts_are_github_com_ghe_tenants_gh_logins_gh_host_and_settings() {
+        let known = known_hosts();
+        for host in [
+            "github.com",
+            "acme.ghe.com",
+            "ghe.internal.example",
+            "settings.example",
+            "gh-host.example",
+        ] {
+            assert!(known.contains(host), "{host} should be a GitHub host");
+        }
+        for host in ["gitlab.com", "bitbucket.org", "ghe.com", "example.com"] {
+            assert!(!known.contains(host), "{host} should not be a GitHub host");
+        }
+        // Nothing but the built-in rules without gh logins, GH_HOST or Settings.
+        let bare = KnownHosts::default();
+        assert!(bare.contains("github.com") && bare.contains("acme.ghe.com"));
+        assert!(!bare.contains("settings.example") && !bare.contains("gitlab.com"));
+    }
+
+    #[test]
+    fn gh_hosts_file_lists_its_top_level_hosts() {
+        assert_eq!(
+            parse_gh_hosts(HOSTS_YML),
+            ["github.com", "ghe.internal.example"]
+        );
+        assert_eq!(
+            parse_gh_hosts("# comment\n\"quoted.example\":\n  user: me\n"),
+            ["quoted.example"]
+        );
+        assert!(parse_gh_hosts("").is_empty());
+    }
+
+    #[test]
+    fn gh_config_dir_follows_go_gh() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            }
+        };
+        assert_eq!(
+            gh_config_dir(env(&[("GH_CONFIG_DIR", "/gh"), ("XDG_CONFIG_HOME", "/xdg")])),
+            Some(PathBuf::from("/gh"))
+        );
+        assert_eq!(
+            gh_config_dir(env(&[("GH_CONFIG_DIR", ""), ("XDG_CONFIG_HOME", "/xdg")])),
+            Some(PathBuf::from("/xdg").join("gh"))
+        );
+        if !cfg!(windows) {
+            assert_eq!(
+                gh_config_dir(env(&[])),
+                dirs::home_dir().map(|home| home.join(".config").join("gh"))
+            );
+        }
+    }
+
+    #[test]
+    fn settings_entries_become_hosts() {
+        for entry in [
+            "github.acme.corp",
+            " GitHub.Acme.Corp ",
+            "https://github.acme.corp/",
+            "https://github.acme.corp/team/app",
+            "git@github.acme.corp:team/app.git",
+            "github.acme.corp:8443",
+        ] {
+            assert_eq!(
+                host_from_setting(entry).as_deref(),
+                Some("github.acme.corp"),
+                "{entry}"
+            );
+        }
+        assert_eq!(host_from_setting("  "), None);
+    }
+
+    #[test]
+    fn enterprise_remotes_resolve_in_https_ssh_and_scp_form() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        let known = known_hosts();
+        for (url, host) in [
+            ("https://settings.example/team/app.git", "settings.example"),
+            ("ssh://git@settings.example/team/app.git", "settings.example"),
+            ("git@settings.example:team/app.git", "settings.example"),
+            ("git@acme.ghe.com:team/app.git", "acme.ghe.com"),
+            ("https://ghe.internal.example/team/app", "ghe.internal.example"),
+        ] {
+            let (_tmp, path) = init_temp_repo();
+            git_in(&path, &["remote", "add", "origin", url]);
+            let candidates = remote_candidates(&gix::open(&path).expect("repo"));
+            assert_eq!(
+                select_base_repo(candidates, |h| known.contains(h)),
+                Some(repo(host, "team", "app")),
+                "{url}"
+            );
+            assert!(has_remote_on(&path, &known), "{url}");
+            // Without gh logins or Settings only the GHE.com tenant is known.
+            assert_eq!(
+                has_remote_on(&path, &KnownHosts::default()),
+                host == "acme.ghe.com",
+                "{url}"
+            );
+        }
+
+        // GitLab and unknown hosts stay out of both the gate and resolution.
+        let (_tmp, path) = init_temp_repo();
+        git_in(&path, &["remote", "add", "origin", "git@gitlab.com:team/app.git"]);
+        git_in(&path, &["remote", "add", "upstream", "https://code.example/team/app.git"]);
+        assert!(!has_remote_on(&path, &known));
+        let candidates = remote_candidates(&gix::open(&path).expect("repo"));
+        assert_eq!(select_base_repo(candidates, |h| known.contains(h)), None);
+    }
+
+    #[test]
+    fn a_host_added_in_settings_is_gated_in_and_removing_it_gates_it_out() {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        let _guard = mock_guard();
+        let (_tmp, path) = init_temp_repo();
+        git_in(
+            &path,
+            &["remote", "add", "origin", "https://only-in-settings.example/team/app.git"],
+        );
+        set_enterprise_hosts(&[]);
+        assert!(!has_github_remote(&path));
+        assert_eq!(resolve_base_repo(&path), None);
+
+        set_enterprise_hosts(&["https://Only-In-Settings.example/".into()]);
+        assert!(has_github_remote(&path));
+        assert_eq!(
+            resolve_base_repo(&path),
+            Some(repo("only-in-settings.example", "team", "app"))
+        );
+
+        set_enterprise_hosts(&[]);
+        assert!(!has_github_remote(&path));
+        assert_eq!(resolve_base_repo(&path), None);
+    }
+
+    #[test]
+    fn repo_keys_keep_github_com_short_and_name_every_other_host() {
+        assert_eq!(repo_key(&repo("github.com", "N1rna", "Okena")), "n1rna/okena");
+        assert_eq!(
+            repo_key(&repo("acme.ghe.com", "N1rna", "Okena")),
+            "acme.ghe.com/n1rna/okena"
+        );
+        assert_ne!(
+            repo_key(&repo("github.acme.corp", "o", "r")),
+            repo_key(&repo("github.com", "o", "r"))
         );
     }
 
@@ -694,8 +1044,43 @@ pub(crate) mod tests {
             graphql_endpoint("ghe.example.com"),
             "https://ghe.example.com/api/graphql"
         );
-        assert_eq!(normalize_host("SSH.GitHub.com"), "github.com");
-        assert_eq!(normalize_host("GHE.Example.com"), "ghe.example.com");
+        assert_eq!(normalize_github_host("SSH.GitHub.com"), "github.com");
+        assert_eq!(normalize_github_host("GHE.Example.com"), "ghe.example.com");
+    }
+
+    #[test]
+    fn each_kind_of_host_gets_gh_endpoints_and_token_env_vars() {
+        // github.com
+        assert_eq!(host_kind("github.com"), HostKind::Dotcom);
+        assert_eq!(token_env_vars("github.com"), ["GH_TOKEN", "GITHUB_TOKEN"]);
+
+        // A GHE.com tenant: its own `api.` host, and gh's tenancy env vars.
+        assert_eq!(host_kind("acme.ghe.com"), HostKind::Tenancy);
+        assert_eq!(rest_prefix("acme.ghe.com"), "https://api.acme.ghe.com/");
+        assert_eq!(
+            graphql_endpoint("acme.ghe.com"),
+            "https://api.acme.ghe.com/graphql"
+        );
+        assert_eq!(token_env_vars("acme.ghe.com"), ["GH_TOKEN", "GITHUB_TOKEN"]);
+        assert_eq!(normalize_github_host("API.Acme.GHE.com"), "acme.ghe.com");
+        assert_eq!(normalize_github_host("acme.ghe.com"), "acme.ghe.com");
+
+        // GHE Server.
+        assert_eq!(host_kind("github.acme.corp"), HostKind::Server);
+        assert_eq!(
+            rest_prefix("github.acme.corp"),
+            "https://github.acme.corp/api/v3/"
+        );
+        assert_eq!(
+            graphql_endpoint("github.acme.corp"),
+            "https://github.acme.corp/api/graphql"
+        );
+        assert_eq!(
+            token_env_vars("github.acme.corp"),
+            ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+        );
+        // `ghe.com` itself is no tenant.
+        assert_eq!(host_kind("ghe.com"), HostKind::Server);
     }
 
     #[test]

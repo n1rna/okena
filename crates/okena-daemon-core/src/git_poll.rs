@@ -558,9 +558,7 @@ fn poll_one_project(poll: &ProjectPoll) -> ProjectOutcome {
 fn lookup_registered_pr(target: &RegisteredTarget) -> ProjectOutcome {
     let link = &target.link;
     let checkout = target.candidates.iter().find(|(_, path)| {
-        git::repository::github_repo_slug(Path::new(path)).is_some_and(|(owner, name)| {
-            owner.eq_ignore_ascii_case(&link.owner) && name.eq_ignore_ascii_case(&link.repo)
-        })
+        git::repository::github_repo(Path::new(path)).is_some_and(|repo| link.names(&repo))
     });
     let Some((project, repo_path)) = checkout else {
         // No checkout here is in that repository: nothing to ask with, and so
@@ -1170,16 +1168,31 @@ const REGISTERED_PR_KEY_PREFIX: &str = "registered-pr:";
 /// A pull request link, `https://<host>/<owner>/<repo>/pull/<number>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PrLink {
+    /// Normalised as a remote's host is, so `www.github.com` is `github.com`.
+    host: String,
     owner: String,
     repo: String,
     number: u32,
+}
+
+impl PrLink {
+    /// Whether this link names a PR of `repo`: same host, same `owner/name`.
+    fn names(&self, repo: &git::repository::GithubRepo) -> bool {
+        repo.host == self.host
+            && repo.owner.eq_ignore_ascii_case(&self.owner)
+            && repo.name.eq_ignore_ascii_case(&self.repo)
+    }
 }
 
 /// Read a pull request link, or `None` for any other link.
 fn parse_pr_link(url: &str) -> Option<PrLink> {
     let (_, rest) = url.trim().split_once("://")?;
     let mut parts = rest.trim_end_matches('/').split('/');
-    let _host = parts.next()?;
+    let authority = parts.next()?;
+    let host = authority.rsplit('@').next()?.split(':').next()?;
+    if host.is_empty() {
+        return None;
+    }
     let owner = parts.next().filter(|part| !part.is_empty())?;
     let repo = parts.next().filter(|part| !part.is_empty())?;
     if parts.next()? != "pull" {
@@ -1187,6 +1200,7 @@ fn parse_pr_link(url: &str) -> Option<PrLink> {
     }
     let number = parts.next()?.split(['#', '?']).next()?.parse().ok()?;
     Some(PrLink {
+        host: git::repository::normalize_github_host(host),
         owner: owner.to_string(),
         repo: repo.to_string(),
         number,
@@ -4123,6 +4137,7 @@ mod tests {
         assert_eq!(
             parse_pr_link("https://github.com/n1rna/okena/pull/24/"),
             Some(PrLink {
+                host: "github.com".into(),
                 owner: "n1rna".into(),
                 repo: "okena".into(),
                 number: 24
@@ -4135,6 +4150,36 @@ mod tests {
         assert!(parse_pr_link("https://github.com/n1rna/okena/issues/24").is_none());
         assert!(parse_pr_link("https://linear.app/qblok/issue/QBL-374").is_none());
         assert!(parse_pr_link("not a link").is_none());
+    }
+
+    #[test]
+    fn pr_links_keep_their_host_and_match_only_a_checkout_on_it() {
+        let repo = |host: &str| git::repository::GithubRepo {
+            host: host.into(),
+            owner: "Team".into(),
+            name: "App".into(),
+        };
+        let enterprise = parse_pr_link("https://Acme.GHE.com/team/app/pull/7").expect("a PR link");
+        assert_eq!(
+            enterprise,
+            PrLink {
+                host: "acme.ghe.com".into(),
+                owner: "team".into(),
+                repo: "app".into(),
+                number: 7
+            }
+        );
+        let dotcom = parse_pr_link("https://github.com/team/app/pull/7").expect("a PR link");
+        let server = parse_pr_link("https://github.acme.corp/team/app/pull/7").expect("a PR link");
+        assert_eq!(server.host, "github.acme.corp");
+
+        // The same `owner/name` on two hosts are two repositories.
+        assert!(enterprise.names(&repo("acme.ghe.com")));
+        assert!(!enterprise.names(&repo("github.com")));
+        assert!(dotcom.names(&repo("github.com")));
+        assert!(!dotcom.names(&repo("acme.ghe.com")));
+        assert!(server.names(&repo("github.acme.corp")));
+        assert!(!server.names(&repo("github.com")));
     }
 
     fn merged_worktree_found() -> RegisteredFound {

@@ -643,6 +643,12 @@ pub struct AppSettings {
     #[serde(default)]
     pub harness: HarnessConfig,
 
+    /// GitHub Enterprise hosts to treat as GitHub, beyond github.com, GHE.com
+    /// tenants, the hosts gh is logged into and `GH_HOST` — e.g.
+    /// `github.acme.corp`. Their repos get PR and CI status like github.com.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub github_enterprise_hosts: Vec<String>,
+
     /// Saved remote connections for the client feature
     #[serde(default)]
     pub remote_connections: Vec<RemoteConnectionConfig>,
@@ -721,6 +727,7 @@ impl Default for AppSettings {
             active_session: None,
             sidebar: SidebarSettings::default(),
             harness: HarnessConfig::default(),
+            github_enterprise_hosts: Vec::new(),
             show_focused_border: default_show_focused_border(),
             color_tinted_background: false,
             font_size: default_font_size(),

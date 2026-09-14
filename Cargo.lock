@@ -6467,6 +6467,7 @@ dependencies = [
 name = "okena-git"
 version = "0.1.0"
 dependencies = [
+ "dirs 5.0.1",
  "gix",
  "log",
  "okena-core",

@@ -75,19 +75,20 @@ pub fn list_pull_requests(
     limit: usize,
 ) -> Result<Vec<okena_core::api::WorktreePullRequest>, String> {
     let limit = limit.clamp(1, 100).to_string();
-    let output = safe_output_with_timeout(
-        command("gh")
-            .args([
-                "pr",
-                "list",
-                "--json",
-                "number,title,headRefName",
-                "--limit",
-                &limit,
-            ])
-            .current_dir(path),
-        GH_TIMEOUT,
-    )
+    let mut gh = command("gh");
+    gh.args([
+        "pr",
+        "list",
+        "--json",
+        "number,title,headRefName",
+        "--limit",
+        &limit,
+    ])
+    .current_dir(path);
+    if let Some(repo) = gh_repo_override(resolve_base_repo(path).as_ref()) {
+        gh.args(["--repo", &repo]);
+    }
+    let output = safe_output_with_timeout(&mut gh, GH_TIMEOUT)
     .map_err(|error| format!("Failed to run GitHub CLI: {error}"))?;
 
     if !output.status.success() {
@@ -100,6 +101,15 @@ pub fn list_pull_requests(
     }
 
     parse_pull_request_list(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `--repo HOST/OWNER/NAME` for a checkout whose repository is on a host
+/// other than github.com: gh only picks remotes on hosts it is logged into or
+/// `GH_HOST`, so a host known from Settings alone would find no repository.
+/// github.com is left to gh's own resolution, as before.
+fn gh_repo_override(repo: Option<&GithubRepo>) -> Option<String> {
+    repo.filter(|repo| repo.host != "github.com")
+        .map(|repo| format!("{}/{}/{}", repo.host, repo.owner, repo.name))
 }
 
 fn parse_pull_request_list(
@@ -1581,6 +1591,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn from_pr_names_the_repository_to_gh_only_off_github_com() {
+        let repo = |host: &str| GithubRepo {
+            host: host.into(),
+            owner: "team".into(),
+            name: "app".into(),
+        };
+        assert_eq!(gh_repo_override(Some(&repo("github.com"))), None);
+        assert_eq!(gh_repo_override(None), None);
+        assert_eq!(
+            gh_repo_override(Some(&repo("acme.ghe.com"))).as_deref(),
+            Some("acme.ghe.com/team/app")
+        );
+        assert_eq!(
+            gh_repo_override(Some(&repo("github.acme.corp"))).as_deref(),
+            Some("github.acme.corp/team/app")
+        );
+    }
+
+    #[test]
     fn parse_worktree_pull_requests() {
         let json = r#"[{"number":12,"title":"Remote worktree","headRefName":"feature/remote"}]"#;
         let pull_requests = super::parse_pull_request_list(json).expect("should parse");
@@ -2738,6 +2767,102 @@ mod tests {
             )
         });
         assert_eq!(list("o"), super::RepoPrsFetch::Fetched(None));
+    }
+
+    /// What the poller's PR fetch sent for a checkout whose `origin` is
+    /// `origin_url`, with `token` cached for `host`: each request's URL and
+    /// `Authorization` header, and the fetch's outcome.
+    fn poll_pr_fetch(
+        origin_url: &str,
+        host: &str,
+        token: Option<&str>,
+    ) -> (super::PrFetch, Vec<(String, Option<String>)>) {
+        use crate::repository::test_support::{git_in, init_temp_repo};
+
+        let (_tmp, path) = init_temp_repo();
+        git_in(&path, &["remote", "add", "origin", origin_url]);
+        crate::repository::github::seed_token(host, token);
+        let sent = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log = sent.clone();
+        let _mock = okena_transport::http::testing::mock(move |req| {
+            log.lock().push((
+                req.url().to_string(),
+                req.header_value("Authorization").map(String::from),
+            ));
+            Ok(crate::repository::github::tests::response(
+                200,
+                &[],
+                r#"{"data":{"repository":{"pullRequests":{"nodes":[]}}}}"#,
+            ))
+        });
+        let fetch = super::fetch_pr_info(&path);
+        let sent = sent.lock().clone();
+        (fetch, sent)
+    }
+
+    /// The token gh would send: an env var for the host wins over the cache.
+    fn expected_bearer(host: &str, cached: &str) -> String {
+        let token = crate::repository::github::env_token(host).unwrap_or_else(|| cached.into());
+        format!("Bearer {token}")
+    }
+
+    #[test]
+    fn a_ghe_com_checkout_is_polled_at_its_tenant_api_with_its_token() {
+        let _guard = crate::repository::github::tests::mock_guard();
+        let (fetch, sent) = poll_pr_fetch(
+            "git@acme.ghe.com:team/app.git",
+            "acme.ghe.com",
+            Some("ghe-com-token"),
+        );
+        assert_eq!(fetch, super::PrFetch::Fetched(None));
+        assert!(!sent.is_empty());
+        for (url, auth) in sent {
+            assert_eq!(url, "https://api.acme.ghe.com/graphql");
+            assert_eq!(
+                auth.as_deref(),
+                Some(expected_bearer("acme.ghe.com", "ghe-com-token").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn a_ghe_server_checkout_is_polled_at_its_api_with_its_token() {
+        let _guard = crate::repository::github::tests::mock_guard();
+        crate::repository::github::set_enterprise_hosts(&["github.acme.corp".into()]);
+        let (fetch, sent) = poll_pr_fetch(
+            "https://github.acme.corp/team/app.git",
+            "github.acme.corp",
+            Some("server-token"),
+        );
+        crate::repository::github::set_enterprise_hosts(&[]);
+        assert_eq!(fetch, super::PrFetch::Fetched(None));
+        assert!(!sent.is_empty());
+        for (url, auth) in sent {
+            assert_eq!(url, "https://github.acme.corp/api/graphql");
+            assert_eq!(
+                auth.as_deref(),
+                Some(expected_bearer("github.acme.corp", "server-token").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn an_enterprise_checkout_without_a_token_sends_nothing() {
+        let _guard = crate::repository::github::tests::mock_guard();
+        if crate::repository::github::env_token("no-token.acme.corp").is_some() {
+            // GH_ENTERPRISE_TOKEN is set here: every Server host has a token.
+            return;
+        }
+        crate::repository::github::set_enterprise_hosts(&["no-token.acme.corp".into()]);
+        let (fetch, sent) = poll_pr_fetch(
+            "https://no-token.acme.corp/team/app.git",
+            "no-token.acme.corp",
+            None,
+        );
+        crate::repository::github::set_enterprise_hosts(&[]);
+        // What a github.com checkout without a token gets: no answer, no PR.
+        assert_eq!(fetch, super::PrFetch::Failed);
+        assert!(sent.is_empty(), "sent {sent:?}");
     }
 
     #[test]
