@@ -456,6 +456,18 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Replace the GitHub Enterprise hosts, trimmed and without duplicates.
+    pub fn set_github_enterprise_hosts(&mut self, hosts: Vec<String>, cx: &mut Context<Self>) {
+        let mut cleaned: Vec<String> = Vec::new();
+        for host in hosts.into_iter().filter_map(opt_trimmed) {
+            if !cleaned.iter().any(|known| known.eq_ignore_ascii_case(&host)) {
+                cleaned.push(host);
+            }
+        }
+        self.settings.github_enterprise_hosts = cleaned;
+        self.save_and_notify(cx);
+    }
+
     /// Override where OpenSpec's store registry lives. Blank follows the CLI's
     /// own resolution.
     pub fn set_spec_data_dir(&mut self, value: String, cx: &mut Context<Self>) {

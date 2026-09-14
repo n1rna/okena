@@ -11,6 +11,7 @@ mod header;
 mod render_extensions;
 mod render_font;
 mod render_general;
+mod render_github;
 mod render_harness;
 mod render_hooks;
 mod render_knowledge;
@@ -101,6 +102,8 @@ pub struct SettingsPanel {
     pub(super) project_hook_terminal_shell_wrapper: Entity<SimpleInputState>,
     // Worktree dir suffix input
     pub(super) worktree_dir_suffix_input: Entity<SimpleInputState>,
+    /// The GitHub page: a host to add to the enterprise hosts.
+    pub(super) github_host_input: Entity<SimpleInputState>,
     pub(super) harness_agent_root_input: Entity<SimpleInputState>,
     /// The Specs page: OpenSpec stores, discovery and folders.
     specs: render_specs::SpecsPage,
@@ -961,6 +964,8 @@ impl SettingsPanel {
         )
         .detach();
 
+        let github_host_input = render_specs::text_input(cx, "e.g. github.acme.corp", None);
+
         // File opener input
         let file_opener_input = cx.new(|cx| {
             let state = SimpleInputState::new(cx).placeholder("e.g. code, cursor, zed, vim");
@@ -1041,6 +1046,7 @@ impl SettingsPanel {
             project_hook_terminal_on_close,
             project_hook_terminal_shell_wrapper,
             worktree_dir_suffix_input,
+            github_host_input,
             harness_agent_root_input,
             specs,
             knowledge,
@@ -1429,6 +1435,7 @@ impl SettingsPanel {
             SettingsCategory::Font => self.render_font(cx).into_any_element(),
             SettingsCategory::Terminal => self.render_terminal(cx).into_any_element(),
             SettingsCategory::Worktree => self.render_worktree(cx).into_any_element(),
+            SettingsCategory::GitHub => self.render_github(cx).into_any_element(),
             SettingsCategory::Harness => self.render_harness(cx).into_any_element(),
             SettingsCategory::Specs => self.render_specs(cx),
             SettingsCategory::Knowledge => self.render_knowledge(cx),
