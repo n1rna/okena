@@ -3,6 +3,7 @@
 pub mod agent_activity;
 pub mod agents;
 pub mod api;
+pub mod context;
 pub mod diagnostic;
 pub mod fs;
 pub mod git_poll;

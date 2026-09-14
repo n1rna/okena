@@ -231,6 +231,7 @@ impl HarnessPane {
         helper: TaskHelper,
         agent: String,
         project_ids: Vec<String>,
+        context: Vec<okena_core::context::ContextRef>,
         cx: &mut Context<Self>,
     ) {
         let vars = helper.vars(task);
@@ -257,6 +258,7 @@ impl HarnessPane {
                 let goal = render_brief(&client, flow, vars)?;
                 client
                     .post_action(ActionRequest::AgentStartSession {
+                        context,
                         goal,
                         name,
                         root: String::new(),
@@ -596,6 +598,7 @@ impl HarnessPane {
                 let goal = render_brief(&client, "task-create", vars)?;
                 client
                     .post_action(ActionRequest::AgentStartSession {
+                        context: Vec::new(),
                         goal,
                         name,
                         root: String::new(),

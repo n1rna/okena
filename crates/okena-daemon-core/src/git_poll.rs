@@ -1455,8 +1455,7 @@ fn pushed_branch_polls(
                 repo_path == pushed.repo_path && branch == Some(pushed.branch.as_str())
             };
             let live = links.values().any(|link| {
-                link.session_id == session.id
-                    && on_branch(&link.repo_path, link.branch.as_deref())
+                link.session_id == session.id && on_branch(&link.repo_path, link.branch.as_deref())
             });
             let tracked: Vec<&TrackedPullRequest> = agent
                 .tracked_prs
@@ -1811,7 +1810,10 @@ pub async fn run_git_poll(
             }
         }
         for poll in &pushed_polls {
-            if trigger_acc.session_asset_ids.contains(&poll.link.session_id) {
+            if trigger_acc
+                .session_asset_ids
+                .contains(&poll.link.session_id)
+            {
                 schedule.force_pr(&poll.key);
             }
         }
@@ -2314,7 +2316,10 @@ mod tests {
             tokio::time::sleep(GIT_POLL_INTERVAL).await;
             tokio::task::yield_now().await;
         }
-        assert!(!poll.is_finished(), "polling stopped before any client came");
+        assert!(
+            !poll.is_finished(),
+            "polling stopped before any client came"
+        );
 
         // The server goes away: the loop ends on its next cycle.
         drop(trigger_tx);
@@ -2538,6 +2543,7 @@ mod tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
@@ -3052,7 +3058,10 @@ mod tests {
 
         // #1 merged, #3 opened: one result later the list says so.
         let version = *harness.state_version.borrow();
-        harness.apply(RepoPrsFetch::Fetched(Some(vec![repo_pr(2), repo_pr(3)])), 13);
+        harness.apply(
+            RepoPrsFetch::Fetched(Some(vec![repo_pr(2), repo_pr(3)])),
+            13,
+        );
         assert_eq!(harness.published("repo"), Some(vec![2, 3]));
         assert_eq!(harness.published("worktree"), Some(vec![2, 3]));
         assert!(
@@ -3953,7 +3962,10 @@ mod tests {
             );
             let polls = select(&finished, &HashSet::new(), slow_cycle);
             assert_eq!(polls.len(), 1);
-            assert!(polls[0].want_pr && !polls[0].want_ci, "only the slow PR poll");
+            assert!(
+                polls[0].want_pr && !polls[0].want_ci,
+                "only the slow PR poll"
+            );
             assert!(
                 select(&finished, &ids(&["hidden"]), 13)[0].want_ci,
                 "on screen its checks are polled as before"

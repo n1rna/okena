@@ -15,8 +15,8 @@ The success condition is one walkthrough:
 3. See "↓3 behind" and pull.
 4. Open an agent briefed to add a new doc.
 
-Handing knowledge to agents at launch ([backlog 04](../backlog/04-knowledge-context-at-launch.md))
-and template-driven prompts ([backlog 05](../archive/05-prompt-templates-from-knowledge.md))
+Handing knowledge to agents at launch (shipped as
+[launch context](../reference/knowledge.md#launch-context)) and template-driven prompts ([backlog 05](../archive/05-prompt-templates-from-knowledge.md))
 come next. This sprint fixes the format they build on.
 
 ## Design at a glance
@@ -395,8 +395,8 @@ Full rationale is in ADR-0003. This is the shape every WU implements.
 ## Out of scope (explicit)
 
 - **Handing knowledge to agents at launch**, and MCP tools to list and read it:
-  [backlog 04](../backlog/04-knowledge-context-at-launch.md). It needs this
-  sprint's entry addresses and discovery first.
+  since shipped as [launch context](../reference/knowledge.md#launch-context).
+  It needed this sprint's entry addresses and discovery first.
 - **Template-driven prompts:** [backlog 05](../archive/05-prompt-templates-from-knowledge.md).
   This sprint only lists templates and their `for:` flows; flow ids and variable
   sets are decided when the flows are wired.

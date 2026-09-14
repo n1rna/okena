@@ -13,6 +13,8 @@ Follow OpenSpec conventions (https://github.com/Fission-AI/OpenSpec):
 - `tasks.md` — an implementation checklist.
 - `specs/<capability>/spec.md` — delta specs for the requirements this change adds, modifies or removes.
 
-Read the existing `openspec/specs/` before proposing. Prefer plain Markdown and keep it short. Ask me about anything ambiguous rather than inventing requirements.{store_note}{references}
+Read the existing `openspec/specs/` before proposing. Prefer plain Markdown and keep it short. Ask me about anything ambiguous rather than inventing requirements.{store_note}{references}{context}
+
+{>context-lookup}
 
 {>reporting}

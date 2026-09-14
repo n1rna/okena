@@ -62,8 +62,13 @@ pub(super) fn scan(
     };
     let repo_path = repo.to_string_lossy().into_owned();
     let brief = scan_brief(&name, &repo_path, &plan, &skill, &prompts);
-    let Some(shell) = super::specs::spec_agent_shell(settings, agent_command.as_deref(), &brief)
-    else {
+    let Some(shell) = super::specs::spec_agent_shell(
+        settings,
+        agent_command.as_deref(),
+        &brief,
+        // A scan is handed no picked context.
+        &Default::default(),
+    ) else {
         // Nothing is scaffolded, so a session without an agent has no purpose.
         return ActionResult::Err(
             "no agent to start — pick one, or set the agent command in Settings → Harness".into(),

@@ -469,6 +469,10 @@ pub struct ApiProject {
     /// which is an okena-side id, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_purpose: Option<crate::harness::AgentPurpose>,
+    /// Projects a session's context lookups are scoped to. Mirrors
+    /// `ProjectData::context_projects`; daemon-side ids, only read there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_projects: Vec<String>,
     /// Whether this project is pinned to the top of the activity-sorted view.
     /// Carried over the wire so daemon-client projects keep their pin marker
     /// and stable pinned-tier ordering.
@@ -1553,6 +1557,11 @@ pub enum ActionRequest {
         /// `coordinate` splits the picked tasks rather than sub-tasks.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         hand_picked: bool,
+        /// Map entries, specs, knowledge, skills and agents picked for the
+        /// agent. Re-resolved by the daemon; refs that no longer exist are
+        /// dropped.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context: Vec<crate::context::ContextRef>,
     },
     /// Tear down everything created for a task: the agent session, every
     /// worktree created for it, their terminals and the agent processes inside
@@ -1614,6 +1623,39 @@ pub enum ActionRequest {
         /// it and no other does. `None` for a session no card lists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         purpose: Option<crate::harness::AgentPurpose>,
+        /// Items picked for the agent, re-resolved by the daemon.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context: Vec<crate::context::ContextRef>,
+    },
+    /// Search the launch-context index: map entries, specs, knowledge docs,
+    /// skills and agents across every project and registered store.
+    ///
+    /// Items from `project_ids`, and from the stores they follow, rank above
+    /// the rest. With `terminal_id` the search is an agent's own lookup: it is
+    /// scoped to that session's projects and the stores they follow, and
+    /// `project_ids` is ignored. Replies with a `ContextSearchResult`.
+    ContextSearch {
+        #[serde(default)]
+        query: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        project_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_id: Option<String>,
+        /// Most items to return. `None` is the daemon's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    /// Record that an item was added, so it ranks higher next time.
+    ContextHit {
+        item: crate::context::ContextRef,
+    },
+    /// Read one item's file for a running agent, scoped like a `ContextSearch`
+    /// with `terminal_id`. `path` is absolute, as a search returned it;
+    /// anything outside the session's projects and followed stores is
+    /// refused. Replies with a `ContextDocument`.
+    ContextRead {
+        terminal_id: String,
+        path: String,
     },
     /// Render one launch brief, so a client can show or send it.
     ///
@@ -1801,6 +1843,9 @@ pub enum ActionRequest {
         /// change and starts no agent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Items picked for the agent, re-resolved by the daemon.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context: Vec<crate::context::ContextRef>,
     },
     /// Open an agent session on one document of a spec root — a spec or a
     /// change's file — briefed to change it as `request` says.
@@ -1819,6 +1864,9 @@ pub enum ActionRequest {
         /// `settings.harness.agent_command`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Items picked for the agent, re-resolved by the daemon.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context: Vec<crate::context::ContextRef>,
     },
     // ─── Engineering harness: knowledge ───────────────────────────────────
     //
@@ -1968,6 +2016,9 @@ pub enum ActionRequest {
         /// `settings.harness.agent_command`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Items picked for the agent, re-resolved by the daemon.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context: Vec<crate::context::ContextRef>,
     },
     /// Open an agent session on one file of a knowledge root, briefed to
     /// change it as `request` says. The knowledge counterpart of
@@ -1983,6 +2034,9 @@ pub enum ActionRequest {
         /// `settings.harness.agent_command`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Items picked for the agent, re-resolved by the daemon.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        context: Vec<crate::context::ContextRef>,
     },
     // ─── Project maps (ADR-0005) ───
     /// Open an agent session in a repository, briefed with the `project-map`
@@ -2448,6 +2502,7 @@ mod tests {
                 task_draft: None,
                 custom_session: None,
                 agent_purpose: None,
+                context_projects: Vec::new(),
                 pinned: true,
                 last_activity_at: Some(1_700_000_000_000),
                 default_shell: Some(ShellType::Default),
@@ -2706,6 +2761,38 @@ mod tests {
             },
             ActionRequest::ReadContent {
                 terminal_id: "t1".into(),
+            },
+            ActionRequest::ContextSearch {
+                query: "auth".into(),
+                project_ids: vec!["p1".into()],
+                terminal_id: None,
+                limit: Some(20),
+            },
+            ActionRequest::ContextHit {
+                item: crate::context::ContextRef {
+                    kind: crate::context::ContextKind::Doc,
+                    owner: crate::context::ContextOwner::store("store:acme"),
+                    locator: "docs/principles.md".into(),
+                },
+            },
+            ActionRequest::ContextRead {
+                terminal_id: "t1".into(),
+                path: "/x/docs/principles.md".into(),
+            },
+            ActionRequest::AgentStartSession {
+                goal: "g".into(),
+                name: String::new(),
+                root: String::new(),
+                project_ids: vec!["p1".into()],
+                agent_command: None,
+                task_draft: None,
+                task: None,
+                purpose: None,
+                context: vec![crate::context::ContextRef {
+                    kind: crate::context::ContextKind::MapEntry,
+                    owner: crate::context::ContextOwner::project("p1"),
+                    locator: "area:core".into(),
+                }],
             },
             ActionRequest::Resize {
                 terminal_id: "t1".into(),

@@ -2873,6 +2873,9 @@ pub async fn daemon_command_loop(
         service_tick.clone(),
     );
     let content_search_permits = Arc::new(Semaphore::new(MAX_CONCURRENT_CONTENT_SEARCHES));
+    // Launch context: one live index for the loop's lifetime, so its cached
+    // roots, watchers and frecency outlast any one search.
+    let context_index = Arc::new(crate::context::open_index());
 
     loop {
         let BridgeMessage { command, reply } = match bridge_rx.recv().await {
@@ -3107,6 +3110,34 @@ pub async fn daemon_command_loop(
                         .await
                         .unwrap_or_else(|e| {
                             CommandResult::Err(format!("knowledge worker failed: {e}"))
+                        });
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
+                    }
+                });
+                continue;
+            }
+            // ── Launch context: off the queue and the workspace lock ──
+            // A search runs discovery and may read roots from disk. The
+            // projects and settings are copied under a brief lock; the index
+            // serializes itself.
+            RemoteCommand::Action(
+                action @ (ActionRequest::ContextSearch { .. }
+                | ActionRequest::ContextHit { .. }
+                | ActionRequest::ContextRead { .. }),
+            ) => {
+                let app_settings = settings.lock().clone();
+                let projects = workspace.lock().data.projects.clone();
+                let index = context_index.clone();
+                let worker_runtime = runtime.clone();
+                let _task = runtime.spawn(async move {
+                    let result = worker_runtime
+                        .spawn_blocking(move || {
+                            crate::context::run(&index, &action, &projects, &app_settings)
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            CommandResult::Err(format!("context worker failed: {e}"))
                         });
                     if let Some(reply) = reply {
                         let _ = reply.send(result);
@@ -6967,6 +6998,7 @@ mod tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
@@ -7695,6 +7727,7 @@ mod tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig {
@@ -8454,6 +8487,7 @@ mod tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
@@ -8707,6 +8741,7 @@ mod tests {
                 task_draft: None,
                 custom_session: None,
                 agent_purpose: None,
+                context_projects: Vec::new(),
                 agent: None,
                 folder_color: Default::default(),
                 hooks: Default::default(),
@@ -10347,6 +10382,7 @@ mod tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig {

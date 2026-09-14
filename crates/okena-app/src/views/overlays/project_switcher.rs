@@ -629,6 +629,7 @@ mod tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),

@@ -138,6 +138,9 @@ impl Flow {
                 // The rendered `task-verify` brief, resolved on its own so a
                 // store can override either without the other.
                 "verify",
+                // The map entries, specs and knowledge picked at launch, as a
+                // `context` block. Empty when none were.
+                "context",
             ],
             Flow::TasksStart => &[
                 // Every task's key, as one phrase: "QBL-1, QBL-2 and QBL-3".
@@ -147,6 +150,8 @@ impl Flow {
                 "tasks",
                 "note",
                 "verify",
+                // The map entries, specs and knowledge picked at launch.
+                "context",
             ],
             Flow::TaskVerify => &["key", "title"],
             Flow::TaskCoordinate => &[
@@ -160,11 +165,12 @@ impl Flow {
                 // told to pass on.
                 "projects",
                 "note",
+                "context",
             ],
             // `key` and `title` are the first picked task's; `tasks` lists
             // every picked task; `projects` the repos its agents will work in.
             // No `branch`: the coordinator has none.
-            Flow::TasksCoordinate => &["key", "title", "tasks", "projects", "note"],
+            Flow::TasksCoordinate => &["key", "title", "tasks", "projects", "note", "context"],
             Flow::TaskBreakDown => &[
                 "key",
                 // The provider's own id, which is what `okena_create_task`
@@ -189,6 +195,7 @@ impl Flow {
                 "root_path",
                 // What kind of document it is, in words.
                 "what",
+                "context",
             ],
             Flow::SpecDraft => &[
                 "idea",
@@ -197,9 +204,10 @@ impl Flow {
                 "root_path",
                 "store_note",
                 "references",
+                "context",
             ],
-            Flow::KnowledgeDraft => &["request", "path", "what", "commit_note"],
-            Flow::AgentSession => &["goal", "projects"],
+            Flow::KnowledgeDraft => &["request", "path", "what", "commit_note", "context"],
+            Flow::AgentSession => &["goal", "projects", "context"],
             Flow::ProjectScan => &[
                 "project", "path",     // The knowledge root the map goes into.
                 "map_root", // Absolute path of the `project-map` SKILL.md to follow.

@@ -5,6 +5,7 @@
 //! workspace uses, so a view can act on projects (focus one, start a worktree)
 //! rather than only display them.
 
+mod context_dialog;
 mod doc_agents;
 mod editor;
 mod file_ops;
@@ -144,6 +145,9 @@ pub(crate) struct TasksState {
 pub(crate) struct SpecsState {
     /// Every root the daemon discovered. `None` until the first load lands.
     pub(crate) stores: Option<okena_core::specs::SpecStores>,
+    /// Projects and context for the new-change form's agent, once its dialog
+    /// has been opened.
+    pub(crate) pickers: Option<Entity<crate::views::components::launch_pickers::LaunchPickers>>,
     /// Key of the root being shown. `None` until the first load picks the
     /// default one.
     pub(crate) root_key: Option<String>,
@@ -241,6 +245,9 @@ pub(crate) struct StartExtras {
     /// The user picked these tasks together, rather than a parent having them
     /// as sub-tasks.
     pub(crate) hand_picked: bool,
+    /// Map entries, specs and knowledge picked on the launcher. Every agent a
+    /// fan-out or a coordinator starts from one launch is handed the same.
+    pub(crate) context: Vec<okena_core::context::ContextRef>,
 }
 
 /// State of the "Start work" dialog.
@@ -253,7 +260,9 @@ pub(crate) struct StartWorkForm {
     /// have, so starting work and breaking down offer the same things in the
     /// same places rather than being two unrelated forms.
     pub(crate) flow: LaunchFlow,
-    pub(crate) project_ids: Vec<String>,
+    /// Projects and context. Only the dialog picks them; a card starts in
+    /// one click with none.
+    pub(crate) pickers: Entity<crate::views::components::launch_pickers::LaunchPickers>,
     /// Branch name, which also determines each worktree's directory name.
     /// Only read for `LaunchFlow::Work`: a breakdown gets no worktrees.
     pub(crate) branch_input: Entity<SimpleInputState>,
@@ -337,6 +346,8 @@ pub struct HarnessPane {
     pub(crate) knowledge_files: file_ops::FileOps,
     /// The Testing view's canvas. Built only for that section's pane.
     pub(crate) testing: Option<Entity<testing_view::TestingView>>,
+    /// The projects-and-context dialog a Specs or Knowledge launcher opened.
+    pub(crate) context_dialog: Option<context_dialog::ContextTarget>,
 }
 
 /// Everything a harness pane needs from its window.
@@ -407,6 +418,8 @@ impl HarnessPane {
         });
         let specs_git = store_git::StoreGitPanel::new(cx);
         let knowledge = knowledge_view::KnowledgeState::new(cx);
+        // Their projects-and-context pickers are made when their dialog first
+        // opens: most panes never open one.
         let knowledge_draft = knowledge_draft::DraftForm::new(cx);
         let spec_refine = doc_agents::DocRefine::new(cx);
         let knowledge_refine = doc_agents::DocRefine::new(cx);
@@ -469,6 +482,7 @@ impl HarnessPane {
             },
             specs: SpecsState {
                 stores: None,
+                pickers: None,
                 root_key: None,
                 tree: None,
                 loading: false,
@@ -492,6 +506,7 @@ impl HarnessPane {
             spec_files,
             knowledge_files,
             testing,
+            context_dialog: None,
         };
         match section {
             HarnessSection::Tasks => {

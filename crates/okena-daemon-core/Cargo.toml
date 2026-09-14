@@ -8,6 +8,8 @@ license = "MIT"
 # Logic crates the daemon drives. All gpui-optional crates are pulled with
 # `default-features = false` so NO gpui is linked into the headless daemon.
 okena-core = { path = "../okena-core" }
+# The live launch-context index (fff), searched off the workspace lock.
+okena-context = { path = "../okena-context", features = ["index"] }
 okena-state = { path = "../okena-state" }
 okena-terminal = { path = "../okena-terminal" }
 okena-git = { path = "../okena-git" }

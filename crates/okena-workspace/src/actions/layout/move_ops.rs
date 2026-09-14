@@ -703,6 +703,7 @@ mod tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             agent: None,
             id: id.to_string(),
             name: id.to_string(),

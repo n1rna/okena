@@ -41,6 +41,7 @@ pub(super) fn refine_spec_document(
     path: String,
     request: String,
     agent_command: Option<String>,
+    context_refs: Vec<okena_core::context::ContextRef>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -74,6 +75,7 @@ pub(super) fn refine_spec_document(
         target,
         request,
         agent_command,
+        context_refs,
         backend,
         terminals,
         settings,
@@ -90,6 +92,7 @@ pub(super) fn refine_knowledge_document(
     path: String,
     request: String,
     agent_command: Option<String>,
+    context_refs: Vec<okena_core::context::ContextRef>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -125,6 +128,7 @@ pub(super) fn refine_knowledge_document(
         target,
         request,
         agent_command,
+        context_refs,
         backend,
         terminals,
         settings,
@@ -156,8 +160,18 @@ fn spec_document_kind(path: &str) -> String {
     }
 }
 
-fn document_brief(request: &str, target: &Target, prompts: PromptRoot) -> String {
+fn document_brief(
+    request: &str,
+    target: &Target,
+    context: &[okena_core::context::ContextItem],
+    loaded: bool,
+    prompts: PromptRoot,
+) -> String {
     let mut vars = Vars::new();
+    vars.insert(
+        "context",
+        briefs::context_block(context, loaded, prompts.as_ref()),
+    );
     vars.insert("request", request.to_string());
     vars.insert("file", target.path.clone());
     vars.insert("path", target.file.display().to_string());
@@ -175,6 +189,7 @@ fn start(
     target: Target,
     request: String,
     agent_command: Option<String>,
+    context_refs: Vec<okena_core::context::ContextRef>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -184,13 +199,20 @@ fn start(
     if request.is_empty() {
         return ActionResult::Err("say what to change first".into());
     }
+    let context_items =
+        super::context::resolve_for_launch(&ws.data.projects, settings, &context_refs);
+    let command = super::agent_context::launch_command(settings, agent_command.as_deref());
+    let install = super::agent_context::install(&command, &context_items);
     let brief = document_brief(
         &request,
         &target,
+        &context_items,
+        install.loaded(),
         briefs::prompt_root(&ws.data.projects, settings),
     );
     // Nothing is scaffolded, so a session without an agent would do nothing.
-    let Some(shell) = super::specs::spec_agent_shell(settings, agent_command.as_deref(), &brief)
+    let Some(shell) =
+        super::specs::spec_agent_shell(settings, agent_command.as_deref(), &brief, &install)
     else {
         return ActionResult::Err(
             "no agent to start — pick one, or set the agent command in Settings → Harness".into(),
@@ -219,6 +241,7 @@ fn start(
         p.custom_session = Some(format!("{}: {request}", target.path));
         p.knowledge_root = target.knowledge_root.clone();
         p.agent_purpose = Some(target.purpose.clone());
+        p.context_projects = super::context::scope_projects(&[], &context_items);
         p.default_shell = Some(shell);
     }
     if let ActionResult::Err(e) = super::spawn_uninitialized_terminals(
@@ -276,7 +299,7 @@ mod tests {
             },
             knowledge_root: Some("store:eng".into()),
         };
-        let brief = document_brief("explain cache busting", &target, None);
+        let brief = document_brief("explain cache busting", &target, &[], false, None);
         for needle in [
             "explain cache busting",
             "`docs/ci.md`",

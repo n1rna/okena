@@ -836,6 +836,7 @@ mod tests {
             task_draft: None,
             custom_session: None,
             agent_purpose: None,
+            context_projects: Vec::new(),
             agent: None,
             agent_activity: Default::default(),
             pinned: false,

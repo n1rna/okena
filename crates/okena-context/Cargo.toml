@@ -1,0 +1,28 @@
+[package]
+name = "okena-context"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Launch context: the map entries, specs, knowledge docs, skills and agents an
+# agent can be handed when it starts, read from the roots okena already
+# discovers, and resolved again from a client's refs. GPUI-free.
+#
+# The live, watched index is behind `index`, which only the daemon enables:
+# fff links libgit2 and LMDB, which the desktop client has no use for.
+
+[features]
+index = ["dep:fff-search", "dep:neo_frizbee", "dep:parking_lot"]
+
+[dependencies]
+okena-core = { path = "../okena-core" }
+okena-knowledge = { path = "../okena-knowledge" }
+okena-openspec = { path = "../okena-openspec" }
+log = "0.4"
+# Pinned: fff publishes a version per commit and its API moves between them.
+fff-search = { version = "=0.10.6", optional = true }
+neo_frizbee = { version = "0.11", optional = true }
+parking_lot = { version = "0.12", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

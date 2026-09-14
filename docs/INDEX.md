@@ -35,9 +35,9 @@ Architecture and build rules live next to the code, not here:
 - **Knowledge stores** — the harness Knowledge view over git-backed org knowledge
   repos ([sprint](sprints/sprint-2026-09-10-knowledge-stores.md),
   [ADR-0003](decisions/0003-knowledge-stores.md)). Launch briefs come from a
-  store's templates ([reference](reference/knowledge.md#launch-prompts)). Next:
-  knowledge at agent launch
-  ([backlog 04](backlog/04-knowledge-context-at-launch.md)).
+  store's templates ([reference](reference/knowledge.md#launch-prompts)), and
+  every launcher can hand an agent map entries, specs, knowledge and skills
+  ([launch context](reference/knowledge.md#launch-context)).
 - **Project maps** — each repository maps its areas, concepts, and what it
   exposes and consumes, as docs plus a validated `project-map.yaml` written by
   an agent ([ADR-0005](decisions/0005-project-maps.md),

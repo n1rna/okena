@@ -26,7 +26,7 @@ use okena_workspace::context::WorkspaceCx;
 use std::path::{Path, PathBuf};
 
 /// OpenSpec's machine directories, with overrides from settings.
-fn dirs(settings: &AppSettings) -> OpenSpecDirs {
+pub(super) fn dirs(settings: &AppSettings) -> OpenSpecDirs {
     let specs = &settings.harness.specs;
     OpenSpecDirs::detect(specs.data_dir.as_deref(), specs.config_dir.as_deref())
 }
@@ -466,6 +466,8 @@ fn brief(
     change: &str,
     change_dir: &str,
     root: &SpecRoot,
+    context_items: &[okena_core::context::ContextItem],
+    loaded: bool,
     prompts: PromptRoot,
 ) -> String {
     let mut vars = Vars::new();
@@ -475,6 +477,10 @@ fn brief(
     vars.insert("root_path", root.path.clone());
     vars.insert("store_note", store_note(change, root, &prompts));
     vars.insert("references", reference_note(root, &prompts));
+    vars.insert(
+        "context",
+        briefs::context_block(context_items, loaded, prompts.as_ref()),
+    );
     briefs::build(Flow::SpecDraft, prompts.as_ref(), &vars)
         .rendered
         .text
@@ -543,6 +549,7 @@ pub(super) fn spec_agent_shell(
     settings: &AppSettings,
     override_command: Option<&str>,
     prompt: &str,
+    install: &super::agent_context::Install,
 ) -> Option<okena_terminal::shell_config::ShellType> {
     // An explicit empty string means "scaffold only, no agent", even when a
     // default agent is configured — same contract as starting work on a task.
@@ -561,6 +568,8 @@ pub(super) fn spec_agent_shell(
     args.extend(super::agent_options::option_args(&command, settings));
     args.extend(prompt_args(&command, prompt));
     args.extend(super::agent_mcp::injection_args(&command, settings));
+    // Skills and agents picked at launch, where this agent loads them itself.
+    args.extend(install.args.iter().cloned());
     Some(okena_terminal::shell_config::ShellType::Custom {
         path: command,
         args,
@@ -604,6 +613,7 @@ pub(super) fn draft_change(
     name: Option<String>,
     agent_command: Option<String>,
     root: Option<String>,
+    context_refs: Vec<okena_core::context::ContextRef>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -613,6 +623,8 @@ pub(super) fn draft_change(
     if idea.is_empty() {
         return ActionResult::Err("describe the change in a sentence first".into());
     }
+    let context_items =
+        super::context::resolve_for_launch(&ws.data.projects, settings, &context_refs);
     let root = match resolve_root(&ws.data.projects, settings, root.as_deref()) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
@@ -670,9 +682,12 @@ pub(super) fn draft_change(
                     root: root.key.clone(),
                     change: slug.clone(),
                 });
+                p.context_projects = super::context::scope_projects(&[], &context_items);
             }
             // Set before spawning: the terminal reads the project's default
             // shell as it starts.
+            let command = super::agent_context::launch_command(settings, agent_command.as_deref());
+            let install = super::agent_context::install(&command, &context_items);
             if let Some(shell) = spec_agent_shell(
                 settings,
                 agent_command.as_deref(),
@@ -681,8 +696,11 @@ pub(super) fn draft_change(
                     &slug,
                     &change_rel,
                     &root,
+                    &context_items,
+                    install.loaded(),
                     briefs::prompt_root(&ws.data.projects, settings),
                 ),
+                &install,
             ) && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id)
             {
                 p.default_shell = Some(shell);
@@ -1178,6 +1196,8 @@ mod tests {
             "add-login",
             "openspec/changes/add-login",
             &root_of(SpecRootKind::Folder, None),
+            &[],
+            false,
             None,
         );
         assert!(b.contains("openspec/changes/add-login"));
@@ -1197,6 +1217,8 @@ mod tests {
             "add-login",
             "openspec/changes/add-login",
             &root_of(SpecRootKind::Store, Some("team-plans")),
+            &[],
+            false,
             None,
         );
         assert!(b.contains("--change add-login --store team-plans"));
@@ -1213,6 +1235,8 @@ mod tests {
             "add-login",
             "openspec/changes/add-login",
             &root_of(SpecRootKind::Folder, None),
+            &[],
+            false,
             None,
         );
         assert_eq!(
@@ -1237,6 +1261,11 @@ mod tests {
              - `design-system` at `/stores/design-system` \
              (e.g. `openspec show <spec-id> --type spec --store design-system`)\n\n"
                 .to_string()
+                // No context was picked, so no context block — only the line
+                // saying how to look it up, which every brief carries.
+                + &okena_knowledge::prompts::defaults::partial_body("context-lookup")
+                    .expect("context-lookup")
+                + "\n\n"
                 + &okena_knowledge::prompts::defaults::partial_body("reporting")
                     .expect("reporting")
         );

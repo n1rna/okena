@@ -893,12 +893,12 @@ impl HarnessPane {
                 .placeholder("Branch / worktree name")
                 .default_value(branch)
         });
-        let project_ids = self.quick_start_projects(cx).unwrap_or_default();
+        let pickers = self.form_pickers(cx);
 
         self.tasks.start_form = Some(super::StartWorkForm {
             task: task.clone(),
             flow,
-            project_ids,
+            pickers,
             branch_input,
             brief_source: None,
             selection: Vec::new(),
@@ -996,6 +996,25 @@ impl HarnessPane {
         )
     }
 
+    /// Projects and context for the launch dialog, preselected where a one-click
+    /// start would go. Only the dialog picks them: the cards stay one click.
+    fn form_pickers(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::views::components::launch_pickers::LaunchPickers> {
+        use crate::views::components::launch_pickers::{LaunchPickers, LaunchPickersEvent};
+        let (client, workspace) = (self.client.clone(), self.workspace.clone());
+        // No hint of its own: the dialog words one from the flow and count.
+        let pickers = cx.new(|cx| LaunchPickers::new("sw", client, workspace, "", cx));
+        cx.subscribe(&pickers, |_: &mut Self, _, _: &LaunchPickersEvent, cx| {
+            cx.notify()
+        })
+        .detach();
+        let preselect = self.quick_start_projects(cx).unwrap_or_default();
+        pickers.update(cx, |p, cx| p.set_project_ids(&preselect, cx));
+        pickers
+    }
+
     /// Start work on `task` with `agent_command` right away, or ask where when
     /// that cannot be told.
     pub(super) fn quick_start_work(
@@ -1019,9 +1038,11 @@ impl HarnessPane {
                 Default::default(),
                 cx,
             ),
-            StartStrategy::PerSubtask => self.fan_out(task, project_ids, agent_command, cx),
+            StartStrategy::PerSubtask => {
+                self.fan_out(task, project_ids, agent_command, Vec::new(), cx)
+            }
             StartStrategy::Coordinated => {
-                self.start_coordinator(task, project_ids, agent_command, cx)
+                self.start_coordinator(task, project_ids, agent_command, Vec::new(), cx)
             }
         }
     }
@@ -1053,6 +1074,7 @@ impl HarnessPane {
         task: &Task,
         project_ids: Vec<String>,
         agent_command: String,
+        context: Vec<okena_core::context::ContextRef>,
         cx: &mut Context<Self>,
     ) {
         let children = self.children_of(&task.id.external_id, cx);
@@ -1077,6 +1099,7 @@ impl HarnessPane {
                 agent_command.clone(),
                 super::StartExtras {
                     siblings,
+                    context: context.clone(),
                     ..Default::default()
                 },
                 cx,
@@ -1094,6 +1117,7 @@ impl HarnessPane {
         task: &Task,
         project_ids: Vec<String>,
         agent_command: String,
+        context: Vec<okena_core::context::ContextRef>,
         cx: &mut Context<Self>,
     ) {
         // The daemon lists the sub-tasks and renders the `task-coordinate`
@@ -1106,6 +1130,7 @@ impl HarnessPane {
             agent_command,
             super::StartExtras {
                 coordinate: true,
+                context,
                 ..Default::default()
             },
             cx,
@@ -1208,7 +1233,7 @@ impl HarnessPane {
         let names = self.selection_branches(&picked, cx);
         match self.quick_start_projects(cx) {
             Some(project_ids) => {
-                self.start_selection(&picked, project_ids, names, agent_command, cx)
+                self.start_selection(&picked, project_ids, names, agent_command, Vec::new(), cx)
             }
             None => self.open_selection_form(picked, cx),
         }
@@ -1237,11 +1262,11 @@ impl HarnessPane {
                 })
             })
             .collect();
-        let project_ids = self.quick_start_projects(cx).unwrap_or_default();
+        let pickers = self.form_pickers(cx);
         self.tasks.start_form = Some(super::StartWorkForm {
             task: first.clone(),
             flow: super::LaunchFlow::Work,
-            project_ids,
+            pickers,
             branch_input,
             brief_source: None,
             selection: picked,
@@ -1303,6 +1328,7 @@ impl HarnessPane {
         project_ids: Vec<String>,
         names: Vec<String>,
         agent_command: String,
+        context: Vec<okena_core::context::ContextRef>,
         cx: &mut Context<Self>,
     ) {
         let Some(first) = picked.first() else {
@@ -1323,6 +1349,7 @@ impl HarnessPane {
                     also: rest,
                     branches: branches.clone(),
                     hand_picked: true,
+                    context: context.clone(),
                     ..Default::default()
                 },
                 cx,
@@ -1351,6 +1378,7 @@ impl HarnessPane {
                             siblings,
                             branches: sibling_branches,
                             hand_picked: true,
+                            context: context.clone(),
                             ..Default::default()
                         },
                         cx,
@@ -1368,6 +1396,7 @@ impl HarnessPane {
                     coordinate: true,
                     also: rest,
                     hand_picked: true,
+                    context: context.clone(),
                     ..Default::default()
                 },
                 cx,
@@ -1429,7 +1458,10 @@ impl HarnessPane {
             return;
         };
         let task = form.task.clone();
-        let project_ids = form.project_ids.clone();
+        let (project_ids, context) = {
+            let pickers = form.pickers.read(cx);
+            (pickers.project_ids(cx), pickers.context_refs(cx))
+        };
         match form.flow {
             super::LaunchFlow::BreakDown => {
                 self.tasks.start_form = None;
@@ -1438,12 +1470,20 @@ impl HarnessPane {
                     TaskHelper::BreakDown,
                     agent_command,
                     project_ids,
+                    context,
                     cx,
                 );
             }
             super::LaunchFlow::Refine => {
                 self.tasks.start_form = None;
-                self.start_task_helper(&task, TaskHelper::Refine, agent_command, project_ids, cx);
+                self.start_task_helper(
+                    &task,
+                    TaskHelper::Refine,
+                    agent_command,
+                    project_ids,
+                    context,
+                    cx,
+                );
             }
             super::LaunchFlow::Work => {
                 if project_ids.is_empty() {
@@ -1460,7 +1500,14 @@ impl HarnessPane {
                     .collect();
                 self.tasks.start_form = None;
                 if !selection.is_empty() {
-                    self.start_selection(&selection, project_ids, names, agent_command, cx);
+                    self.start_selection(
+                        &selection,
+                        project_ids,
+                        names,
+                        agent_command,
+                        context,
+                        cx,
+                    );
                     cx.notify();
                     return;
                 }
@@ -1472,14 +1519,17 @@ impl HarnessPane {
                         project_ids,
                         (!branch.is_empty()).then_some(branch),
                         agent_command,
-                        Default::default(),
+                        super::StartExtras {
+                            context,
+                            ..Default::default()
+                        },
                         cx,
                     ),
                     StartStrategy::PerSubtask => {
-                        self.fan_out(&task, project_ids, agent_command, cx)
+                        self.fan_out(&task, project_ids, agent_command, context, cx)
                     }
                     StartStrategy::Coordinated => {
-                        self.start_coordinator(&task, project_ids, agent_command, cx)
+                        self.start_coordinator(&task, project_ids, agent_command, context, cx)
                     }
                 }
             }
@@ -1535,6 +1585,7 @@ impl HarnessPane {
             let result = smol::unblock(move || {
                 client
                     .post_action(ActionRequest::TaskStartWork {
+                        context: extras.context,
                         provider,
                         task_external_id: external_id,
                         project_ids,
@@ -3018,7 +3069,7 @@ impl HarnessPane {
             this.quick_start_selection(command.to_string(), cx);
         }))
         .on_configure(
-            "Choose projects and branch…",
+            "Choose projects, context and branch…",
             cx.listener(move |this, _: &ClickEvent, _window, cx| {
                 this.open_selection_form(for_configure.clone(), cx);
             }),
@@ -3206,7 +3257,7 @@ impl HarnessPane {
                 }),
             )
             .on_configure(
-                "Choose projects and branch…",
+                "Choose projects, context and branch…",
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.open_start_form(&for_configure, cx);
                 }),
@@ -3262,12 +3313,13 @@ impl HarnessPane {
                         TaskHelper::BreakDown,
                         command.to_string(),
                         Vec::new(),
+                        Vec::new(),
                         cx,
                     );
                 }),
             )
             .on_configure(
-                "Choose projects first…",
+                "Choose projects and context…",
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.open_launch_form(&for_configure, super::LaunchFlow::BreakDown, cx);
                 }),
@@ -3319,12 +3371,13 @@ impl HarnessPane {
                         TaskHelper::Refine,
                         command.to_string(),
                         Vec::new(),
+                        Vec::new(),
                         cx,
                     );
                 }),
             )
             .on_configure(
-                "Choose projects first…",
+                "Choose projects and context…",
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.open_launch_form(&for_configure, super::LaunchFlow::Refine, cx);
                 }),
@@ -3817,7 +3870,7 @@ impl HarnessPane {
         let t = theme(cx);
         let flow = form.flow;
         let work = flow == super::LaunchFlow::Work;
-        let selected = form.project_ids.clone();
+        let selected = form.pickers.read(cx).project_ids(cx);
         let external_id = form.task.id.external_id.clone();
         // Several ticked tasks rather than one: the same dialog, asking the
         // selection's split instead of the task's.
@@ -3825,62 +3878,7 @@ impl HarnessPane {
         let selecting = !picked.is_empty();
         let selection_strategy = self.tasks.selection_strategy;
 
-        // Worktree children can't parent another worktree, and an agent
-        // session is not a repo, so only repos are offered.
-        let candidates = self.start_candidates(cx);
-        let projects: Vec<(String, String)> = self
-            .workspace
-            .read(cx)
-            .projects()
-            .iter()
-            .filter(|p| candidates.contains(&p.id))
-            .map(|p| (p.id.clone(), p.name.clone()))
-            .collect();
-
-        let project_chips: Vec<AnyElement> = projects
-            .into_iter()
-            .map(|(id, name)| {
-                let is_selected = selected.contains(&id);
-                let id_for_click = id.clone();
-                div()
-                    .id(SharedString::from(format!("sw-proj-{id}")))
-                    .cursor_pointer()
-                    .px(px(8.0))
-                    .py(px(2.0))
-                    .rounded(px(4.0))
-                    .border_1()
-                    .border_color(rgb(if is_selected {
-                        t.border_active
-                    } else {
-                        t.border
-                    }))
-                    .when(is_selected, |d| d.bg(with_alpha(t.button_primary_bg, 0.15)))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(if is_selected {
-                        t.text_primary
-                    } else {
-                        t.text_secondary
-                    }))
-                    .child(name)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            if let Some(form) = this.tasks.start_form.as_mut() {
-                                if let Some(pos) =
-                                    form.project_ids.iter().position(|p| *p == id_for_click)
-                                {
-                                    form.project_ids.remove(pos);
-                                } else {
-                                    form.project_ids.push(id_for_click.clone());
-                                }
-                                cx.notify();
-                            }
-                        }),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-
+        let pickers = form.pickers.clone();
         let count = selected.len();
         let coordinating_selection =
             selecting && selection_strategy == SelectionStrategy::Coordinated;
@@ -4064,8 +4062,8 @@ impl HarnessPane {
             .child(
                 v_flex()
                     .gap(px(5.0))
-                    .child(self.form_label("Projects", cx))
-                    .child(h_flex().gap(px(6.0)).flex_wrap().children(project_chips))
+                    // Projects and context, as chips searched by name.
+                    .child(pickers)
                     .child(
                         div()
                             .text_size(ui_text_ms(cx))
@@ -4170,6 +4168,10 @@ impl HarnessPane {
                 .items_center()
                 .justify_center()
                 .bg(with_alpha(0x000000, 0.45))
+                // Occluding: without it the wheel scrolled the task list behind the
+                // dialog, and hovers and clicks reached it too.
+                .occlude()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 // Swallow clicks on the backdrop so they can't reach the board
                 // behind it.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

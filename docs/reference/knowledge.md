@@ -242,6 +242,98 @@ used by OpenSpec stores, is described in
   from the registry while leaving the checkout on disk. It also switches
   project discovery on or off and sets the clone folder.
 
+## Launch context
+
+Every agent launcher can hand the agent more than its goal: entries of project
+maps, specs, knowledge docs, skills and agents. Nothing is inlined. The brief
+lists each by path, and skills and agents are loaded into the session where the
+agent's CLI can take them.
+
+### Picking
+
+Projects and context are picked with a **Projects** and a **Context** chip
+search, always in a dialog. The New agent dialog shows them directly. Every
+other launcher — Start work, Break down, Refine, New change, Write with an
+agent and Refine with agent — stays uncluttered: its gear opens a dialog with
+the chip searches, and what is picked there stays with the launcher until it
+starts.
+
+- **Search:** type to narrow the results. ↑/↓ move, Enter adds the highlighted
+  result as a chip, Backspace in an empty box removes the last chip, Esc closes
+  the list, and a chip's ✕ removes it. An added item is not offered again.
+- **Projects:** repositories, not worktrees or agent sessions, matched by name
+  and path. Chips keep the order they were added in, which is the order the
+  brief names them. A task's launch dialog preselects where a one-click start
+  would go.
+- **Context items:** each shows its kind, title, one-line description and owner.
+
+  | Kind | From |
+  |---|---|
+  | Map entry | Each area, concept, exposed and consumed interface, CI pipeline and infrastructure resource of a valid [`project-map.yaml`](project-map.md#as-launch-context) |
+  | Spec | Spec documents and active change folders of an OpenSpec root |
+  | Knowledge doc, Skill, Agent | `docs/**`, `skills/**/SKILL.md` and `agents/**` of a knowledge root. Templates are not offered |
+
+- **Where from:** every workspace repository and every root the Knowledge and
+  Specs sections list.
+- **Ranking:** items from the chosen projects, and from the stores they follow,
+  come before the rest. Within each band, match quality plus how often an item
+  has been added (adding one records it). Everything stays findable.
+- **Not mapped:** a chosen project that has never been scanned gets a hint row
+  in the results. **Scan** starts its [project scan](project-map.md#scanning),
+  and its entries show up once the map is written.
+- **On a card:** the projects on Break down, Refine and the document cards only
+  rank context and are named in the brief; they create nothing.
+
+### What the agent gets
+
+The client sends refs, not paths. Each launch action carries
+`context: [{ kind, owner, project_id | root_key, locator }]`, where the locator
+is a map id (`area:checkout`) or a path relative to the owning repository or
+store. The daemon resolves every ref again from its own roots, and drops any
+that no longer resolves.
+
+- **The brief:** a block from the `context` partial, grouped by project or
+  store, with each item's kind, title, description and absolute path. A launch
+  with no context has no block.
+- **Skills and agents:** handed over per agent CLI.
+
+  | Agent | How |
+  |---|---|
+  | `claude` | A plugin written for the session under `<profile>/agent-context/<id>/`, with copies of each skill directory and agent file, passed with `--plugin-dir`. The brief names them in the `context-installed` line instead of listing them |
+  | Any other | Their `SKILL.md` or agent file paths are listed in the brief |
+
+- **Scope:** the session records the chosen projects and the projects owning
+  the context it was handed (`context_projects`). Its own lookups are scoped to
+  those and the stores they follow.
+
+### Keeping current
+
+The daemon keeps one index, backed by [fff](https://github.com/dmtrKovalenko/fff).
+
+- **Lazy:** a root is read the first time a search reaches it, and cached.
+- **Watched:** while cached, an fff watcher on the root makes the next search
+  read it again after any change. Editing `project-map.yaml` or adding a doc
+  shows up without restarting. A root is also re-read after 30 seconds, since
+  fff does not watch gitignored paths.
+- **Idle:** a root nobody has searched for 10 minutes loses its cache and its
+  watcher.
+- **Frecency:** kept in `<profile>/context-frecency`.
+
+### Lookup from a running agent
+
+okena's MCP server offers two tools. Both send only `$OKENA_TERMINAL_ID`, so
+the daemon, not the agent, decides the scope.
+
+- **`okena_context_search`:** `query` and an optional `limit` (at most 100).
+  It searches only the session's projects and the stores they follow, and
+  returns items as the launchers show them, with their absolute `path`.
+- **`okena_context_read`:** `path`, as a search returned it. A file outside
+  those roots is refused, and so is a path that resolves outside them. A
+  shell in an ordinary repository is scoped to that repository. A session
+  started with no projects has nothing to look up.
+
+Every sent brief mentions both tools, through the `context-lookup` partial.
+
 ## Launch prompts
 
 Every brief okena opens an agent with comes from a template, so an
@@ -256,18 +348,18 @@ putting a file at `templates/<flow>.md`; its frontmatter should say
 
 | Flow | When | Variables |
 |---|---|---|
-| `task-start` | Starting work on a task, in its worktrees | `key`, `title`, `url`, `branch`, `description`, `projects`, `note`, `verify` |
-| `tasks-start` | One agent starting work on several tasks — picked together, or a group a coordinator started with `okena_start_work`. Every task has worktrees of its own on its own branch, and `tasks` lists each with them | `key` (every key as one phrase), `tasks`, `note`, `verify` |
+| `task-start` | Starting work on a task, in its worktrees | `key`, `title`, `url`, `branch`, `description`, `projects`, `note`, `verify`, `context` |
+| `tasks-start` | One agent starting work on several tasks — picked together, or a group a coordinator started with `okena_start_work`. Every task has worktrees of its own on its own branch, and `tasks` lists each with them | `key` (every key as one phrase), `tasks`, `note`, `verify`, `context` |
 | `task-verify` | How the agent on a task plans its steps and proves each one through the `okena_test_*` tools. Never sent alone: rendered into `task-start` or `tasks-start` as `verify`, so either can be overridden without the other | `key`, `title` |
-| `task-coordinate` | Splitting a task among sub-agents and starting them, from a `coordinate/…` branch of its own | `key`, `title`, `description`, `branch`, `children`, `projects`, `note` |
-| `tasks-coordinate` | Splitting several hand-picked tasks among agents and starting them. It has no worktree: it runs in the project's own checkout, or above several, and `projects` lists the repos its agents work in | `key`, `title`, `tasks`, `projects`, `note` |
+| `task-coordinate` | Splitting a task among sub-agents and starting them, from a `coordinate/…` branch of its own | `key`, `title`, `description`, `branch`, `children`, `projects`, `note`, `context` |
+| `tasks-coordinate` | Splitting several hand-picked tasks among agents and starting them. It has no worktree: it runs in the project's own checkout, or above several, and `projects` lists the repos its agents work in | `key`, `title`, `tasks`, `projects`, `note`, `context` |
 | `break-down` | Splitting a task into sub-tasks over MCP | `key`, `parent_id`, `title`, `kind`, `url`, `description`, `child_kind` |
 | `task-create` | Drafting a new task | `title`, `kind`, `container`, `parent`, `description` |
 | `task-refine` | Rewriting an existing task's title and description in place, after asking what it would otherwise guess | `key`, `title`, `kind`, `url`, `description` |
-| `spec-draft` | Filling in a scaffolded OpenSpec change | `idea`, `change`, `change_dir`, `root_path`, `store_note`, `references` |
-| `knowledge-draft` | Adding to or updating a knowledge root | `request`, `path`, `what`, `commit_note` |
-| `doc-refine` | Changing one open spec, change file or knowledge file, without committing | `request`, `file`, `path`, `root_path`, `what` |
-| `agent-session` | A free-form session against a goal you typed | `goal`, `projects` |
+| `spec-draft` | Filling in a scaffolded OpenSpec change | `idea`, `change`, `change_dir`, `root_path`, `store_note`, `references`, `context` |
+| `knowledge-draft` | Adding to or updating a knowledge root | `request`, `path`, `what`, `commit_note`, `context` |
+| `doc-refine` | Changing one open spec, change file or knowledge file, without committing | `request`, `file`, `path`, `root_path`, `what`, `context` |
+| `agent-session` | A free-form session against a goal you typed. Break down and Refine send their rendered brief as the goal | `goal`, `projects`, `context` |
 | `project-scan` | Writing or updating a repository's [project map](project-map.md#scanning) | `project`, `path`, `map_root`, `skill`, `start` |
 | `projects-scan` | Finding [links](project-map.md#scanning-links) between repositories | `projects`, `skill` |
 
@@ -309,10 +401,13 @@ the partial it picks.
 | `task-in-group` | One task in `tasks-start`'s list (`{key}`, `{title}`, `{url}`, `{branch}`, `{worktrees}`, `{description}`) |
 | `coordinate-child` | One task in a coordinator's list (`{key}`, `{kind}`, `{title}`, `{summary}`) |
 | `scan-update`, `scan-repair`, `scan-from-docs`, `scan-from-code` | A project scan's starting point (`{manifest}`; `{list}` of problems or docs) |
+| `context` | Heading over the [launch context](#launch-context) listed by path (`{list}`) |
+| `context-installed` | The skills and agents loaded into the session instead of listed (`{list}`) |
+| `context-lookup` | Every flow sent on its own: look context up with `okena_context_search` and `okena_context_read` |
 
 Some variables are still assembled by okena, because they are lists or
 optional blocks: `store_note`, `references`, `projects`, `note`, `children`,
-`tasks`, `start`, `verify`.
+`tasks`, `start`, `verify`, `context`.
 Each is either empty or arrives with its own blank line in front, so a template
 can place it on its own line without leaving a hole when it is absent. Their
 words come from the partials above.
@@ -358,6 +453,10 @@ the built-ins render from.
 | Supporting files listed per skill | 200 |
 | Bytes read per file when listing | 256 KiB |
 | Largest file opened or saved | 2 MiB |
+| Context results per launcher search | 50 |
+| Context results per `okena_context_search` | 100 |
+| Files copied per skill into a session plugin | 200 |
+| Largest file `okena_context_read` returns | 2 MiB |
 
 Reading and writing are confined to discovered roots. A root key the daemon did
 not discover is refused, and so is a path that resolves outside its root. A
