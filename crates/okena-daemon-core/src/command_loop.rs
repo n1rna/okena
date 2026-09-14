@@ -3394,10 +3394,57 @@ pub async fn daemon_command_loop(
 
                     // ── Soft-close: undo (restore the ejected pane) ──────────────
                     // ── Agent hook events ────────────────────────────────────────
-                    // Runtime state kept beside the PTYs rather than workspace
-                    // data; the activity poll publishes the result.
-                    ActionRequest::AgentHookEvent { terminal_id, event } => {
+                    // Activity is runtime state kept beside the PTYs rather than
+                    // workspace data; the activity poll publishes the result.
+                    //
+                    // A push the hook saw, or a turn's end, is also when this
+                    // session may have a new branch or PR: the branch is
+                    // recorded on the session and its PRs looked up now,
+                    // instead of on the next ~60s PR cadence.
+                    ActionRequest::AgentHookEvent {
+                        terminal_id,
+                        event,
+                        pushed_from,
+                    } => {
                         agent_activity.record_hook_event(&terminal_id, event);
+                        let turn_ended =
+                            event == okena_core::agent_activity::AgentHookEvent::TurnEnded;
+                        let session = workspace
+                            .lock()
+                            .find_project_for_terminal(&terminal_id)
+                            .map(|p| (p.id.clone(), p.path.clone()));
+                        if let Some((session_id, root)) = session
+                            && (pushed_from.is_some() || turn_ended)
+                        {
+                            let explicit = pushed_from.is_some();
+                            let dir = pushed_from.unwrap_or(root);
+                            let found = tokio::task::spawn_blocking(move || {
+                                crate::session_pushes::pushed_branch_at(
+                                    std::path::Path::new(&dir),
+                                    explicit,
+                                )
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            if let Some(pushed) = found {
+                                let mut ws = workspace.lock();
+                                if crate::session_pushes::record_pushed_branch(
+                                    &mut ws.data.projects,
+                                    &session_id,
+                                    pushed,
+                                ) {
+                                    let mut cx = DaemonWorkspaceCx::new(
+                                        &workspace_tick,
+                                        &hook_runner,
+                                        &hook_monitor,
+                                    );
+                                    ws.notify_data(&mut cx);
+                                }
+                            }
+                            let _ = git_poll_trigger_tx
+                                .send(GitPollTrigger::linked_worktrees(session_id));
+                        }
                         CommandResult::Ok(None)
                     }
 
@@ -6581,6 +6628,7 @@ mod tests {
                         RemoteCommand::Action(ActionRequest::AgentHookEvent {
                             terminal_id: "t1".into(),
                             event,
+                            pushed_from: None,
                         }),
                         "AgentHookEvent",
                     )

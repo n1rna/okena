@@ -309,6 +309,23 @@ pub struct AgentSessionState {
     /// one refreshed until it closes, a merged or closed one kept as it ended.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracked_prs: Vec<TrackedPullRequest>,
+    /// Branches this session's agent pushed, however their checkout came to
+    /// be — a Start work worktree, a `git worktree add` of its own, or its own
+    /// checkout. Seen through the agent's hooks, and kept so their PRs are
+    /// looked up, and stay listed, after that checkout is gone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pushed_branches: Vec<PushedBranch>,
+}
+
+/// A branch an agent session pushed.
+#[derive(Clone, Debug, PartialEq, Eq, Ser, De)]
+pub struct PushedBranch {
+    /// Repo label: the name of the main checkout's directory.
+    pub project: String,
+    /// The repository's main checkout, which outlives any worktree the branch
+    /// was pushed from and still resolves its GitHub remote.
+    pub repo_path: String,
+    pub branch: String,
 }
 
 /// What an agent session was started for: which card started it, and on what.
