@@ -17,7 +17,7 @@
 //! only the newest is listed.
 
 use crate::api::{ApiGitStatus, CiCheckSummary, PrInfo, PrState};
-use crate::harness::{AgentAsset, AgentAssetKind, TrackedPullRequest};
+use crate::harness::{AgentAsset, AgentAssetKind, PushedBranch, TrackedPullRequest};
 use crate::tasks::TaskRef;
 
 /// One row of a session's PRODUCED list.
@@ -92,12 +92,13 @@ pub struct LinkedCheckout<'a> {
 }
 
 /// Build the PRODUCED list: detected checkouts first, then the PRs of removed
-/// worktrees — open, merged or closed — then whatever the agent registered
-/// that matched neither.
+/// worktrees — open, merged or closed — then the branches the agent pushed
+/// that neither covers, then whatever the agent registered that matched none.
 pub fn derive_session_assets(
     registered: &[AgentAsset],
     checkouts: &[LinkedCheckout<'_>],
     tracked: &[TrackedPullRequest],
+    pushed: &[PushedBranch],
 ) -> Vec<SessionAsset> {
     let mut rows: Vec<SessionAsset> = checkouts.iter().filter_map(checkout_row).collect();
 
@@ -145,6 +146,24 @@ pub fn derive_session_assets(
             ci: None,
             task: None,
             registered: false,
+        });
+    }
+
+    // A branch the agent pushed from a checkout okena does not track: a card
+    // of its own until its PR is found, when the PR's card takes its place.
+    for branch in pushed {
+        if rows
+            .iter()
+            .any(|r| same_branch(r, &branch.project, Some(&branch.branch)))
+        {
+            continue;
+        }
+        rows.push(SessionAsset {
+            kind: AgentAssetKind::Branch,
+            title: branch.branch.clone(),
+            project: Some(branch.project.clone()),
+            branch: Some(branch.branch.clone()),
+            ..SessionAsset::default()
         });
     }
 
@@ -488,7 +507,7 @@ mod tests {
     #[test]
     fn a_branch_never_pushed_is_local_only() {
         let g = git(None, None);
-        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[]);
+        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[], &[]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, AgentAssetKind::Branch);
         assert_eq!(rows[0].state, Some(DetectedState::LocalOnly));
@@ -499,7 +518,7 @@ mod tests {
     #[test]
     fn a_pushed_branch_carries_its_counts() {
         let g = git(Some(0), None);
-        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[]);
+        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[], &[]);
         assert_eq!(
             rows[0].state,
             Some(DetectedState::Pushed {
@@ -513,7 +532,7 @@ mod tests {
     #[test]
     fn a_branch_with_a_pr_becomes_a_pr_row() {
         let g = git(Some(0), Some((7, PrState::Draft)));
-        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[]);
+        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[], &[]);
         assert_eq!(rows[0].kind, AgentAssetKind::PullRequest);
         assert_eq!(
             rows[0].url.as_deref(),
@@ -547,7 +566,7 @@ mod tests {
             total: 2,
             checks: Vec::new(),
         });
-        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[]);
+        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[], &[]);
         let readiness = rows[0].pr.as_ref().and_then(|p| p.readiness.as_ref());
         assert_eq!(readiness.map(|r| r.unresolved_threads), Some(2));
         assert_eq!(
@@ -566,7 +585,7 @@ mod tests {
             unresolved_threads: 1,
             threads_truncated: false,
         });
-        let rows = derive_session_assets(&[], &[], &[open]);
+        let rows = derive_session_assets(&[], &[], &[open], &[]);
         let readiness = rows[0].pr.as_ref().and_then(|p| p.readiness.as_ref());
         assert_eq!(
             readiness.map(|r| r.merge_state),
@@ -593,7 +612,7 @@ mod tests {
         by_hand.url = Some("https://linear.app/q/issue/qbl-375".into());
 
         for order in [[filed.clone(), by_hand.clone()], [by_hand, filed]] {
-            let rows = derive_session_assets(&order, &[], &[]);
+            let rows = derive_session_assets(&order, &[], &[], &[]);
             assert_eq!(rows.len(), 1, "{rows:?}");
             let row = &rows[0];
             assert_eq!(
@@ -614,7 +633,7 @@ mod tests {
                 filed_task("QBL-2", "https://linear.app/q/issue/QBL-2/b"),
             ],
             &[],
-            &[],
+            &[], &[],
         );
         assert_eq!(rows.len(), 2);
     }
@@ -626,7 +645,7 @@ mod tests {
         let mut filed = filed_task("QBL-375", "https://linear.app/q/issue/QBL-375/x");
         filed.branch = Some("feat/x".into());
         filed.project = Some("okena".into());
-        let rows = derive_session_assets(&[filed], &[checkout("okena", Some(&g))], &[]);
+        let rows = derive_session_assets(&[filed], &[checkout("okena", Some(&g))], &[], &[]);
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert_eq!(rows[0].title, "feat/x");
         assert!(rows[0].task.is_none());
@@ -644,7 +663,7 @@ mod tests {
         let a = "https://dev.azure.com/contoso/Shop/_workitems/edit/42";
         let b = "https://dev.azure.com/fabrikam/Shop/_workitems/edit/42";
         let links = [ticket_link("contoso", a), ticket_link("fabrikam", b)];
-        assert_eq!(derive_session_assets(&links, &[], &[]).len(), 2);
+        assert_eq!(derive_session_assets(&links, &[], &[], &[]).len(), 2);
 
         let filed_and_linked = [filed_task("#42", a), ticket_link("fabrikam", b)];
         for order in [
@@ -652,7 +671,7 @@ mod tests {
             [filed_and_linked[1].clone(), filed_and_linked[0].clone()],
         ] {
             assert_eq!(
-                derive_session_assets(&order, &[], &[]).len(),
+                derive_session_assets(&order, &[], &[], &[]).len(),
                 2,
                 "{order:?}"
             );
@@ -664,16 +683,16 @@ mod tests {
         let a = "https://linear.app/qblok/issue/ENG-12/a";
         let b = "https://linear.app/acme/issue/ENG-12/b";
         let links = [ticket_link("qblok", a), ticket_link("acme", b)];
-        assert_eq!(derive_session_assets(&links, &[], &[]).len(), 2);
+        assert_eq!(derive_session_assets(&links, &[], &[], &[]).len(), 2);
 
         let filed = [filed_task("ENG-12", a), filed_task("ENG-12", b)];
-        assert_eq!(derive_session_assets(&filed, &[], &[]).len(), 2);
+        assert_eq!(derive_session_assets(&filed, &[], &[], &[]).len(), 2);
 
         let by_hand = [
             filed_task("ENG-12", a),
             ticket_link("acme", "https://linear.app/acme/issue/ENG-12"),
         ];
-        assert_eq!(derive_session_assets(&by_hand, &[], &[]).len(), 2);
+        assert_eq!(derive_session_assets(&by_hand, &[], &[], &[]).len(), 2);
     }
 
     #[test]
@@ -685,7 +704,7 @@ mod tests {
             "https://contoso.visualstudio.com/Web%20Shop/_workitems/edit/42/",
         );
         for order in [[filed.clone(), by_hand.clone()], [by_hand, filed]] {
-            let rows = derive_session_assets(&order, &[], &[]);
+            let rows = derive_session_assets(&order, &[], &[], &[]);
             assert_eq!(rows.len(), 1, "{rows:?}");
             assert!(rows[0].task.is_some());
         }
@@ -728,7 +747,7 @@ mod tests {
 
     #[test]
     fn a_removed_worktrees_pr_has_no_checks_to_show() {
-        let rows = derive_session_assets(&[], &[], &[tracked(9, PrState::Open)]);
+        let rows = derive_session_assets(&[], &[], &[tracked(9, PrState::Open)], &[]);
         assert_eq!(rows[0].pr.as_ref().map(|p| p.number), Some(9));
         assert!(rows[0].ci.is_none());
     }
@@ -737,7 +756,7 @@ mod tests {
     fn uncommitted_changes_show_on_the_row() {
         let mut g = git(None, None);
         g.lines_added = 4;
-        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[]);
+        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[], &[]);
         assert_eq!(
             rows[0].uncommitted,
             Some(LineChanges {
@@ -753,7 +772,7 @@ mod tests {
         let rows = derive_session_assets(
             &[],
             &[checkout("okena", Some(&a)), checkout("web", Some(&b))],
-            &[],
+            &[], &[],
         );
         let projects: Vec<_> = rows.iter().map(|r| r.project.as_deref()).collect();
         assert_eq!(projects, [Some("okena"), Some("web")]);
@@ -761,7 +780,7 @@ mod tests {
 
     #[test]
     fn a_checkout_the_poll_has_not_reached_shows_its_branch_without_state() {
-        let rows = derive_session_assets(&[], &[checkout("okena", None)], &[]);
+        let rows = derive_session_assets(&[], &[checkout("okena", None)], &[], &[]);
         assert_eq!(rows[0].branch.as_deref(), Some("feat/x"));
         assert_eq!(rows[0].state, None);
     }
@@ -771,7 +790,7 @@ mod tests {
         let g = git(Some(0), Some((7, PrState::Open)));
         let mut pr = registered(AgentAssetKind::PullRequest, "Detect session assets");
         pr.url = Some("https://github.com/o/r/pull/7/".into());
-        let rows = derive_session_assets(&[pr.clone(), pr], &[checkout("okena", Some(&g))], &[]);
+        let rows = derive_session_assets(&[pr.clone(), pr], &[checkout("okena", Some(&g))], &[], &[]);
         assert_eq!(rows.len(), 1, "one row, however often it was registered");
         assert_eq!(rows[0].title, "Detect session assets");
         assert!(rows[0].registered);
@@ -790,7 +809,7 @@ mod tests {
         let rows = derive_session_assets(
             &[asset],
             &[checkout("okena", Some(&a)), checkout("web", Some(&b))],
-            &[],
+            &[], &[],
         );
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].title, "web side");
@@ -803,7 +822,7 @@ mod tests {
         let rows = derive_session_assets(
             &[registered(AgentAssetKind::Branch, "feat/x")],
             &[checkout("okena", Some(&g))],
-            &[],
+            &[], &[],
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].registered);
@@ -815,7 +834,7 @@ mod tests {
         let rows = derive_session_assets(
             &[registered(AgentAssetKind::Branch, "feat/x")],
             &[checkout("okena", Some(&a)), checkout("web", Some(&b))],
-            &[],
+            &[], &[],
         );
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[2].state, None);
@@ -835,7 +854,7 @@ mod tests {
         let rows = derive_session_assets(
             &[doc, doc_without_link],
             &[checkout("okena", Some(&g))],
-            &[],
+            &[], &[],
         );
         assert_eq!(rows.len(), 3, "{rows:?}");
         assert_eq!(rows[0].title, "feat/x", "the branch row is not retitled");
@@ -853,7 +872,7 @@ mod tests {
         let mut pr = registered(AgentAssetKind::PullRequest, "Detect assets");
         pr.url = Some("https://github.com/o/r/pull/7".into());
         pr.branch = Some("feat/x".into());
-        let rows = derive_session_assets(&[pr], &[checkout("okena", Some(&g))], &[]);
+        let rows = derive_session_assets(&[pr], &[checkout("okena", Some(&g))], &[], &[]);
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[1].url.as_deref(),
@@ -866,7 +885,7 @@ mod tests {
         let g = git(None, None);
         let mut doc = registered(AgentAssetKind::Document, "Design notes");
         doc.url = Some("https://example.com/doc".into());
-        let rows = derive_session_assets(&[doc], &[checkout("okena", Some(&g))], &[]);
+        let rows = derive_session_assets(&[doc], &[checkout("okena", Some(&g))], &[], &[]);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].kind, AgentAssetKind::Document);
         assert_eq!(rows[1].state, None);
@@ -881,7 +900,7 @@ mod tests {
         again.title = "Design notes v2".into();
         again.url = Some("https://example.com/doc".into());
 
-        let rows = derive_session_assets(&[first, again], &[], &[]);
+        let rows = derive_session_assets(&[first, again], &[], &[], &[]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "Design notes");
     }
@@ -915,7 +934,7 @@ mod tests {
     fn the_pr_of_a_removed_worktree_stays_listed() {
         let mut pr = registered(AgentAssetKind::PullRequest, "Agent title");
         pr.url = Some("https://github.com/o/r/pull/9".into());
-        let rows = derive_session_assets(&[pr], &[], &[tracked(9, PrState::Open)]);
+        let rows = derive_session_assets(&[pr], &[], &[tracked(9, PrState::Open)], &[]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "Agent title");
         assert_eq!(rows[0].project.as_deref(), Some("okena"));
@@ -928,14 +947,14 @@ mod tests {
         pr.url = Some("https://github.com/o/r/pull/9/".into());
 
         let open =
-            derive_session_assets(std::slice::from_ref(&pr), &[], &[tracked(9, PrState::Open)]);
+            derive_session_assets(std::slice::from_ref(&pr), &[], &[tracked(9, PrState::Open)], &[]);
         assert_eq!(open.len(), 1);
 
         for finished in [PrState::Merged, PrState::Closed] {
             let rows = derive_session_assets(
                 std::slice::from_ref(&pr),
                 &[],
-                &[tracked(9, finished.clone())],
+                &[tracked(9, finished.clone())], &[],
             );
             assert_eq!(rows.len(), 1, "{finished:?}: {rows:?}");
             assert_eq!(rows[0].title, "Agent title", "one card, the agent's title");
@@ -951,7 +970,7 @@ mod tests {
 
     #[test]
     fn a_merged_pr_nobody_registered_stays_listed() {
-        let rows = derive_session_assets(&[], &[], &[tracked(9, PrState::Merged)]);
+        let rows = derive_session_assets(&[], &[], &[tracked(9, PrState::Merged)], &[]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].kind, AgentAssetKind::PullRequest);
         assert_eq!(rows[0].pr.as_ref().map(|p| p.state.clone()), Some(PrState::Merged));
@@ -963,7 +982,7 @@ mod tests {
         let rows = derive_session_assets(
             &[],
             &[],
-            &[tracked(9, PrState::Closed), tracked(12, PrState::Open)],
+            &[tracked(9, PrState::Closed), tracked(12, PrState::Open)], &[],
         );
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].pr.as_ref().map(|p| p.number), Some(12));
@@ -973,7 +992,7 @@ mod tests {
         let rows = derive_session_assets(
             &[],
             &[checkout("okena", Some(&g))],
-            &[tracked(9, PrState::Merged)],
+            &[tracked(9, PrState::Merged)], &[],
         );
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].pr.as_ref().map(|p| p.number), Some(12));
@@ -983,7 +1002,7 @@ mod tests {
         let rows = derive_session_assets(
             &[],
             &[checkout("okena", Some(&bare))],
-            &[tracked(9, PrState::Merged)],
+            &[tracked(9, PrState::Merged)], &[],
         );
         assert_eq!(rows.len(), 2, "{rows:?}");
     }
@@ -994,8 +1013,34 @@ mod tests {
         let rows = derive_session_assets(
             &[],
             &[checkout("okena", Some(&g))],
-            &[tracked(9, PrState::Open)],
+            &[tracked(9, PrState::Open)], &[],
         );
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn a_pushed_branch_is_a_card_until_its_pr_takes_its_place() {
+        let pushed = PushedBranch {
+            project: "okena".into(),
+            repo_path: "/p/okena".into(),
+            branch: "feat/x".into(),
+        };
+        // Pushed from a worktree the agent made itself: no checkout okena
+        // tracks, and no PR yet.
+        let rows = derive_session_assets(&[], &[], &[], std::slice::from_ref(&pushed));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].kind, AgentAssetKind::Branch);
+        assert_eq!(rows[0].branch.as_deref(), Some("feat/x"));
+        assert_eq!(rows[0].project.as_deref(), Some("okena"));
+
+        // Its PR found and tracked: one card, the PR's.
+        let rows = derive_session_assets(
+            &[],
+            &[],
+            &[tracked(9, PrState::Open)],
+            std::slice::from_ref(&pushed),
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].kind, AgentAssetKind::PullRequest);
     }
 }

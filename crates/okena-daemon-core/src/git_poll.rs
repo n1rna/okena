@@ -27,7 +27,12 @@
 //! polled PR-only, by repo and number, on the settled PR cadence until it is
 //! merged or closed.
 //!
-//! A third feeds the project info panel: every github.com repository behind a
+//! A third also feeds that list: a branch the session's agent pushed — seen
+//! through its hooks, from a worktree it made itself or its own checkout — is
+//! looked up by branch in the repository's main checkout, until a PR is found
+//! and tracked by number like any other.
+//!
+//! A fourth feeds the project info panel: every github.com repository behind a
 //! project has its open pull requests listed — all of them, from anyone —
 //! whether or not anything shows it, on the settled PR cadence. The list is
 //! keyed by repository, so a repo open as a project and as its worktrees is
@@ -174,6 +179,8 @@ enum GithubPassMessage {
     },
     /// A repository's open pull requests, under its schedule key.
     RepoPrs { key: String, fetch: RepoPrsFetch },
+    /// A branch a session's agent pushed, looked up by branch under its key.
+    PushedBranch { key: String, fetch: PrFetch },
     /// The pass is over; carries the ids it held so they can be polled again.
     Finished(HashSet<String>),
 }
@@ -635,12 +642,15 @@ async fn poll_github(
         if id.starts_with(TRACKED_PR_KEY_PREFIX)
             || id.starts_with(REMOVED_BRANCH_KEY_PREFIX)
             || id.starts_with(REGISTERED_PR_KEY_PREFIX)
+            || id.starts_with(PUSHED_BRANCH_KEY_PREFIX)
         {
             let Some(fetch) = outcome.pr else {
                 continue;
             };
             let message = if id.starts_with(TRACKED_PR_KEY_PREFIX) {
                 GithubPassMessage::TrackedPr { key: id, fetch }
+            } else if id.starts_with(PUSHED_BRANCH_KEY_PREFIX) {
+                GithubPassMessage::PushedBranch { key: id, fetch }
             } else if id.starts_with(REMOVED_BRANCH_KEY_PREFIX) {
                 GithubPassMessage::RemovedBranch { key: id, fetch }
             } else {
@@ -1395,6 +1405,141 @@ fn select_tracked_pr_polls(
         .collect()
 }
 
+/// Schedule key prefix of a branch a session's agent pushed, by session, repo
+/// and branch.
+const PUSHED_BRANCH_KEY_PREFIX: &str = "pushed-branch:";
+
+/// A branch an agent session pushed, due a lookup by branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PushedPoll {
+    key: String,
+    link: SessionLink,
+    /// Every PR recorded for this branch is merged or closed: the branch is
+    /// only watched, slowly, for a PR that replaces it.
+    finished: bool,
+}
+
+/// Every branch a session's agent pushed that nothing else looks after: not a
+/// live linked worktree's (that worktree's own poll covers it), and with no
+/// open PR the session already tracks (tracked PRs refresh by number).
+///
+/// This is what reaches a worktree the agent made itself or a branch in the
+/// session's own checkout, which no task links — and, since the branch is
+/// looked up in the repository's main checkout, it keeps working after that
+/// checkout is gone.
+fn pushed_branch_polls(
+    workspace: &Workspace,
+    links: &HashMap<String, SessionLink>,
+) -> Vec<PushedPoll> {
+    let mut out = Vec::new();
+    for session in workspace.projects() {
+        let Some(agent) = session.agent.as_ref() else {
+            continue;
+        };
+        for pushed in &agent.pushed_branches {
+            let on_branch = |repo_path: &str, branch: Option<&str>| {
+                repo_path == pushed.repo_path && branch == Some(pushed.branch.as_str())
+            };
+            let live = links.values().any(|link| {
+                link.session_id == session.id
+                    && on_branch(&link.repo_path, link.branch.as_deref())
+            });
+            let tracked: Vec<&TrackedPullRequest> = agent
+                .tracked_prs
+                .iter()
+                .filter(|t| on_branch(&t.repo_path, t.branch.as_deref()))
+                .collect();
+            if live || tracked.iter().any(|t| !t.is_finished()) {
+                continue;
+            }
+            out.push(PushedPoll {
+                key: format!(
+                    "{PUSHED_BRANCH_KEY_PREFIX}{}|{}|{}",
+                    session.id, pushed.repo_path, pushed.branch
+                ),
+                link: SessionLink {
+                    session_id: session.id.clone(),
+                    project: pushed.project.clone(),
+                    repo_path: pushed.repo_path.clone(),
+                    branch: Some(pushed.branch.clone()),
+                },
+                finished: !tracked.is_empty(),
+            });
+        }
+    }
+    out
+}
+
+/// This cycle's pushed-branch lookups: on the PR cadence, or every
+/// `FINISHED_LINKED_PR_EVERY_N_CYCLES` once the branch's PR has finished;
+/// at once when the session's hook asked; never twice at once.
+fn select_pushed_branch_polls(
+    pushed: &[PushedPoll],
+    schedule: &GithubPollSchedule,
+    cycle: u64,
+    cadence_due: bool,
+    in_flight: &HashSet<String>,
+) -> Vec<ProjectPoll> {
+    pushed
+        .iter()
+        .filter(|p| !in_flight.contains(&p.key))
+        .filter(|p| {
+            if p.finished {
+                schedule.pr_due_every(
+                    &p.key,
+                    cycle,
+                    cadence_due,
+                    FINISHED_LINKED_PR_EVERY_N_CYCLES,
+                )
+            } else {
+                schedule.pr_due(&p.key, cycle, cadence_due)
+            }
+        })
+        .map(|p| ProjectPoll {
+            id: p.key.clone(),
+            path: p.link.repo_path.clone(),
+            want_pr: true,
+            want_ci: false,
+            ci_skip_sha: None,
+            cached_pr_number: None,
+            tracked_pr: None,
+            removed_branch: p.link.branch.clone(),
+            registered_pr: None,
+            repo_prs: false,
+        })
+        .collect()
+}
+
+/// Apply a pushed branch's lookup: a PR found is recorded on its session, to
+/// be refreshed by number from then on and kept once it finishes. No PR yet
+/// waits for the next cadence; no answer changes nothing; a refusal waits out
+/// the rate-limit gate.
+fn apply_pushed_branch_result(
+    key: &str,
+    fetch: PrFetch,
+    cycle: u64,
+    schedule: &mut GithubPollSchedule,
+    pushed: &[PushedPoll],
+    workspace: &Mutex<Workspace>,
+    workspace_tick: &watch::Sender<u64>,
+) {
+    match fetch {
+        PrFetch::RateLimited => note_rate_limited(schedule, cycle),
+        PrFetch::Failed => {}
+        PrFetch::Fetched(pr) => {
+            schedule.note_request_succeeded();
+            schedule.record_pr(key, cycle);
+            let (Some(pr), Some(poll)) = (pr, pushed.iter().find(|p| p.key == key)) else {
+                return;
+            };
+            let mut ws = workspace.lock();
+            if record_removed_pr(&mut ws.data.projects, &poll.link, pr) {
+                notify_workspace(&mut ws, workspace_tick);
+            }
+        }
+    }
+}
+
 /// Schedule key prefix of a repository's open-PR list; the rest is the
 /// repository's [`git::repository::github_repo_key`].
 const REPO_PRS_KEY_PREFIX: &str = "repo-prs:";
@@ -1638,11 +1783,22 @@ pub async fn run_git_poll(
         }
         known_linked_prs.retain(|id, _| links.contains_key(id));
         let linked_ids: HashSet<String> = links.keys().cloned().collect();
-        // An agent just registered an asset: fetch its worktrees' PRs now, so
-        // a PR it just opened is matched rather than listed twice meanwhile.
+        // Branches agents pushed from checkouts no task links.
+        let pushed_polls = {
+            let ws = workspace.lock();
+            pushed_branch_polls(&ws, &links)
+        };
+        // An agent just registered an asset, pushed, or ended a turn: fetch
+        // its worktrees' and pushed branches' PRs now, so a PR it just opened
+        // shows in seconds and is matched rather than listed twice meanwhile.
         for (id, link) in &links {
             if trigger_acc.session_asset_ids.contains(&link.session_id) {
                 schedule.force_pr(id);
+            }
+        }
+        for poll in &pushed_polls {
+            if trigger_acc.session_asset_ids.contains(&poll.link.session_id) {
+                schedule.force_pr(&poll.key);
             }
         }
         // A PR link registered with nothing known behind it — its worktree
@@ -1679,6 +1835,7 @@ pub async fn run_git_poll(
             .chain(tracked_prs.iter().map(|t| t.key.clone()))
             .chain(removed_lookups.keys().cloned())
             .chain(registered_lookups.keys().cloned())
+            .chain(pushed_polls.iter().map(|p| p.key.clone()))
             .chain(
                 live_repos
                     .iter()
@@ -1844,6 +2001,13 @@ pub async fn run_git_poll(
                 cadence_due,
                 &github_in_flight,
             ));
+            polls.extend(select_pushed_branch_polls(
+                &pushed_polls,
+                &schedule,
+                cycle,
+                cadence_due,
+                &github_in_flight,
+            ));
 
             log::trace!(
                 "GitHub poll cycle={cycle}: {} projects, {} visible, {} due",
@@ -1958,6 +2122,17 @@ pub async fn run_git_poll(
                                 &mut schedule,
                                 &mut registered_lookups,
                                 &session_links_prev,
+                                &workspace,
+                                &workspace_tick,
+                            )
+                        }
+                        GithubPassMessage::PushedBranch { key, fetch } => {
+                            apply_pushed_branch_result(
+                                &key,
+                                fetch,
+                                cycle,
+                                &mut schedule,
+                                &pushed_polls,
                                 &workspace,
                                 &workspace_tick,
                             )
@@ -3196,6 +3371,134 @@ mod tests {
         assert_eq!(links["wt2"].branch.as_deref(), Some("feat/qbl-2"));
     }
 
+    fn record_push(ws: &mut Workspace, session_id: &str, branch: &str) {
+        ws.data
+            .projects
+            .iter_mut()
+            .find(|p| p.id == session_id)
+            .unwrap()
+            .agent
+            .get_or_insert_with(Default::default)
+            .pushed_branches
+            .push(okena_core::harness::PushedBranch {
+                project: "okena".into(),
+                repo_path: "/p/okena".into(),
+                branch: branch.into(),
+            });
+    }
+
+    #[test]
+    fn a_pushed_branch_nothing_else_covers_is_looked_up_by_branch() {
+        let mut ws = linked_workspace();
+        // `feat/x` is the linked worktree's own branch: its poll covers it.
+        record_push(&mut ws, "session", "feat/x");
+        // `feat/own` came from a worktree the agent made itself.
+        record_push(&mut ws, "session", "feat/own");
+        let links = session_links(&ws);
+
+        let pushed = pushed_branch_polls(&ws, &links);
+        assert_eq!(pushed.len(), 1, "{pushed:?}");
+        assert!(pushed[0].key.ends_with("|/p/okena|feat/own"));
+        assert!(!pushed[0].finished);
+
+        let mut schedule = GithubPollSchedule::default();
+        let none = HashSet::new();
+        let polls = select_pushed_branch_polls(&pushed, &schedule, 1, true, &none);
+        assert_eq!(polls.len(), 1);
+        assert_eq!(polls[0].removed_branch.as_deref(), Some("feat/own"));
+        assert_eq!(polls[0].path, "/p/okena", "looked up in the main checkout");
+        assert!(polls[0].want_pr && !polls[0].want_ci);
+
+        // A push or turn end the hook reported: looked up off cadence.
+        schedule.pr_dispatched(&pushed[0].key, 1);
+        assert!(select_pushed_branch_polls(&pushed, &schedule, 3, false, &none).is_empty());
+        schedule.force_pr(&pushed[0].key);
+        assert_eq!(
+            select_pushed_branch_polls(&pushed, &schedule, 3, false, &none).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_pushed_branchs_pr_is_recorded_then_tracked_by_number_and_kept() {
+        let mut ws = linked_workspace();
+        record_push(&mut ws, "session", "feat/own");
+        let links = session_links(&ws);
+        let pushed = pushed_branch_polls(&ws, &links);
+        let key = pushed[0].key.clone();
+        let ws = Mutex::new(ws);
+        let tick = watch::Sender::new(0);
+        let mut schedule = GithubPollSchedule::default();
+
+        apply_pushed_branch_result(
+            &key,
+            PrFetch::Fetched(Some(pr(21, git::PrState::Open))),
+            5,
+            &mut schedule,
+            &pushed,
+            &ws,
+            &tick,
+        );
+        {
+            let ws = ws.lock();
+            let tracked = tracked_of(&ws, "session");
+            assert_eq!(tracked.len(), 1);
+            assert_eq!(tracked[0].number, 21);
+            assert_eq!(tracked[0].branch.as_deref(), Some("feat/own"));
+            assert_eq!(tracked[0].repo_path, "/p/okena");
+            // Now refreshed by number; the branch lookup stands down.
+            assert!(pushed_branch_polls(&ws, &links).is_empty());
+            assert_eq!(tracked_pr_polls(&ws).len(), 1);
+        }
+
+        // Merged: kept, and the branch is only watched slowly for a new PR.
+        let url = pr(21, git::PrState::Merged).url;
+        let mut ws = ws.into_inner();
+        assert!(apply_tracked_pr(
+            &mut ws.data.projects,
+            &url,
+            &pr(21, git::PrState::Merged)
+        ));
+        assert_eq!(tracked_of(&ws, "session")[0].state, git::PrState::Merged);
+        let pushed = pushed_branch_polls(&ws, &links);
+        assert_eq!(pushed.len(), 1);
+        assert!(pushed[0].finished);
+        schedule.pr_dispatched(&pushed[0].key, 10);
+        let none = HashSet::new();
+        assert!(select_pushed_branch_polls(&pushed, &schedule, 30, true, &none).is_empty());
+        assert_eq!(
+            select_pushed_branch_polls(&pushed, &schedule, 130, true, &none).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_pushed_branch_lookup_with_no_answer_records_nothing() {
+        let mut ws = linked_workspace();
+        record_push(&mut ws, "session", "feat/own");
+        let links = session_links(&ws);
+        let pushed = pushed_branch_polls(&ws, &links);
+        let key = pushed[0].key.clone();
+        let ws = Mutex::new(ws);
+        let tick = watch::Sender::new(0);
+        let mut schedule = GithubPollSchedule::default();
+
+        for fetch in [PrFetch::Failed, PrFetch::Fetched(None)] {
+            apply_pushed_branch_result(&key, fetch, 5, &mut schedule, &pushed, &ws, &tick);
+            assert!(tracked_of(&ws.lock(), "session").is_empty());
+        }
+        apply_pushed_branch_result(
+            &key,
+            PrFetch::RateLimited,
+            6,
+            &mut schedule,
+            &pushed,
+            &ws,
+            &tick,
+        );
+        assert!(schedule.is_rate_limited(6));
+    }
+
     #[test]
     fn a_hidden_linked_worktree_polls_its_pr_and_checks() {
         let polls = select_github_polls(
@@ -3899,6 +4202,7 @@ mod tests {
             &agent.assets,
             &[],
             &agent.tracked_prs,
+            &agent.pushed_branches,
         );
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(

@@ -335,8 +335,10 @@ impl AgentSessionInfo {
             })
             .collect();
         let assets = match project.agent.as_ref() {
-            Some(a) => derive_session_assets(&a.assets, &checkouts, &a.tracked_prs),
-            None => derive_session_assets(&[], &checkouts, &[]),
+            Some(a) => {
+                derive_session_assets(&a.assets, &checkouts, &a.tracked_prs, &a.pushed_branches)
+            }
+            None => derive_session_assets(&[], &checkouts, &[], &[]),
         };
 
         // The breakdown around it: the agent on the task's parent, and the
