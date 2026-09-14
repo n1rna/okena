@@ -150,6 +150,8 @@ impl Flow {
                 "tasks",
                 "note",
                 "verify",
+                // The map entries, specs and knowledge picked at launch.
+                "context",
             ],
             Flow::TaskVerify => &["key", "title"],
             Flow::TaskCoordinate => &[
