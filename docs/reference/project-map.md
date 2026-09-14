@@ -256,6 +256,23 @@ partial:
 | From docs | No manifest; `CLAUDE.md`, `AGENTS.md` or `docs/` is at the repository root | `scan-from-docs` |
 | From code | None of the above | `scan-from-code` |
 
+## As launch context
+
+A map's entries can be handed to an agent from any launcher, as
+[launch context](knowledge.md#launch-context).
+
+- **Entries:** every area, concept, exposed and consumed interface, CI pipeline
+  and infrastructure resource, each with its map id: `area:<id>`,
+  `concept:<id>`, `exposes:<name>`, `consumes:<name>`, `ci:<name>`,
+  `infrastructure:<name>`.
+- **Path:** an area's or concept's `doc` under the knowledge root when it
+  exists, else `project-map.yaml`.
+- **Title and description:** the entry's name (or id) and description. An
+  interface's description leads with its type.
+- **Invalid map:** contributes no entries.
+- **Not scanned:** a chosen project with no map gets a hint row with **Scan**.
+- **Current:** an edited map shows up in the next search, without restarting.
+
 ## In the info panel
 
 A repository's project info panel has a **MAP** section; a worktree's does
