@@ -82,6 +82,7 @@ pub fn get_status(path: &Path) -> StatusFetch {
         unpushed,
         review_base,
         default_branch,
+        repo_pull_requests: None,
     }))
 }
 

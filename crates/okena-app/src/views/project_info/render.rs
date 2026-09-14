@@ -4,16 +4,18 @@
 //! who is working on it — so a repo and a session read alike beside their
 //! terminals.
 
-use super::model::{area_labels, group_interfaces};
+use super::model::{area_labels, group_interfaces, pr_caption};
 use super::{ProjectInfo, ProjectInfoKind, ProjectInfoPanel};
 use crate::theme::theme;
 use crate::ui::tokens::ui_text_ms;
 use crate::views::agent_session::AgentSessionInfo;
 use crate::views::components::WorktreeSummary;
+use crate::views::components::asset_row::{ci_checks_chip, readiness_chips};
 use crate::views::components::worktree_card::{chip, ci_chip_style, pr_chip_style};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use okena_core::api::RepoPullRequest;
 use okena_core::project_map::{MapStatus, ProjectLink, ProjectMap, ProjectMapState};
 
 impl ProjectInfoPanel {
@@ -491,6 +493,98 @@ impl ProjectInfoPanel {
         item.into_any_element()
     }
 
+    /// One open pull request of the project's repository: the session PR
+    /// card's chips, with who opened it and where it merges. The title line
+    /// opens it on GitHub; the chips below keep their own clicks, so the CI
+    /// chip still opens its checks.
+    fn render_pull_request(&self, pr: &RepoPullRequest, cx: &App) -> AnyElement {
+        let t = theme(cx);
+        let (color, label) = pr_chip_style(pr.pr.number, &pr.pr.state, &t);
+        let mut chips = vec![chip(label, color, cx)];
+        chips.extend(readiness_chips(&pr.pr, cx));
+        if let Some(summary) = pr.ci.clone() {
+            chips.push(ci_checks_chip(
+                SharedString::from(format!("project-info-pr-ci-{}", pr.pr.url)),
+                summary,
+                Some(pr.pr.clone()),
+                cx,
+            ));
+        }
+        let url = pr.pr.url.clone();
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .gap(px(4.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(4.0))
+            .bg(rgb(t.bg_primary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .child(
+                h_flex()
+                    .id(SharedString::from(format!("project-info-pr-{}", pr.pr.url)))
+                    .cursor_pointer()
+                    .w_full()
+                    .min_w_0()
+                    .items_start()
+                    .gap(px(7.0))
+                    .rounded(px(3.0))
+                    .hover(|style| style.bg(rgb(t.bg_hover)))
+                    .child(
+                        svg()
+                            .path("icons/git-pull-request.svg")
+                            .flex_shrink_0()
+                            .mt(px(2.0))
+                            .size(px(13.0))
+                            .text_color(rgb(color)),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(1.0))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(ui_text_ms(cx))
+                                    .text_color(rgb(t.text_primary))
+                                    .child(pr.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(ui_text_ms(cx))
+                                    .text_color(rgb(t.text_muted))
+                                    .child(pr_caption(pr)),
+                            ),
+                    )
+                    .child(
+                        svg()
+                            .path("icons/external-link.svg")
+                            .flex_shrink_0()
+                            .mt(px(2.0))
+                            .size(px(12.0))
+                            .text_color(rgb(t.text_muted)),
+                    )
+                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                        cx.open_url(&url);
+                    }),
+            )
+            .child(
+                h_flex()
+                    .pl(px(20.0))
+                    .gap(px(4.0))
+                    .flex_wrap()
+                    .children(chips),
+            )
+            .into_any_element()
+    }
+
     /// One agent session working this project.
     ///
     /// Its own card rather than the session panel at a smaller size: here the
@@ -687,6 +781,19 @@ impl Render for ProjectInfoPanel {
                     |this: &mut Self, id, mode, cx| this.open_diff(id, mode, cx),
                     cx,
                 ));
+            }
+        }
+
+        // ── What is waiting to merge ─────────────────────────────────────────
+        // Every open PR in the repository, from anyone; a worktree shows its
+        // repository's. No list — not on github.com, or no token — no section.
+        if let Some(prs) = &info.pull_requests {
+            body = body.child(self.section_heading("PULL REQUESTS", Some(prs.len()), cx));
+            if prs.is_empty() {
+                body = body.child(self.note("None open.", cx));
+            }
+            for pr in prs {
+                body = body.child(self.render_pull_request(pr, cx));
             }
         }
 

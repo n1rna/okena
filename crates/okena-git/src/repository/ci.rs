@@ -2,8 +2,10 @@
 //!
 //! `fetch_pr_info` / `fetch_ci_checks` run the queries behind `gh pr list
 //! --head`, `gh pr checks` and `gh api .../check-runs|status` over the shared
-//! HTTP bus ([`super::github`]) instead of a subprocess per query. The payload
-//! mapping is pure and unit-tested. `list_pull_requests` still shells out to `gh`.
+//! HTTP bus ([`super::github`]) instead of a subprocess per query.
+//! `fetch_open_pull_requests` lists every open PR of a repository, with each
+//! one's checks and readiness, for the poller. The payload mapping is pure and
+//! unit-tested. `list_pull_requests` still shells out to `gh`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -44,6 +46,19 @@ pub enum CiFetch {
         summary: Option<crate::CiCheckSummary>,
     },
     RateLimited,
+}
+
+/// Outcome of listing a repository's open pull requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoPrsFetch {
+    /// The whole list, every page of it. `None` when there is nothing to list
+    /// from: no github.com remote, no token to ask with, or a repository this
+    /// token cannot see.
+    Fetched(Option<Vec<crate::RepoPullRequest>>),
+    RateLimited,
+    /// No answer, or only part of one. A list with a page missing would drop
+    /// PRs that are still open, so the caller keeps the list it has.
+    Failed,
 }
 
 #[derive(serde::Deserialize)]
@@ -428,6 +443,219 @@ pub fn fetch_pr_by_number_with_head(repo_path: &Path, number: u32) -> (PrFetch, 
                 .and_then(pr_info_of)
                 .map(|pr| with_readiness_withheld(pr, readiness_withheld));
             (PrFetch::Fetched(pr), head)
+        }
+    }
+}
+
+/// Every open pull request of a repository, drafts included, a page at a time:
+/// each with its head commit's checks and, when the repo serves them, its
+/// readiness. Checks share [`PR_CHECKS_QUERY`]'s selection.
+const OPEN_PRS_QUERY: &str = r#"
+query OpenPullRequests($owner: String!, $repo: String!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequests(
+      states: [OPEN],
+      first: 25,
+      after: $after,
+      orderBy: {field: CREATED_AT, direction: DESC}
+    ) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        url state isDraft number title baseRefName headRefName
+        author { login }
+        commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                contexts(first: 100) {
+                  nodes {
+                    __typename
+                    ... on StatusContext { context state targetUrl description }
+                    ... on CheckRun {
+                      name status conclusion startedAt completedAt detailsUrl
+                      checkSuite { workflowRun { event workflow { name } } }
+                    }
+                  }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }
+          }
+        }
+        __READINESS__
+      }
+    }
+  }
+}"#;
+
+/// One page of [`OPEN_PRS_QUERY`]'s `pullRequests`.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct OpenPrsPage {
+    nodes: Vec<OpenPrNode>,
+    page_info: Option<PageInfo>,
+}
+
+/// A `pullRequests.nodes[]` entry of [`OPEN_PRS_QUERY`].
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct OpenPrNode {
+    #[serde(flatten)]
+    pr: PrNode,
+    title: String,
+    author: Option<HeadOwner>,
+    commits: Option<RollupCommits>,
+}
+
+/// A PR's last commit, as `commits(last: 1)` reads it.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct RollupCommits {
+    nodes: Vec<RollupCommitNode>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct RollupCommitNode {
+    commit: Option<RollupCommit>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct RollupCommit {
+    status_check_rollup: Option<Rollup>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct Rollup {
+    contexts: Option<RollupPage>,
+}
+
+/// One page of a check rollup's contexts.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct RollupPage {
+    nodes: Vec<RollupContext>,
+    page_info: Option<PageInfo>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct PageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+impl PageInfo {
+    /// The cursor to ask the next page with, when there is one.
+    fn next(&self) -> Option<&str> {
+        self.end_cursor
+            .as_deref()
+            .filter(|cursor| self.has_next_page && !cursor.is_empty())
+    }
+}
+
+/// An open PR as one page read it: the PR, its first page of checks, and
+/// where the rest of its checks start when one page did not hold them.
+struct OpenPrRead {
+    pr: crate::RepoPullRequest,
+    contexts: Vec<RollupContext>,
+    more_checks: Option<String>,
+}
+
+/// Read one [`OpenPrNode`]. `None` for a node without a usable link.
+fn open_pr_of(node: OpenPrNode, readiness_withheld: bool) -> Option<OpenPrRead> {
+    let OpenPrNode {
+        pr,
+        title,
+        author,
+        commits,
+    } = node;
+    let head = pr.head_ref_name.clone().unwrap_or_default();
+    let checks = commits
+        .and_then(|commits| commits.nodes.into_iter().next())
+        .and_then(|node| node.commit)
+        .and_then(|commit| commit.status_check_rollup)
+        .and_then(|rollup| rollup.contexts)
+        .unwrap_or_default();
+    let more_checks = checks
+        .page_info
+        .as_ref()
+        .and_then(PageInfo::next)
+        .map(str::to_string);
+    let pr = with_readiness_withheld(pr_info_of(pr)?, readiness_withheld);
+    Some(OpenPrRead {
+        pr: crate::RepoPullRequest {
+            pr,
+            title,
+            author: author
+                .map(|author| author.login)
+                .filter(|login| !login.is_empty()),
+            head,
+            ci: None,
+        },
+        contexts: checks.nodes,
+        more_checks,
+    })
+}
+
+/// Every open pull request in the base repository of the checkout at `path`,
+/// drafts included, whoever opened them.
+///
+/// Pages through all of them, however many there are. Each PR's checks come
+/// with it; a PR with more checks than one page holds reads the rest by
+/// number. Anything short of the whole list is [`RepoPrsFetch::Failed`].
+pub fn fetch_open_pull_requests(path: &Path) -> RepoPrsFetch {
+    // Nothing to ask, and nothing to ask with: there is no list to show.
+    let Some((mut client, repo)) = github_client(path) else {
+        return RepoPrsFetch::Fetched(None);
+    };
+    open_pull_requests(&mut client, &repo)
+}
+
+/// [`fetch_open_pull_requests`] with `client`, for `repo`.
+fn open_pull_requests(client: &mut GithubClient, repo: &GithubRepo) -> RepoPrsFetch {
+    let mut prs = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let variables = json!({ "owner": repo.owner, "repo": repo.name, "after": after });
+        let PrAnswer {
+            data,
+            readiness_withheld,
+        } = match pr_graphql(client, repo, OPEN_PRS_QUERY, variables) {
+            Ok(answer) => answer,
+            Err(ApiError::RateLimited) => return RepoPrsFetch::RateLimited,
+            // The repository is gone, or this token can no longer see it.
+            Err(ApiError::NotFound) => return RepoPrsFetch::Fetched(None),
+            Err(ApiError::Failed) => return RepoPrsFetch::Failed,
+        };
+        let Some(page) = data
+            .pointer("/repository/pullRequests")
+            .cloned()
+            .and_then(|page| serde_json::from_value::<OpenPrsPage>(page).ok())
+        else {
+            return RepoPrsFetch::Failed;
+        };
+        for node in page.nodes {
+            let number = node.pr.number;
+            let Some(mut read) = open_pr_of(node, readiness_withheld) else {
+                continue;
+            };
+            if let Some(cursor) = read.more_checks.take() {
+                match pr_check_contexts(client, repo, number, Some(cursor)) {
+                    Ok(rest) => read.contexts.extend(rest),
+                    Err(ApiError::RateLimited) => return RepoPrsFetch::RateLimited,
+                    Err(ApiError::Failed | ApiError::NotFound) => return RepoPrsFetch::Failed,
+                }
+            }
+            read.pr.ci = summarize_checks(aggregate_checks(read.contexts));
+            prs.push(read.pr);
+        }
+        match page.page_info.as_ref().and_then(PageInfo::next) {
+            // A cursor that does not move would page forever.
+            Some(next) if after.as_deref() != Some(next) => after = Some(next.to_string()),
+            _ => return RepoPrsFetch::Fetched(Some(prs)),
         }
     }
 }
@@ -922,9 +1150,24 @@ fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch 
     let Some((mut client, repo)) = github_client(path) else {
         return failed();
     };
+    match pr_check_contexts(&mut client, &repo, pr_number, None) {
+        Ok(contexts) => CiFetch::Fetched {
+            summary: summarize_checks(aggregate_checks(contexts)),
+            sha,
+        },
+        Err(ApiError::RateLimited) => CiFetch::RateLimited,
+        Err(ApiError::Failed | ApiError::NotFound) => failed(),
+    }
+}
 
+/// A PR's check contexts from `cursor` on, every page of them.
+fn pr_check_contexts(
+    client: &mut GithubClient,
+    repo: &GithubRepo,
+    pr_number: u32,
+    mut cursor: Option<String>,
+) -> Result<Vec<RollupContext>, ApiError> {
     let mut contexts: Vec<RollupContext> = Vec::new();
-    let mut cursor: Option<String> = None;
     loop {
         let variables = json!({
             "owner": repo.owner,
@@ -932,11 +1175,7 @@ fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch 
             "number": pr_number,
             "endCursor": cursor,
         });
-        let data = match client.graphql(PR_CHECKS_QUERY, variables) {
-            Ok(data) => data,
-            Err(ApiError::RateLimited) => return CiFetch::RateLimited,
-            Err(ApiError::Failed | ApiError::NotFound) => return failed(),
-        };
+        let data = client.graphql(PR_CHECKS_QUERY, variables)?;
         // A commit with no checks has a null rollup — nothing to read.
         let Some(page) = data
             .pointer("/repository/pullRequest/commits/nodes/0/commit/statusCheckRollup/contexts")
@@ -949,7 +1188,7 @@ fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch 
             .map(serde_json::from_value::<Vec<RollupContext>>)
         {
             Some(Ok(nodes)) => contexts.extend(nodes),
-            Some(Err(_)) => return failed(),
+            Some(Err(_)) => return Err(ApiError::Failed),
             None => {}
         }
         let has_next = page
@@ -964,11 +1203,7 @@ fn fetch_pr_checks(path: &Path, pr_number: u32, sha: Option<String>) -> CiFetch 
             break;
         }
     }
-
-    CiFetch::Fetched {
-        summary: summarize_checks(aggregate_checks(contexts)),
-        sha,
-    }
+    Ok(contexts)
 }
 
 /// The [`READINESS_FIELDS`] of a PR node.
@@ -2291,5 +2526,226 @@ mod tests {
             ..pr
         };
         assert!(!super::with_readiness_withheld(merged, true).readiness_unavailable);
+    }
+
+    // ─── Open PRs of a repository ──────────────────────────────────────
+
+    fn check_run(name: &str, conclusion: &str) -> serde_json::Value {
+        serde_json::json!({
+            "__typename": "CheckRun", "name": name, "status": "COMPLETED",
+            "conclusion": conclusion,
+            "startedAt": "2026-01-01T00:00:00Z", "completedAt": "2026-01-01T00:01:00Z",
+        })
+    }
+
+    /// An open PR node of `OPEN_PRS_QUERY`, clean and unreviewed unless
+    /// `extra` says otherwise.
+    fn listed_pr(number: u32, extra: serde_json::Value) -> serde_json::Value {
+        let mut node = serde_json::json!({
+            "url": format!("https://github.com/o/r/pull/{number}"),
+            "state": "OPEN", "isDraft": false, "number": number,
+            "title": format!("PR {number}"),
+            "baseRefName": "main", "headRefName": format!("feat/{number}"),
+            "author": { "login": "someone" },
+            "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "reviewDecision": null,
+            "reviewThreads": { "pageInfo": { "hasNextPage": false }, "nodes": [] },
+        });
+        if let (Some(node), Some(extra)) = (node.as_object_mut(), extra.as_object()) {
+            node.extend(extra.clone());
+        }
+        node
+    }
+
+    fn rollup(contexts: Vec<serde_json::Value>, next: Option<&str>) -> serde_json::Value {
+        serde_json::json!({ "nodes": [{ "commit": { "statusCheckRollup": { "contexts": {
+            "nodes": contexts,
+            "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next },
+        }}}}]})
+    }
+
+    fn prs_page(nodes: Vec<serde_json::Value>, next: Option<&str>) -> serde_json::Value {
+        serde_json::json!({ "data": { "repository": { "pullRequests": {
+            "nodes": nodes,
+            "pageInfo": { "hasNextPage": next.is_some(), "endCursor": next },
+        }}}})
+    }
+
+    /// Every request a mock was asked: its query and variables.
+    type Asked = std::sync::Arc<parking_lot::Mutex<Vec<(String, serde_json::Value)>>>;
+
+    /// Answer every GraphQL request with `respond(query, variables)`, and keep
+    /// the variables of each one asked.
+    fn answer(
+        respond: impl Fn(&str, &serde_json::Value) -> (u16, serde_json::Value) + Send + Sync + 'static,
+    ) -> (okena_transport::http::testing::MockGuard, Asked) {
+        let asked = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let guard = okena_transport::http::testing::mock(move |req| {
+            let body = req.json_body().cloned().unwrap_or_default();
+            let query = body["query"].as_str().unwrap_or_default().to_string();
+            let variables = body["variables"].clone();
+            let (status, reply) = respond(&query, &variables);
+            log.lock().push((query, variables));
+            Ok(crate::repository::github::tests::response(
+                status,
+                &[],
+                &reply.to_string(),
+            ))
+        });
+        (guard, asked)
+    }
+
+    fn list(repo_owner: &str) -> super::RepoPrsFetch {
+        let mut client = super::GithubClient::with_token("github.com", "tok");
+        super::open_pull_requests(&mut client, &repo(repo_owner, "r"))
+    }
+
+    #[test]
+    fn every_open_pr_is_listed_across_pages_with_what_its_row_shows() {
+        let _guard = crate::repository::github::tests::mock_guard();
+        let (_mock, asked) = answer(|_, variables| {
+            let page = match variables["after"].as_str() {
+                None => prs_page(
+                    vec![
+                        listed_pr(3, serde_json::json!({ "isDraft": true })),
+                        listed_pr(
+                            2,
+                            serde_json::json!({
+                                "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY",
+                                "reviewDecision": "CHANGES_REQUESTED",
+                                "reviewThreads": { "pageInfo": { "hasNextPage": false },
+                                    "nodes": [{ "isResolved": false }, { "isResolved": true }] },
+                            }),
+                        ),
+                    ],
+                    Some("c1"),
+                ),
+                Some("c1") => prs_page(
+                    vec![listed_pr(
+                        1,
+                        serde_json::json!({
+                            "author": null,
+                            "commits": rollup(
+                                vec![check_run("test", "FAILURE"), check_run("lint", "SUCCESS")],
+                                None,
+                            ),
+                        }),
+                    )],
+                    None,
+                ),
+                Some(other) => panic!("asked after unknown cursor {other}"),
+            };
+            (200, page)
+        });
+
+        let super::RepoPrsFetch::Fetched(Some(prs)) = list("o") else {
+            panic!("expected a list");
+        };
+        let numbers: Vec<u32> = prs.iter().map(|p| p.pr.number).collect();
+        assert_eq!(numbers, [3, 2, 1], "every page, in order");
+
+        assert_eq!(prs[0].pr.state, crate::PrState::Draft);
+        assert_eq!(prs[0].author.as_deref(), Some("someone"));
+        assert_eq!(prs[0].title, "PR 3");
+
+        let conflicting = prs[1].pr.readiness.as_ref().expect("readiness");
+        assert_eq!(conflicting.merge_state, crate::MergeState::Conflicting);
+        assert_eq!(
+            conflicting.review_decision,
+            Some(crate::ReviewDecision::ChangesRequested)
+        );
+        assert_eq!(conflicting.unresolved_threads, 1);
+
+        let failing = &prs[2];
+        assert_eq!(failing.author, None, "a deleted account has no login");
+        assert_eq!(failing.head, "feat/1");
+        assert_eq!(failing.pr.base.as_deref(), Some("main"));
+        assert_eq!(failing.pr.url, "https://github.com/o/r/pull/1");
+        let ci = failing.ci.as_ref().expect("checks");
+        assert_eq!((ci.status.clone(), ci.passed, ci.failed), (crate::CiStatus::Failure, 1, 1));
+        let failed: Vec<&str> = ci
+            .checks
+            .iter()
+            .filter(|c| c.status == crate::CiStatus::Failure)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(failed, ["test"], "the popover lists the failed check");
+        assert!(prs[0].ci.is_none(), "no checks, no rollup");
+
+        let asked = asked.lock();
+        assert_eq!(asked.len(), 2);
+        assert!(asked[0].0.contains("states: [OPEN]"));
+        assert!(asked[0].0.contains("reviewThreads"), "readiness is asked for");
+        assert_eq!(asked[1].1["after"], "c1");
+    }
+
+    #[test]
+    fn a_pr_with_more_checks_than_one_page_reads_the_rest() {
+        let _guard = crate::repository::github::tests::mock_guard();
+        let (_mock, asked) = answer(|query, variables| {
+            if query.contains("PullRequestStatusChecks") {
+                assert_eq!(variables["number"], 5);
+                assert_eq!(variables["endCursor"], "k1");
+                let more = rollup(vec![check_run("b", "FAILURE")], None);
+                return (
+                    200,
+                    serde_json::json!({ "data": { "repository": { "pullRequest": { "commits": more }}}}),
+                );
+            }
+            let first = rollup(vec![check_run("a", "SUCCESS")], Some("k1"));
+            (
+                200,
+                prs_page(vec![listed_pr(5, serde_json::json!({ "commits": first }))], None),
+            )
+        });
+
+        let super::RepoPrsFetch::Fetched(Some(prs)) = list("o") else {
+            panic!("expected a list");
+        };
+        let ci = prs[0].ci.as_ref().expect("checks");
+        assert_eq!((ci.total, ci.passed, ci.failed), (2, 1, 1));
+        assert_eq!(asked.lock().len(), 2);
+    }
+
+    #[test]
+    fn a_list_with_a_page_missing_is_no_list() {
+        let _guard = crate::repository::github::tests::mock_guard();
+        let second = |reply: (u16, serde_json::Value)| {
+            answer(move |_, variables| match variables["after"].as_str() {
+                None => (200, prs_page(vec![listed_pr(1, serde_json::json!({}))], Some("c1"))),
+                Some(_) => reply.clone(),
+            })
+        };
+
+        let (_mock, _) = second((502, serde_json::json!({})));
+        assert_eq!(list("o"), super::RepoPrsFetch::Failed);
+        drop(_mock);
+
+        let (_mock, _) = second((
+            200,
+            serde_json::json!({ "errors": [{ "type": "RATE_LIMITED", "message": "API rate limit exceeded" }] }),
+        ));
+        assert_eq!(list("o"), super::RepoPrsFetch::RateLimited);
+    }
+
+    #[test]
+    fn a_repository_the_token_cannot_see_has_no_list() {
+        let _guard = crate::repository::github::tests::mock_guard();
+        let (_mock, _) = answer(|_, _| {
+            (
+                200,
+                serde_json::json!({ "errors": [{ "type": "NOT_FOUND", "message": "Could not resolve to a Repository" }] }),
+            )
+        });
+        assert_eq!(list("o"), super::RepoPrsFetch::Fetched(None));
+    }
+
+    #[test]
+    fn a_checkout_without_a_github_remote_has_no_list() {
+        let (_tmp, path) = crate::repository::test_support::init_temp_repo();
+        assert_eq!(
+            super::fetch_open_pull_requests(&path),
+            super::RepoPrsFetch::Fetched(None)
+        );
     }
 }

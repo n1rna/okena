@@ -4,7 +4,7 @@
 //! read here for a single project so they can sit beside its own terminal.
 
 use crate::workspace::state::{ProjectData, Workspace};
-use okena_core::api::{CiStatus, PrState};
+use okena_core::api::{ApiGitStatus, CiStatus, PrState, RepoPullRequest};
 use okena_core::project_map::{Interface, InterfaceKind, ProjectMap};
 use std::collections::HashSet;
 
@@ -73,6 +73,10 @@ pub struct ProjectInfo {
     pub worktrees: Vec<String>,
     /// Agent sessions working this project's tasks, by id.
     pub sessions: Vec<String>,
+    /// Every open pull request in the project's GitHub repository — a
+    /// worktree's is its repository's. `None` when there is no list: no
+    /// github.com remote, no token, or no poll answered yet.
+    pub pull_requests: Option<Vec<RepoPullRequest>>,
 }
 
 impl ProjectInfo {
@@ -101,8 +105,33 @@ impl ProjectInfo {
             git: GitFacts::collect(ws, project_id),
             worktrees: worktrees.iter().map(|w| w.id.clone()).collect(),
             sessions: sessions_working(ws.projects(), &tasks),
+            pull_requests: pull_requests_of(
+                ws.remote_snapshot(project_id)
+                    .and_then(|snap| snap.git_status.as_ref()),
+            ),
         })
     }
+}
+
+/// The open pull requests a project shows, from the daemon snapshot that
+/// feeds its header — so a local and a remote project read alike.
+pub(super) fn pull_requests_of(git: Option<&ApiGitStatus>) -> Option<Vec<RepoPullRequest>> {
+    git?.repo_pull_requests.clone()
+}
+
+/// What a PR row says under its title: its number, who opened it, and the
+/// branch it merges from and into.
+pub(super) fn pr_caption(pr: &RepoPullRequest) -> String {
+    let mut parts = vec![format!("#{}", pr.pr.number)];
+    parts.extend(pr.author.clone());
+    let branches = match (pr.head.as_str(), pr.pr.base.as_deref()) {
+        ("", None) => None,
+        (head, None) => Some(head.to_string()),
+        ("", Some(base)) => Some(format!("→ {base}")),
+        (head, Some(base)) => Some(format!("{head} → {base}")),
+    };
+    parts.extend(branches);
+    parts.join(" · ")
 }
 
 /// A map's interfaces grouped by type: types in [`InterfaceKind::all`] order,
@@ -164,7 +193,10 @@ pub(super) fn sessions_working(
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{area_labels, group_interfaces, sessions_working, task_ids};
+    use super::{
+        area_labels, group_interfaces, pr_caption, pull_requests_of, sessions_working, task_ids,
+    };
+    use okena_core::api::{ApiGitStatus, PrInfo, PrState, RepoPullRequest};
     use crate::workspace::state::ProjectData;
     use okena_core::project_map::{InterfaceKind, ProjectMap};
     use std::collections::HashSet;
@@ -309,5 +341,55 @@ mod tests {
         let mut wt = worktree("wt1", "u1");
         wt.also_tasks = vec![serde_json::from_value(task("u2")).unwrap()];
         assert_eq!(task_ids(&repo, [wt].iter()), ids(&["u1", "u2"]));
+    }
+
+    fn listed(author: Option<&str>, head: &str, base: Option<&str>) -> RepoPullRequest {
+        RepoPullRequest {
+            pr: PrInfo {
+                url: "https://github.com/o/r/pull/12".into(),
+                state: PrState::Open,
+                number: 12,
+                base: base.map(Into::into),
+                readiness: None,
+                readiness_unavailable: false,
+            },
+            title: "Someone's change".into(),
+            author: author.map(Into::into),
+            head: head.into(),
+            ci: None,
+        }
+    }
+
+    #[test]
+    fn a_pr_row_names_its_author_and_where_it_merges() {
+        assert_eq!(
+            pr_caption(&listed(Some("octo"), "feat/x", Some("main"))),
+            "#12 · octo · feat/x → main"
+        );
+        assert_eq!(
+            pr_caption(&listed(None, "feat/x", None)),
+            "#12 · feat/x",
+            "a deleted author and an unknown base are left out"
+        );
+        assert_eq!(pr_caption(&listed(None, "", Some("main"))), "#12 · → main");
+    }
+
+    #[test]
+    fn the_panel_shows_the_list_the_snapshot_carries_and_no_section_without_one() {
+        assert_eq!(pull_requests_of(None), None, "no git status yet");
+        let mut git = ApiGitStatus::default();
+        assert_eq!(
+            pull_requests_of(Some(&git)),
+            None,
+            "not on github.com, or no token"
+        );
+        git.repo_pull_requests = Some(Vec::new());
+        assert_eq!(
+            pull_requests_of(Some(&git)),
+            Some(Vec::new()),
+            "a section that says none are open"
+        );
+        git.repo_pull_requests = Some(vec![listed(Some("octo"), "feat/x", Some("main"))]);
+        assert_eq!(pull_requests_of(Some(&git)).map(|l| l.len()), Some(1));
     }
 }

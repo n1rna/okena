@@ -888,6 +888,9 @@ impl ProjectColumn {
                 // daemon-backed projects too.
                 review_base: g.review_base.clone(),
                 default_branch: g.default_branch.clone(),
+                // The header shows the checked-out branch only; the repo's
+                // list belongs to the project info panel.
+                repo_pull_requests: None,
             })
     }
 

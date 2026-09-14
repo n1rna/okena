@@ -54,7 +54,8 @@ use std::path::{Path, PathBuf};
 // (`ApiGitStatus`). Re-exported here so existing `okena_git::{PrInfo, ..}`
 // paths keep working and `GitStatus` below can embed them.
 pub use okena_core::api::{
-    CiCheck, CiCheckSummary, CiStatus, MergeState, PrInfo, PrReadiness, PrState, ReviewDecision,
+    CiCheck, CiCheckSummary, CiStatus, MergeState, PrInfo, PrReadiness, PrState, RepoPullRequest,
+    ReviewDecision,
 };
 
 /// Git status information for display in project header
@@ -101,6 +102,11 @@ pub struct GitStatus {
     /// the default branch (the common case). `None` when unresolved.
     #[serde(default)]
     pub default_branch: Option<String>,
+    /// Every open pull request in the repository, from anyone. Not read from
+    /// the checkout: the poller fills it in per repository. `None` when there
+    /// is no list to show.
+    #[serde(default)]
+    pub repo_pull_requests: Option<Vec<RepoPullRequest>>,
 }
 
 /// Per-file diff summary for popover display
@@ -249,6 +255,7 @@ pub fn warm_branch_cache(path: &Path) {
                 unpushed: None,
                 review_base: None,
                 default_branch: None,
+                repo_pull_requests: None,
             })
         });
     });

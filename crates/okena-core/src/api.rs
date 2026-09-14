@@ -278,6 +278,23 @@ pub struct WorktreePullRequest {
     pub branch: String,
 }
 
+/// One open pull request in a project's GitHub repository, whoever opened it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoPullRequest {
+    /// Number, link, draft state, base branch and what stands in the way of
+    /// merging it — the same facts a session's PR row shows.
+    pub pr: PrInfo,
+    pub title: String,
+    /// Login of whoever opened it. `None` for an account since deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// Branch it was opened from.
+    pub head: String,
+    /// CI rollup of its head commit, with each check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci: Option<CiCheckSummary>,
+}
+
 /// Daemon-resolved worktree paths for the worktree management popover.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiWorktreeEntry {
@@ -322,6 +339,12 @@ pub struct ApiGitStatus {
     /// `None` and the label always shows. `None` when unresolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,
+    /// Every open pull request in the project's GitHub repository, from anyone.
+    /// A worktree carries its repository's list. `None` when the repository is
+    /// not on github.com, no token is available, or no poll has answered yet;
+    /// empty when nothing is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_pull_requests: Option<Vec<RepoPullRequest>>,
 }
 
 /// Wire projection of a daemon-originated toast, forwarded to thin clients so
@@ -2568,11 +2591,31 @@ mod tests {
             unpushed: Some(2),
             review_base: Some("origin/main".into()),
             default_branch: Some("main".into()),
+            repo_pull_requests: Some(vec![RepoPullRequest {
+                pr: PrInfo {
+                    url: "https://github.com/o/r/pull/9".into(),
+                    state: PrState::Draft,
+                    number: 9,
+                    base: Some("main".into()),
+                    readiness: Some(PrReadiness {
+                        merge_state: MergeState::Conflicting,
+                        review_decision: Some(ReviewDecision::ChangesRequested),
+                        unresolved_threads: 2,
+                        threads_truncated: false,
+                    }),
+                    readiness_unavailable: false,
+                },
+                title: "Someone else's change".into(),
+                author: Some("someone".into()),
+                head: "feat/other".into(),
+                ci: None,
+            }]),
         };
         let json = serde_json::to_string(&status).unwrap();
         let parsed: ApiGitStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.pr_info, status.pr_info);
         assert_eq!(parsed.ci_checks, status.ci_checks);
+        assert_eq!(parsed.repo_pull_requests, status.repo_pull_requests);
         assert_eq!(parsed.ahead, Some(3));
         assert_eq!(parsed.behind, Some(1));
         assert_eq!(parsed.review_base.as_deref(), Some("origin/main"));
@@ -2594,6 +2637,10 @@ mod tests {
         assert!(parsed.pr_info.is_none());
         assert!(parsed.ci_checks.is_none());
         assert!(parsed.ahead.is_none());
+        assert!(
+            parsed.repo_pull_requests.is_none(),
+            "no list is no section, not an empty one"
+        );
     }
 
     #[test]
