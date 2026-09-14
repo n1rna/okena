@@ -44,13 +44,47 @@ pub(crate) struct TaskFilter {
     /// string the row's chip shows, so the filter and the list cannot
     /// disagree about what a status is called.
     statuses: BTreeSet<String>,
+    /// Text typed into the search box, as typed. Narrows by key and title
+    /// only, and ANDs with the facets like one more axis would.
+    search: String,
+}
+
+/// What is narrowing the list, so an empty section can say which it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Narrowing {
+    Nothing,
+    Search,
+    Facets,
+    Both,
 }
 
 impl TaskFilter {
     pub(crate) fn is_empty(&self) -> bool {
-        self.labels.is_empty()
-            && self.statuses.is_empty()
-            && self.groups.values().all(|v| v.is_empty())
+        !self.searching() && !self.has_facets()
+    }
+
+    fn has_facets(&self) -> bool {
+        !self.labels.is_empty()
+            || !self.statuses.is_empty()
+            || self.groups.values().any(|v| !v.is_empty())
+    }
+
+    /// Whether the search box holds anything but whitespace.
+    fn searching(&self) -> bool {
+        !self.search.trim().is_empty()
+    }
+
+    pub(super) fn narrowing(&self) -> Narrowing {
+        match (self.searching(), self.has_facets()) {
+            (false, false) => Narrowing::Nothing,
+            (true, false) => Narrowing::Search,
+            (false, true) => Narrowing::Facets,
+            (true, true) => Narrowing::Both,
+        }
+    }
+
+    pub(super) fn set_search(&mut self, text: &str) {
+        self.search = text.to_string();
     }
 
     /// How many values are selected in total, for the "Filters (3)" badge.
@@ -60,10 +94,12 @@ impl TaskFilter {
             + self.groups.values().map(BTreeSet::len).sum::<usize>()
     }
 
+    /// Empty the facets and the search text alike: there is one Clear.
     pub(super) fn clear(&mut self) {
         self.groups.clear();
         self.labels.clear();
         self.statuses.clear();
+        self.search.clear();
     }
 
     pub(super) fn group_selected(&self, axis: &GroupAxis, id: &str) -> bool {
@@ -117,6 +153,13 @@ impl TaskFilter {
         if !self.statuses.is_empty() && !self.statuses.contains(status_name(task)) {
             return false;
         }
+        let needle = self.search.trim().to_lowercase();
+        if !needle.is_empty()
+            && !task.display_key.to_lowercase().contains(&needle)
+            && !task.title.to_lowercase().contains(&needle)
+        {
+            return false;
+        }
         true
     }
 
@@ -125,6 +168,9 @@ impl TaskFilter {
     /// Without this, finishing the sprint you had selected leaves a filter
     /// that matches nothing, and the view reads as "you have no tasks" rather
     /// than "you are filtered to something that is gone".
+    ///
+    /// The search text is left alone: it is not a value on offer, and the
+    /// person typing it is looking at the result.
     pub(super) fn prune(&mut self, facets: &Facets) {
         for (axis, selected) in self.groups.iter_mut() {
             let available: BTreeSet<&str> = facets
@@ -546,6 +592,90 @@ mod tests {
         let mut f = TaskFilter::default();
         f.toggle_status("In review");
         assert_eq!(keys(&f, &tasks), ["A"]);
+    }
+
+    fn titled(key: &str, title: &str) -> Task {
+        let mut t = task(key, vec![], &[]);
+        t.title = title.into();
+        t
+    }
+
+    fn searchable() -> Vec<Task> {
+        vec![
+            titled("QBL-377", "Search box on the filter bar"),
+            titled("QBL-371", "Link every task of a session"),
+            titled("QBL-400", "Refresh the queue"),
+        ]
+    }
+
+    #[test]
+    fn search_matches_part_of_a_key() {
+        let mut f = TaskFilter::default();
+        f.set_search("qbl-37");
+        assert_eq!(keys(&f, &searchable()), ["QBL-377", "QBL-371"]);
+    }
+
+    #[test]
+    fn search_matches_a_word_in_the_title_ignoring_case_and_padding() {
+        let mut f = TaskFilter::default();
+        f.set_search("  FILTER bar ");
+        assert_eq!(keys(&f, &searchable()), ["QBL-377"]);
+    }
+
+    #[test]
+    fn search_ignores_description_and_labels() {
+        let mut t = titled("QBL-1", "Unrelated");
+        t.description = Some("mentions a filter".into());
+        t.labels = vec!["filter".into()];
+        let mut f = TaskFilter::default();
+        f.set_search("filter");
+        assert!(keys(&f, &[t]).is_empty());
+    }
+
+    #[test]
+    fn blank_search_keeps_everything_and_is_not_filtering() {
+        let mut f = TaskFilter::default();
+        f.set_search("   ");
+        assert!(f.is_empty());
+        assert_eq!(f.narrowing(), super::Narrowing::Nothing);
+        assert_eq!(keys(&f, &searchable()).len(), 3);
+    }
+
+    #[test]
+    fn search_narrows_against_a_facet_selection() {
+        let tasks = vec![
+            with_status(titled("QBL-377", "a"), TaskState::InProgress, "Started"),
+            with_status(titled("QBL-371", "b"), TaskState::Todo, "Todo"),
+            with_status(titled("QBL-400", "c"), TaskState::InProgress, "Started"),
+        ];
+        let mut f = TaskFilter::default();
+        f.toggle_status("Started");
+        f.set_search("qbl-37");
+        assert_eq!(keys(&f, &tasks), ["QBL-377"]);
+        assert_eq!(f.narrowing(), super::Narrowing::Both);
+    }
+
+    #[test]
+    fn search_counts_as_filtering_but_not_as_a_selected_facet() {
+        let mut f = TaskFilter::default();
+        f.set_search("qbl");
+        assert!(!f.is_empty());
+        assert_eq!(f.selected_count(), 0);
+        assert_eq!(f.narrowing(), super::Narrowing::Search);
+        f.toggle_label("bug");
+        f.clear();
+        assert!(f.is_empty(), "{f:?}");
+        assert_eq!(keys(&f, &searchable()).len(), 3);
+    }
+
+    #[test]
+    fn pruning_keeps_the_search_text() {
+        let mut f = TaskFilter::default();
+        f.set_search("qbl-37");
+        f.toggle_label("gone");
+        f.prune(&collect_facets(&searchable()));
+        assert_eq!(f.narrowing(), super::Narrowing::Search);
+        assert_eq!(keys(&f, &searchable()), ["QBL-377", "QBL-371"]);
     }
 
     #[test]
