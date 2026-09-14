@@ -86,13 +86,14 @@ pub struct HarnessConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_command: Option<String>,
 
-    /// Arguments passed to `agent_command`.
+    /// Permission options and extra arguments for each agent okena knows.
     ///
-    /// Each argument may contain `{key}`, `{title}`, `{url}` and `{branch}`,
-    /// substituted from the task. Agents differ in how they take a prompt, so
-    /// this is a template rather than a fixed shape.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agent_args: Vec<String>,
+    /// Added to every launch of that agent and to its restarts, alongside the
+    /// brief — never instead of it. A command okena does not know gets none.
+    /// Replaces the old global `agent_args`, which a settings file may still
+    /// carry: it is ignored and dropped on the next save.
+    #[serde(default, skip_serializing_if = "AgentOptions::is_unset")]
+    pub agents: AgentOptions,
 
     /// Point launched agents at okena's own MCP server automatically, and hand
     /// them the hooks that report their turns (Claude Code's `--settings`
@@ -143,7 +144,7 @@ impl Default for HarnessConfig {
         Self {
             agent_root: None,
             agent_command: None,
-            agent_args: Vec::new(),
+            agents: AgentOptions::default(),
             // Must match `default_true` above, or a struct-built default would
             // disagree with a deserialized one.
             agent_mcp_injection: true,
@@ -181,6 +182,196 @@ impl HarnessConfig {
             folders.insert(0, repo.to_string());
         }
         folders
+    }
+}
+
+/// Per-agent launch options, by the agents okena knows.
+///
+/// Every option starts unset, and unset adds nothing to the agent's argv: the
+/// agent's own config decides, as it did before these existed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOptions {
+    #[serde(default, skip_serializing_if = "ClaudeOptions::is_unset")]
+    pub claude: ClaudeOptions,
+    #[serde(default, skip_serializing_if = "CopilotOptions::is_unset")]
+    pub copilot: CopilotOptions,
+    #[serde(default, skip_serializing_if = "CodexOptions::is_unset")]
+    pub codex: CodexOptions,
+}
+
+impl AgentOptions {
+    pub fn is_unset(&self) -> bool {
+        self.claude.is_unset() && self.copilot.is_unset() && self.codex.is_unset()
+    }
+}
+
+/// Claude Code's `--permission-mode` values, spelled as the CLI takes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClaudePermissionMode {
+    #[serde(rename = "manual")]
+    Manual,
+    #[serde(rename = "acceptEdits")]
+    AcceptEdits,
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "plan")]
+    Plan,
+    #[serde(rename = "dontAsk")]
+    DontAsk,
+    #[serde(rename = "bypassPermissions")]
+    BypassPermissions,
+}
+
+impl ClaudePermissionMode {
+    pub const ALL: &[ClaudePermissionMode] = &[
+        ClaudePermissionMode::Manual,
+        ClaudePermissionMode::AcceptEdits,
+        ClaudePermissionMode::Auto,
+        ClaudePermissionMode::Plan,
+        ClaudePermissionMode::DontAsk,
+        ClaudePermissionMode::BypassPermissions,
+    ];
+
+    /// The value `--permission-mode` takes.
+    pub fn cli_value(self) -> &'static str {
+        match self {
+            ClaudePermissionMode::Manual => "manual",
+            ClaudePermissionMode::AcceptEdits => "acceptEdits",
+            ClaudePermissionMode::Auto => "auto",
+            ClaudePermissionMode::Plan => "plan",
+            ClaudePermissionMode::DontAsk => "dontAsk",
+            ClaudePermissionMode::BypassPermissions => "bypassPermissions",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeOptions {
+    /// `--permission-mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<ClaudePermissionMode>,
+    /// `--dangerously-skip-permissions`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_permissions: bool,
+    /// Passed as given, one argument each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+impl ClaudeOptions {
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Copilot CLI's `--mode` values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CopilotMode {
+    Interactive,
+    Plan,
+    Autopilot,
+}
+
+impl CopilotMode {
+    pub const ALL: &[CopilotMode] = &[
+        CopilotMode::Interactive,
+        CopilotMode::Plan,
+        CopilotMode::Autopilot,
+    ];
+
+    /// The value `--mode` takes.
+    pub fn cli_value(self) -> &'static str {
+        match self {
+            CopilotMode::Interactive => "interactive",
+            CopilotMode::Plan => "plan",
+            CopilotMode::Autopilot => "autopilot",
+        }
+    }
+}
+
+/// What Copilot CLI may do without asking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopilotToolPermissions {
+    /// `--allow-all-tools`: tools run without confirmation.
+    AllowAllTools,
+    /// `--allow-all`: tools, paths and URLs.
+    AllowAll,
+}
+
+impl CopilotToolPermissions {
+    pub const ALL: &[CopilotToolPermissions] = &[
+        CopilotToolPermissions::AllowAllTools,
+        CopilotToolPermissions::AllowAll,
+    ];
+
+    pub fn flag(self) -> &'static str {
+        match self {
+            CopilotToolPermissions::AllowAllTools => "--allow-all-tools",
+            CopilotToolPermissions::AllowAll => "--allow-all",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopilotOptions {
+    /// `--mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<CopilotMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_permissions: Option<CopilotToolPermissions>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+impl CopilotOptions {
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// How far Codex may go without asking.
+///
+/// Spelled with `--sandbox` and `--ask-for-approval` rather than
+/// `--full-auto`, which current Codex no longer defines — an unknown flag
+/// stops the agent from starting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexApprovals {
+    /// `--sandbox workspace-write --ask-for-approval on-request`.
+    Auto,
+    /// `--dangerously-bypass-approvals-and-sandbox`.
+    Bypass,
+}
+
+impl CodexApprovals {
+    pub const ALL: &[CodexApprovals] = &[CodexApprovals::Auto, CodexApprovals::Bypass];
+
+    pub fn args(self) -> &'static [&'static str] {
+        match self {
+            CodexApprovals::Auto => &[
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "on-request",
+            ],
+            CodexApprovals::Bypass => &["--dangerously-bypass-approvals-and-sandbox"],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approvals: Option<CodexApprovals>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+impl CodexOptions {
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -1335,6 +1526,38 @@ mod tests {
         assert_eq!(recovered.font_size, 18.0);
         assert_eq!(recovered.file_line_height, 1.4);
         assert_eq!(recovered.scrollback_lines, 42000);
+    }
+
+    #[test]
+    fn unset_agent_options_write_nothing() {
+        let json = serde_json::to_value(HarnessConfig::default()).unwrap();
+        assert!(json.get("agents").is_none(), "{json}");
+    }
+
+    #[test]
+    fn agent_options_round_trip_with_cli_spellings() {
+        let mut h = HarnessConfig::default();
+        h.agents.claude.permission_mode = Some(ClaudePermissionMode::AcceptEdits);
+        h.agents.claude.skip_permissions = true;
+        h.agents.copilot.tool_permissions = Some(CopilotToolPermissions::AllowAll);
+        h.agents.codex.approvals = Some(CodexApprovals::Auto);
+        h.agents.codex.extra_args = vec!["--search".into()];
+        let json = serde_json::to_value(&h).unwrap();
+        assert_eq!(json["agents"]["claude"]["permission_mode"], "acceptEdits");
+        // Only what is set is written.
+        assert!(json["agents"]["copilot"].get("mode").is_none(), "{json}");
+        let back: HarnessConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.agents, h.agents);
+    }
+
+    #[test]
+    fn a_file_with_the_old_agent_args_loads_and_drops_them_on_save() {
+        let json = r#"{"harness": {"agent_command": "claude", "agent_args": ["Work on {key}"]}}"#;
+        let settings: AppSettings = serde_json::from_str(json).expect("still loads");
+        assert_eq!(settings.harness.agent_command.as_deref(), Some("claude"));
+        assert!(settings.harness.agents.is_unset());
+        let saved = serde_json::to_string(&settings).unwrap();
+        assert!(!saved.contains("agent_args"), "{saved}");
     }
 
     #[test]

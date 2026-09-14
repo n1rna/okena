@@ -279,6 +279,32 @@ paths are machine state. Settings only shape discovery and cloning.
 | `harness.knowledge.projects` | bool | `true` | Find knowledge in okena projects: the stores a repository follows in `.okena/knowledge.yaml`, and its own `.okena/knowledge/` (or `root:`) folders. Worktrees and agent sessions are skipped |
 | `harness.knowledge.clone_dir` | string | `~/knowledge` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
 
+#### Agent options
+
+Permission options and extra arguments per agent okena knows, set in
+Settings → Harness. They are added to every launch of that agent — task start,
+coordinators, spec and knowledge drafts, doc refine, project scans and custom
+sessions — and to its restarts, read from settings at the time. The agent is
+matched by the command's file name (`/usr/local/bin/claude` is `claude`); any
+other command gets none of them. Unset adds nothing to the command line.
+
+Launch order: session id, these options, `extra_args`, the brief, okena's MCP
+flags. The brief is always sent.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `harness.agents.claude.permission_mode` | string | — | `--permission-mode`: `manual`, `acceptEdits`, `auto`, `plan`, `dontAsk` or `bypassPermissions` |
+| `harness.agents.claude.skip_permissions` | bool | `false` | `--dangerously-skip-permissions` |
+| `harness.agents.claude.extra_args` | string[] | `[]` | Passed as given, one argument each |
+| `harness.agents.copilot.mode` | string | — | `--mode`: `interactive`, `plan` or `autopilot` |
+| `harness.agents.copilot.tool_permissions` | string | — | `allow_all_tools` (`--allow-all-tools`) or `allow_all` (`--allow-all`) |
+| `harness.agents.copilot.extra_args` | string[] | `[]` | Passed as given |
+| `harness.agents.codex.approvals` | string | — | `auto` (`--sandbox workspace-write --ask-for-approval on-request`) or `bypass` (`--dangerously-bypass-approvals-and-sandbox`) |
+| `harness.agents.codex.extra_args` | string[] | `[]` | Passed as given |
+
+The old `harness.agent_args` is no longer read; a file that still has it loads,
+and the key is dropped on the next save.
+
 ---
 
 ## keybindings.json

@@ -329,9 +329,9 @@ template, and one template without supplying any partial. A store that is
 unregistered, moved or unreadable degrades to the built-ins rather than
 breaking every launch.
 
-`harness.agent_args` is the exception. Where it is set it still wins for
-`task-start`: it is an explicit instruction about how to launch that agent, and
-more specific than any template.
+Every launch is briefed. An agent's permission options and extra arguments
+(`harness.agents`, see [configuration](configuration.md#agent-options)) are
+passed alongside the rendered brief, before it, and never replace it.
 
 ### The `okena-defaults` store
 
