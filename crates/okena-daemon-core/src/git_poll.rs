@@ -816,21 +816,19 @@ struct SessionLink {
 
 /// Every worktree linked to an agent session's task, by project id.
 ///
-/// Only these are scanned: a branch pushed from anywhere else is not the
-/// session's to claim.
+/// Linked when any task the worktree was started for is any task the session
+/// covers: a session started on several picked tasks (QBL-384/390) owns the
+/// worktrees of its second and later tasks as much as its first's.
 fn session_links(workspace: &Workspace) -> HashMap<String, SessionLink> {
     let projects = workspace.projects();
     projects
         .iter()
         .filter_map(|p| {
             let info = p.worktree_info.as_ref()?;
-            let task = p.task_ref.as_ref()?;
             let session = projects.iter().find(|s| {
                 s.id != p.id
                     && s.is_agent_session()
-                    && s.task_ref
-                        .as_ref()
-                        .is_some_and(|t| t.id.external_id == task.id.external_id)
+                    && p.linked_tasks().any(|t| s.works_on(&t.id.external_id))
             })?;
             // Without its parent there is no checkout left to reach GitHub
             // through once the worktree goes.
@@ -3178,6 +3176,49 @@ mod tests {
         assert_eq!(link.project, "okena");
         assert_eq!(link.repo_path, "/p/okena");
         assert_eq!(link.branch.as_deref(), Some("feat/x"));
+    }
+
+    #[test]
+    fn a_worktree_on_a_sessions_second_task_is_linked() {
+        // One agent started on QBL-1 with QBL-2 picked alongside: Start work
+        // made a worktree for QBL-2 as well, and it is this session's too.
+        let task = |id: &str, key: &str| {
+            serde_json::json!({
+                "id": { "provider": "linear", "external_id": id },
+                "display_key": key, "title": "t", "url": "http://x",
+            })
+        };
+        let mut data = empty_workspace_data();
+        for project in [
+            serde_json::json!({ "id": "repo", "name": "okena", "path": "/p/okena" }),
+            serde_json::json!({
+                "id": "session", "name": "QBL-1", "path": "/p",
+                "task_ref": task("u1", "QBL-1"), "also_tasks": [task("u2", "QBL-2")],
+            }),
+            serde_json::json!({
+                "id": "wt2", "name": "okena (QBL-2)", "path": "/p/wt2",
+                "task_ref": task("u2", "QBL-2"),
+                "worktree_info": {
+                    "parent_project_id": "repo", "worktree_path": "/p/wt2", "branch_name": "feat/qbl-2",
+                },
+            }),
+            serde_json::json!({
+                "id": "other", "name": "okena (QBL-9)", "path": "/p/other",
+                "task_ref": task("u9", "QBL-9"),
+                "worktree_info": {
+                    "parent_project_id": "repo", "worktree_path": "/p/other", "branch_name": "feat/qbl-9",
+                },
+            }),
+        ] {
+            let project: okena_state::ProjectData = serde_json::from_value(project).unwrap();
+            data.project_order.push(project.id.clone());
+            data.projects.push(project);
+        }
+
+        let links = session_links(&Workspace::new(data));
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links["wt2"].session_id, "session");
+        assert_eq!(links["wt2"].branch.as_deref(), Some("feat/qbl-2"));
     }
 
     #[test]
