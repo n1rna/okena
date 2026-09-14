@@ -468,6 +468,12 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Run gh from this path (or directory). Blank looks it up.
+    pub fn set_gh_path(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.gh_path = opt_trimmed(value);
+        self.save_and_notify(cx);
+    }
+
     /// Override where OpenSpec's store registry lives. Blank follows the CLI's
     /// own resolution.
     pub fn set_spec_data_dir(&mut self, value: String, cx: &mut Context<Self>) {

@@ -370,6 +370,7 @@ impl DaemonCore {
         // The GitHub poller reads Settings' enterprise hosts process-wide;
         // `DaemonConfig` keeps them current from here on.
         okena_git::repository::set_enterprise_hosts(&params.settings.github_enterprise_hosts);
+        okena_git::repository::set_gh_path(params.settings.gh_path.as_deref());
         let settings = Arc::new(Mutex::new(params.settings));
         let mut daemon_config = DaemonConfig::new(settings.clone());
         // Seed the process palette from the active theme so daemon terminals

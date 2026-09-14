@@ -1,11 +1,12 @@
-//! GitHub settings — the GitHub Enterprise hosts okena treats as GitHub.
+//! GitHub settings — where to run gh from, and the GitHub Enterprise hosts
+//! okena treats as GitHub.
 //!
 //! github.com, GHE.com tenants, the hosts gh is logged into and `GH_HOST` are
 //! recognised on their own; this list adds hosts known in none of those ways.
 //! Tokens still come from env vars or `gh auth login`.
 
 use super::SettingsPanel;
-use super::components::{section_container, section_header};
+use super::components::{hook_input_row, section_container, section_header};
 use super::render_specs::muted_row;
 use crate::settings::settings_entity;
 use crate::theme::theme;
@@ -150,6 +151,18 @@ impl SettingsPanel {
         );
 
         div()
+            .child(section_header("gh binary", &t, cx))
+            .child(section_container(&t).child(hook_input_row(
+                "github-gh-path",
+                "Path to gh",
+                "The gh binary, or the directory holding it. Empty looks on PATH, then in \
+                 /opt/homebrew/bin, /usr/local/bin, ~/.local/bin and other usual install \
+                 directories — okena started from the Dock doesn't see your shell's PATH.",
+                &self.gh_path_input,
+                &t,
+                false,
+                cx,
+            )))
             .child(section_header("Enterprise hosts", &t, cx))
             .child(container)
     }
