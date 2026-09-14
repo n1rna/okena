@@ -29,6 +29,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 pub use editor::EDITOR_CONTEXT;
+
+/// Key context around the Tasks view. `FocusTaskSearch` is bound in it, so
+/// `cmd-f` means "search tasks" there and keeps meaning terminal search in a
+/// terminal pane.
+pub const TASKS_CONTEXT: &str = "HarnessTasks";
 pub use okena_core::harness::HarnessSection;
 pub(crate) use tasks_view::{notify_task_auth_changed, provider_label};
 
@@ -100,6 +105,14 @@ pub(crate) struct TasksState {
     /// tool you reach for, and a permanent wall of chips above the list would
     /// cost every reader space to show nothing most of the time.
     pub(crate) filter_open: bool,
+    /// The filter bar's search box. Its text is mirrored into `filter`, so
+    /// the one `matches` test covers it.
+    pub(crate) search: Entity<SimpleInputState>,
+    /// Tracked by the Tasks view's root, so its key context — and with it
+    /// `cmd-f` — is on the dispatch path whenever the view is in use.
+    pub(crate) focus: FocusHandle,
+    /// Set when the view is shown, so the next render takes focus for it.
+    pub(crate) focus_on_show: bool,
     /// How the list is ordered within each section.
     pub(crate) sort: tasks_view::TaskSort,
     /// Agent command configured on the daemon, drawn as every launcher's
@@ -356,6 +369,17 @@ impl HarnessPane {
                 .multiline()
                 .placeholder("What it covers, and what finishing it means")
         });
+        let task_search = cx.new(|cx| SimpleInputState::new(cx).placeholder("Search tasks"));
+        // Rows narrow as you type: the loaded tasks are all there is to search.
+        cx.subscribe(
+            &task_search,
+            |this: &mut Self, input, _: &okena_ui::simple_input::InputChangedEvent, cx| {
+                let text = input.read(cx).value().to_string();
+                this.tasks.filter.set_search(&text);
+                cx.notify();
+            },
+        )
+        .detach();
         let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("add-login"));
         let idea_input = cx.new(|cx| {
             SimpleInputState::new(cx).multiline().placeholder(
@@ -414,6 +438,9 @@ impl HarnessPane {
                 strategy: std::collections::HashMap::new(),
                 filter: task_filter::TaskFilter::default(),
                 filter_open: false,
+                search: task_search,
+                focus: cx.focus_handle(),
+                focus_on_show: section == HarnessSection::Tasks,
                 sort: tasks_view::TaskSort::default(),
                 default_agent: None,
                 last_projects: Vec::new(),

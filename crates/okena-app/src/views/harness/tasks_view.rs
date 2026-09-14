@@ -3,6 +3,7 @@
 //! Every call goes to the daemon, which owns the provider credential. The
 //! client never holds a task-manager token and never talks to Linear directly.
 
+use crate::keybindings::{Cancel, FocusTaskSearch};
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm};
 use crate::views::components::{SimpleInput, SimpleInputState};
@@ -16,9 +17,11 @@ use okena_core::tasks::{
 use okena_ui::resize_handle::ResizeHandle;
 use okena_views_terminal::layout::split_pane::DragState;
 
-use super::HarnessPane;
 use super::new_task_form::TaskHelper;
-use super::task_filter::{FacetValue, LABELS_HEADING, STATUS_HEADING, collect_facets, status_name};
+use super::task_filter::{
+    FacetValue, LABELS_HEADING, Narrowing, STATUS_HEADING, collect_facets, status_name,
+};
+use super::{HarnessPane, TASKS_CONTEXT};
 
 /// Accent colour for a workflow-state category.
 ///
@@ -601,6 +604,9 @@ impl HarnessPane {
         self.tasks.opened = None;
         self.tasks.checked.clear();
         self.tasks.filter = super::task_filter::TaskFilter::default();
+        self.tasks
+            .search
+            .update(cx, |input, cx| input.set_value("", cx));
         self.tasks.new_task = None;
         self.tasks.start_form = None;
         self.refresh_auth(cx);
@@ -1869,6 +1875,9 @@ impl HarnessPane {
         let t = theme(cx);
         let open = self.tasks.filter_open;
         let selected = self.tasks.filter.selected_count();
+        // Search counts here where it does not count in the badge: "N of M"
+        // and Clear are about the list, the badge about the facet panel.
+        let filtering = !self.tasks.filter.is_empty();
         // The count of what is actually on screen, so the effect of a filter
         // is legible without counting rows.
         let shown = self
@@ -1916,7 +1925,29 @@ impl HarnessPane {
                     })
                     .into_any_element()
             }))
-            .child(div().flex_1().min_w_0())
+            .child(
+                // Takes the slack and gives it up first, so a narrow pane
+                // squeezes the box before Sort or Clear are cut off.
+                h_flex().flex_1().min_w_0().child(
+                    div()
+                        .id("task-search")
+                        .w_full()
+                        .max_w(px(280.0))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .rounded(px(3.0))
+                        .bg(rgb(t.bg_secondary))
+                        .child(SimpleInput::new(&self.tasks.search).text_size(ui_text_ms(cx)))
+                        // Typing a search is not opening the facets.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_action(cx.listener(|this, _: &Cancel, window, cx| {
+                            this.tasks
+                                .search
+                                .update(cx, |input, cx| input.set_value("", cx));
+                            window.focus(&this.tasks.focus, cx);
+                        })),
+                ),
+            )
             .child(
                 // Its own button inside the row: clicking the row opens the
                 // facets, and changing the order is not that.
@@ -1943,7 +1974,7 @@ impl HarnessPane {
                         }),
                     ),
             )
-            .children((selected > 0).then(|| {
+            .children(filtering.then(|| {
                 div()
                     .flex_shrink_0()
                     .text_size(ui_text_ms(cx))
@@ -1951,7 +1982,7 @@ impl HarnessPane {
                     .child(format!("{shown} of {total}"))
                     .into_any_element()
             }))
-            .children((selected > 0).then(|| {
+            .children(filtering.then(|| {
                 div()
                     .id("task-filter-clear")
                     .cursor_pointer()
@@ -1970,6 +2001,9 @@ impl HarnessPane {
                             // pick something else.
                             cx.stop_propagation();
                             this.tasks.filter.clear();
+                            this.tasks
+                                .search
+                                .update(cx, |input, cx| input.set_value("", cx));
                             cx.notify();
                         }),
                     )
@@ -2149,10 +2183,11 @@ impl HarnessPane {
         if !self.tasks.sections_collapsed.contains("active") {
             if active.is_empty() {
                 body = body.child(self.list_note(
-                    if self.tasks.filter.is_empty() {
-                        "No agent is running on anything."
-                    } else {
-                        "Nothing active matches these filters."
+                    match self.tasks.filter.narrowing() {
+                        Narrowing::Nothing => "No agent is running on anything.",
+                        Narrowing::Facets => "Nothing active matches these filters.",
+                        Narrowing::Search => "Nothing active matches this search.",
+                        Narrowing::Both => "Nothing active matches this search and these filters.",
                     },
                     cx,
                 ));
@@ -2175,10 +2210,11 @@ impl HarnessPane {
                 // narrowed one look identical, and only one of them means you
                 // are out of work.
                 body = body.child(self.list_note(
-                    if self.tasks.filter.is_empty() {
-                        "Nothing waiting."
-                    } else {
-                        "Nothing here matches these filters."
+                    match self.tasks.filter.narrowing() {
+                        Narrowing::Nothing => "Nothing waiting.",
+                        Narrowing::Facets => "Nothing here matches these filters.",
+                        Narrowing::Search => "Nothing here matches this search.",
+                        Narrowing::Both => "Nothing here matches this search and these filters.",
                     },
                     cx,
                 ));
@@ -4029,6 +4065,22 @@ impl HarnessPane {
 
         v_flex()
             .size_full()
+            .track_focus(&self.tasks.focus)
+            .key_context(TASKS_CONTEXT)
+            .on_action(cx.listener(|this, _: &FocusTaskSearch, window, cx| {
+                this.tasks.search.update(cx, |input, cx| {
+                    input.focus(window, cx);
+                    input.select_all(cx);
+                });
+            }))
+            // Capture, so it runs before a child takes focus for itself, and
+            // only when focus is outside the view: a click here must not pull
+            // the cursor out of the search box or a form field.
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                if !this.tasks.focus.contains_focused(window, cx) {
+                    window.focus(&this.tasks.focus, cx);
+                }
+            }))
             .child(self.render_toolbar(actions, cx))
             .child(if show_board {
                 let (active, rest) = self.board(cx);

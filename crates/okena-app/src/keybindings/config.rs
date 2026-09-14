@@ -98,6 +98,15 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            "FocusTaskSearch".to_string(),
+            vec![
+                // Scoped to the Tasks view, so a terminal's cmd-f still
+                // opens terminal search.
+                KeybindingEntry::new("cmd-f", Some(crate::views::harness::TASKS_CONTEXT)),
+                KeybindingEntry::new("ctrl-f", Some(crate::views::harness::TASKS_CONTEXT)),
+            ],
+        );
+        bindings.insert(
             "ShowSessionManager".to_string(),
             vec![
                 KeybindingEntry::new("cmd-k cmd-w", None),
@@ -598,6 +607,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Both want cmd-f. Each must stay in its own context, or one of them
+    /// takes the key everywhere.
+    #[test]
+    fn task_search_and_terminal_search_share_cmd_f_in_their_own_contexts() {
+        let config = KeybindingConfig::defaults();
+        let contexts = |action: &str| -> Vec<(String, Option<String>)> {
+            config.bindings[action]
+                .iter()
+                .map(|e| (e.keystroke.clone(), e.context.clone()))
+                .collect()
+        };
+        let tasks = Some(crate::views::harness::TASKS_CONTEXT.to_string());
+        let terminal = Some("TerminalPane".to_string());
+        assert_eq!(
+            contexts("FocusTaskSearch"),
+            [("cmd-f".into(), tasks.clone()), ("ctrl-f".into(), tasks)]
+        );
+        assert_eq!(
+            contexts("Search"),
+            [
+                ("cmd-f".into(), terminal.clone()),
+                ("ctrl-f".into(), terminal)
+            ]
+        );
     }
 
     #[test]

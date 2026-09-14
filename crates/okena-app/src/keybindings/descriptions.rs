@@ -4,7 +4,7 @@ use super::types::ActionDescription;
 use super::{
     AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy, CreateWorktree,
     DetachTerminal, EqualizeLayout, ExportTerminalBuffer, FocusActiveProject, FocusDown, FocusLeft,
-    FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusSidebar, FocusUp,
+    FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusSidebar, FocusTaskSearch, FocusUp,
     FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate, JumpToNextFailedCommand,
     JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt, MinimizeTerminal,
     NewProject, NewWindow, OpenSettingsFile, Paste, Quit, ResetZoom, RestartDaemon, ReviewChanges,
@@ -447,6 +447,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Save the Specs or Knowledge document being edited",
             category: "Harness",
             factory: || Box::new(SaveDocument),
+        },
+    );
+    map.insert(
+        "FocusTaskSearch",
+        ActionDescription {
+            name: "Search Tasks",
+            description: "Put the cursor in the Tasks view's search box",
+            category: "Harness",
+            factory: || Box::new(FocusTaskSearch),
         },
     );
     map.insert(

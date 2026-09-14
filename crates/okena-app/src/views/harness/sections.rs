@@ -280,6 +280,13 @@ impl HarnessPane {
 impl Render for HarnessPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        // A freshly shown Tasks view takes focus, unless something in it
+        // already has it, so its key context is live straight away.
+        if std::mem::take(&mut self.tasks.focus_on_show)
+            && !self.tasks.focus.contains_focused(window, cx)
+        {
+            window.focus(&self.tasks.focus, cx);
+        }
         // Exhaustive on purpose: a new section must choose its view here rather
         // than silently falling through to a placeholder.
         let body = match self.section {
