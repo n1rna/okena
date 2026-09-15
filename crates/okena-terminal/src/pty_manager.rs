@@ -1089,6 +1089,10 @@ impl PtyManager {
         plan: &TerminalLaunchPlan,
         launch_environment: &[(String, Option<String>)],
     ) -> CommandBuilder {
+        // A brief handed over as a file is read by a wrapper, so the command
+        // below does not grow with it (see `brief_file`).
+        let resolved = crate::brief_file::resolve_plan(plan);
+        let plan = resolved.as_ref().unwrap_or(plan);
         let session_backend = self.session_backend();
         // Turn a custom shell into the session backend's initial program, so it
         // survives being wrapped in tmux/screen.
@@ -1167,6 +1171,9 @@ impl PtyManager {
     ) -> (CommandBuilder, Option<String>, Option<ResolvedBackend>) {
         use crate::session_backend::resolve_for_wsl;
         use crate::shell_config::windows_path_to_wsl;
+        // Windows reads a brief file back into argv (see `brief_file::inline`).
+        let resolved = crate::brief_file::resolve_plan(plan);
+        let plan = resolved.as_ref().unwrap_or(plan);
         let session_backend = self.session_backend();
         let session_backend_preference = self.session_backend_preference();
 
@@ -3191,6 +3198,38 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("flush returns after completion");
         waiter.join().expect("teardown flush waiter must join");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_brief_file_reference_is_spawned_through_the_wrapper() {
+        let (manager, _events) = PtyManager::new(SessionBackend::None);
+        let plan = TerminalLaunchPlan::for_shell(ShellType::Custom {
+            path: "claude".into(),
+            args: vec![
+                "--session-id".into(),
+                "abc".into(),
+                crate::brief_file::reference(std::path::Path::new("/b/1.md")),
+            ],
+        });
+        let cmd = manager.build_terminal_command("t-1", "/tmp", &plan, &[]);
+        let argv: Vec<String> = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv[0], "/bin/sh");
+        assert_eq!(
+            argv[3..],
+            [
+                "okena-brief",
+                "3",
+                "/b/1.md",
+                "claude",
+                "--session-id",
+                "abc"
+            ]
+        );
     }
 
     #[test]

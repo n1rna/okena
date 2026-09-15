@@ -131,6 +131,11 @@ pub const PARTIALS: &[(&str, &str)] = &[
         "context-lookup",
         include_str!("templates/partials/context-lookup.md"),
     ),
+    // QBL-410: the picked items past the brief's context budget, by title.
+    (
+        "context-more",
+        include_str!("templates/partials/context-more.md"),
+    ),
 ];
 
 /// The skill that tells an agent how to map a repository (ADR-0005).

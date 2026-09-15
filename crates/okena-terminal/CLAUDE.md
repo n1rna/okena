@@ -12,6 +12,7 @@ Wraps `alacritty_terminal` for ANSI processing and `portable-pty` for cross-plat
 | `session_backend.rs` | `SessionBackend` enum — tmux/screen/dtach on Unix; psmux on Windows; per-distro tmux/dtach/screen inside WSL. |
 | `input.rs` | Key-to-bytes conversion. DECCKM cursor mode handling. Platform-specific modifier mappings. |
 | `backend.rs` | Terminal backend abstraction. |
+| `brief_file.rs` | An agent's opening brief handed over from a file: `@okena-brief-file:<path>` in the launch args is resolved at spawn by a `/bin/sh` wrapper, so the session backend's command does not grow with the brief (tmux refuses more than ~16 KB). Windows/WSL read it back into argv. |
 | `process.rs` | Process spawning utilities. |
 
 ## Threading Model

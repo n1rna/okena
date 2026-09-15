@@ -86,19 +86,29 @@ pub(super) fn project_block(
     block(&fragment(heading, root, &Vars::from([("list", list)])))
 }
 
-/// The `context` block of a brief: what was picked at launch, by owner, each
-/// with its kind, title, description and absolute path — the agent reads what
-/// it needs; nothing is inlined.
+/// Most bytes the listed context lines of a brief may take.
 ///
-/// With `loaded`, skills and agents were installed into the session itself,
-/// so they are named in the `context-installed` line instead of listed. Lines
-/// are structure; the heading and that line are words, so they are partials.
+/// A brief is read in full before the agent does anything, so a long pick is
+/// listed compactly past this: the rest are named by title, and the agent
+/// looks them up through okena's MCP tools.
+pub(super) const CONTEXT_BUDGET_BYTES: usize = 4 * 1024;
+
+/// The `context` block of a brief: what was picked at launch, by owner, each
+/// with its kind, title and absolute path — the agent reads what it needs;
+/// nothing is inlined, and descriptions are left to the lookup tools.
+///
+/// Lines are listed until the next would take the list past
+/// [`CONTEXT_BUDGET_BYTES`]; that item and every one after it are named by
+/// title in the `context-more` line instead. With `loaded`, skills and agents
+/// were installed into the session itself, so they are named in the
+/// `context-installed` line instead of listed. Lines are structure; the
+/// heading and those lines are words, so they are partials.
 pub(super) fn context_block(
     items: &[okena_core::context::ContextItem],
     loaded: bool,
     root: Option<&(String, PathBuf)>,
 ) -> String {
-    let mut owners: Vec<(&str, Vec<String>)> = Vec::new();
+    let mut owners: Vec<(&str, Vec<&okena_core::context::ContextItem>)> = Vec::new();
     let mut named: Vec<String> = Vec::new();
     for item in items {
         let kind = item.reference.kind;
@@ -106,32 +116,49 @@ pub(super) fn context_block(
             named.push(format!("{} ({})", item.title, kind.label().to_lowercase()));
             continue;
         }
-        let what = match &item.map_id {
-            Some(id) => format!("{} `{id}`", kind.label()),
-            None => kind.label().to_string(),
-        };
-        let mut line = format!("  - {what}: {}", item.title);
-        if !item.description.is_empty() {
-            line.push_str(" — ");
-            line.push_str(&item.description);
-        }
-        line.push_str(&format!(" (`{}`)", item.path));
         match owners
             .iter_mut()
             .find(|(owner, _)| *owner == item.owner_name)
         {
-            Some((_, lines)) => lines.push(line),
-            None => owners.push((&item.owner_name, vec![line])),
+            Some((_, listed)) => listed.push(item),
+            None => owners.push((&item.owner_name, vec![item])),
+        }
+    }
+    let mut list: Vec<String> = Vec::new();
+    let mut more: Vec<&str> = Vec::new();
+    let mut used = 0;
+    for (owner, owned) in &owners {
+        let heading = format!("- {owner}:");
+        let mut headed = false;
+        for item in owned {
+            let line = context_line(item);
+            let cost = line.len() + 1 + if headed { 0 } else { heading.len() + 1 };
+            if !more.is_empty() || used + cost > CONTEXT_BUDGET_BYTES {
+                more.push(&item.title);
+                continue;
+            }
+            if !headed {
+                list.push(heading.clone());
+                headed = true;
+            }
+            list.push(line);
+            used += cost;
         }
     }
     let mut parts = Vec::new();
-    if !owners.is_empty() {
-        let list = owners
-            .iter()
-            .map(|(owner, lines)| format!("- {owner}:\n{}", lines.join("\n")))
-            .collect::<Vec<_>>()
-            .join("\n");
-        parts.push(fragment("context", root, &Vars::from([("list", list)])));
+    if !list.is_empty() {
+        parts.push(fragment(
+            "context",
+            root,
+            &Vars::from([("list", list.join("\n"))]),
+        ));
+    }
+    if !more.is_empty() {
+        parts.push(fragment(
+            "context-more",
+            root,
+            &Vars::from([("list", more.join(", "))]),
+        ));
     }
     if !named.is_empty() {
         parts.push(fragment(
@@ -141,6 +168,80 @@ pub(super) fn context_block(
         ));
     }
     block(&parts.join("\n\n"))
+}
+
+/// One listed item: its kind (with its map id), title and absolute path.
+fn context_line(item: &okena_core::context::ContextItem) -> String {
+    let kind = item.reference.kind;
+    let what = match &item.map_id {
+        Some(id) => format!("{} `{id}`", kind.label()),
+        None => kind.label().to_string(),
+    };
+    format!("  - {what}: {} (`{}`)", item.title, item.path)
+}
+
+/// The arguments that hand `command` its opening `brief`: a reference to a
+/// file holding it, in the position the brief itself would take.
+///
+/// Never the brief itself in argv, where a session backend has to carry it: a
+/// long enough brief made tmux refuse the whole session (`command too long`).
+/// The terminal resolves the reference as it spawns (`okena_terminal::
+/// brief_file`). One file per launch, in okena's profile directory like the
+/// `agent-context/` plugins — a respawned session reads it again. Without a
+/// profile, or when writing fails, the brief goes in argv as it used to.
+pub(super) fn brief_args(command: &str, brief: &str) -> Vec<String> {
+    let written = briefs_dir().and_then(|dir| match write_brief(&dir, brief) {
+        Ok(path) => Some(path),
+        Err(e) => {
+            log::warn!(
+                "[agents] could not write the brief under {}: {e}",
+                dir.display()
+            );
+            None
+        }
+    });
+    match written {
+        Some(path) => {
+            super::specs::prompt_args(command, &okena_terminal::brief_file::reference(&path))
+        }
+        None => super::specs::prompt_args(command, brief),
+    }
+}
+
+/// Where launch briefs are written.
+fn briefs_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = test_briefs_dir::get() {
+        return Some(dir);
+    }
+    okena_core::profiles::try_current().map(|p| p.root.join("agent-briefs"))
+}
+
+fn write_brief(dir: &std::path::Path, brief: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{}.md", uuid::Uuid::new_v4()));
+    std::fs::write(&path, brief)?;
+    Ok(path)
+}
+
+/// Tests have no profile: this points the current test thread's launches at a
+/// directory of its own, so a route can be checked with its brief in a file.
+#[cfg(test)]
+pub(super) mod test_briefs_dir {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    thread_local! {
+        static DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    pub fn set(dir: Option<PathBuf>) {
+        DIR.with(|d| *d.borrow_mut() = dir);
+    }
+
+    pub fn get() -> Option<PathBuf> {
+        DIR.with(|d| d.borrow().clone())
+    }
 }
 
 /// Render one partial against the configured root.
@@ -194,7 +295,98 @@ pub(super) fn render_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{block, project_block};
+    use super::{CONTEXT_BUDGET_BYTES, block, context_block, project_block};
+    use okena_core::context::{ContextItem, ContextKind, ContextOwner, ContextRef};
+
+    fn item(owner: &str, kind: ContextKind, n: usize) -> ContextItem {
+        let path = format!("/Users/someone/p/{owner}/docs/reference/topic-number-{n}.md");
+        ContextItem {
+            reference: ContextRef {
+                kind,
+                owner: ContextOwner::store(format!("store:{owner}")),
+                locator: path.clone(),
+            },
+            title: format!("Topic {n}"),
+            description: format!("What topic {n} is about, at some length."),
+            owner_name: owner.into(),
+            path,
+            map_id: (kind == ContextKind::MapEntry).then(|| format!("area:topic-{n}")),
+            chosen: false,
+        }
+    }
+
+    #[test]
+    fn a_context_line_is_kind_title_and_path_without_a_description() {
+        let items = [
+            item("shop", ContextKind::MapEntry, 1),
+            item("acme", ContextKind::Doc, 2),
+        ];
+        let b = context_block(&items, false, None);
+        assert!(
+            b.contains("- shop:\n  - Map entry `area:topic-1`: Topic 1 (`/Users/someone/p/shop/docs/reference/topic-number-1.md`)"),
+            "{b}"
+        );
+        assert!(b.contains("  - Knowledge doc: Topic 2 (`"), "{b}");
+        assert!(!b.contains("What topic"), "{b}");
+        // Within the budget nothing is left to look up.
+        assert!(!b.contains("named here to keep this brief short"), "{b}");
+    }
+
+    #[test]
+    fn past_the_budget_the_rest_are_named_with_the_lookup_tools() {
+        let items: Vec<ContextItem> = (0..120)
+            .map(|n| {
+                let owner = ["shop", "acme", "web"][n % 3];
+                let kind = [ContextKind::MapEntry, ContextKind::Spec, ContextKind::Doc][n % 3];
+                item(owner, kind, n)
+            })
+            .collect();
+        let b = context_block(&items, false, None);
+        let (listed, rest) = b
+            .split_once("Also picked, named here to keep this brief short: ")
+            .expect("the overflow line");
+        let lines: Vec<&str> = listed
+            .lines()
+            .filter(|l| l.starts_with('-') || l.starts_with("  -"))
+            .collect();
+        let bytes: usize = lines.iter().map(|l| l.len() + 1).sum();
+        assert!(bytes <= CONTEXT_BUDGET_BYTES, "{bytes} bytes listed");
+        // Close to the budget, not far under it.
+        assert!(bytes > CONTEXT_BUDGET_BYTES - 200, "{bytes} bytes listed");
+        // Every item is either listed with its path or named by title, once.
+        for it in &items {
+            let listed_here = listed.contains(&format!("{} (`{}`)", it.title, it.path));
+            let named = rest.contains(&format!("{}, ", it.title))
+                || rest.contains(&format!("{}.", it.title));
+            assert!(
+                listed_here ^ named,
+                "{} listed={listed_here} named={named}",
+                it.title
+            );
+        }
+        // The rest are a tail: the last item is named, the first listed.
+        assert!(rest.contains("Topic 119."), "{rest}");
+        assert!(!rest.contains(&items[119].path));
+        assert!(
+            rest.contains("`okena_context_search`") && rest.contains("`okena_context_read`"),
+            "{rest}"
+        );
+    }
+
+    #[test]
+    fn loaded_skills_stay_named_and_do_not_count() {
+        let mut items: Vec<ContextItem> =
+            (0..60).map(|n| item("acme", ContextKind::Doc, n)).collect();
+        items.push(item("acme", ContextKind::Skill, 999));
+        let b = context_block(&items, true, None);
+        assert!(
+            b.contains("Loaded into this session: Topic 999 (skill)"),
+            "{b}"
+        );
+        assert!(!b.contains("topic-number-999"), "{b}");
+        // Nothing picked, nothing at all.
+        assert_eq!(context_block(&[], false, None), "");
+    }
 
     #[test]
     fn an_empty_block_contributes_nothing() {
