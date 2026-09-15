@@ -242,6 +242,45 @@ pub fn delete_local_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
     require_success(output)
 }
 
+/// Delete a local branch with `-D`, merged or not.
+pub fn force_delete_local_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
+    crate::validate_git_ref(branch)?;
+    let p = path_str(repo_path)?;
+    let output = safe_output(command("git").args(["-C", p, "branch", "-D", "--", branch]))?;
+    require_success(output)
+}
+
+/// Whether local `branch` is fully merged into the repo's `HEAD`.
+pub fn is_branch_merged(repo_path: &Path, branch: &str) -> GitResult<bool> {
+    crate::validate_git_ref(branch)?;
+    let p = path_str(repo_path)?;
+    let tip = format!("refs/heads/{branch}");
+    let output =
+        safe_output(command("git").args(["-C", p, "merge-base", "--is-ancestor", &tip, "HEAD"]))?;
+    // 1 is git's "not an ancestor"; anything else is a real failure.
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => require_success(output).map(|()| false),
+    }
+}
+
+/// The branch a checkout has checked out, or `None` on a detached `HEAD`.
+///
+/// Unlike [`get_current_branch`](crate::get_current_branch), never a commit
+/// hash: callers use it to name a branch to delete.
+pub fn checked_out_branch(path: &Path) -> Option<String> {
+    let p = path_str(path).ok()?;
+    let output =
+        safe_output(command("git").args(["-C", p, "symbolic-ref", "--short", "-q", "HEAD"]))
+            .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 /// Delete a remote branch.
 pub fn delete_remote_branch(repo_path: &Path, branch: &str) -> GitResult<()> {
     crate::validate_git_ref(branch)?;
