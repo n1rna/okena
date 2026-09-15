@@ -3422,6 +3422,7 @@ impl HarnessPane {
             };
             out = out.child(crate::views::components::render_worktree_card(
                 &summary,
+                &self.request_broker,
                 |this, id, cx| this.open_session(id.to_string(), cx),
                 |this, id, mode, cx| this.open_diff(id, mode, cx),
                 cx,

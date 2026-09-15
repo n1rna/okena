@@ -777,6 +777,7 @@ impl Render for ProjectInfoPanel {
             for summary in &worktrees {
                 body = body.child(crate::views::components::render_worktree_card(
                     summary,
+                    &self.request_broker,
                     |this: &mut Self, id, cx| this.open_project(id.to_string(), cx),
                     |this: &mut Self, id, mode, cx| this.open_diff(id, mode, cx),
                     cx,
