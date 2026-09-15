@@ -1,8 +1,10 @@
 //! What a session produced, as okena shows it.
 //!
 //! Two sources feed the list. Agents register assets over MCP, and okena
-//! detects the branches and pull requests of the worktrees linked to the
-//! session's task from the git poll. Detected rows are derived here, each time
+//! detects the pull requests of the worktrees linked to the session's task from
+//! the git poll. A linked worktree without a PR is not listed: it is where the
+//! work happens, shown under WORKTREES, and becomes something the session
+//! produced only once a PR is opened on it. Detected rows are derived here, each time
 //! the list is read, rather than stored: a stored copy of a branch's push state
 //! is stale the moment the agent pushes again, and a second registration of
 //! the same PR would show twice. Matching happens only here, never when an
@@ -91,9 +93,11 @@ pub struct LinkedCheckout<'a> {
     pub git: Option<&'a ApiGitStatus>,
 }
 
-/// Build the PRODUCED list: detected checkouts first, then the PRs of removed
-/// worktrees — open, merged or closed — then the branches the agent pushed
-/// that neither covers, then whatever the agent registered that matched none.
+/// Build the PRODUCED list: the PRs of linked checkouts first, then the PRs of
+/// removed worktrees — open, merged or closed — then the branches the agent
+/// pushed that neither covers and no linked checkout is on, then whatever the
+/// agent registered that matched none. A registered branch that matches a PR
+/// row is that row, never a second one.
 pub fn derive_session_assets(
     registered: &[AgentAsset],
     checkouts: &[LinkedCheckout<'_>],
@@ -151,10 +155,17 @@ pub fn derive_session_assets(
 
     // A branch the agent pushed from a checkout okena does not track: a card
     // of its own until its PR is found, when the PR's card takes its place.
+    // A branch a linked worktree is on is that worktree's, shown under
+    // WORKTREES until it has a PR.
     for branch in pushed {
-        if rows
-            .iter()
-            .any(|r| same_branch(r, &branch.project, Some(&branch.branch)))
+        let linked = checkouts.iter().any(|c| {
+            checkout_branch(c) == Some(branch.branch.as_str())
+                && c.project.eq_ignore_ascii_case(&branch.project)
+        });
+        if linked
+            || rows
+                .iter()
+                .any(|r| same_branch(r, &branch.project, Some(&branch.branch)))
         {
             continue;
         }
@@ -212,47 +223,39 @@ pub fn derive_session_assets(
     rows
 }
 
-fn checkout_row(c: &LinkedCheckout<'_>) -> Option<SessionAsset> {
-    let branch = c
-        .git
+/// The branch a linked checkout is on: as the poll last saw it, or the one it
+/// was created on.
+fn checkout_branch<'a>(c: &LinkedCheckout<'a>) -> Option<&'a str> {
+    c.git
         .and_then(|g| g.branch.as_deref())
         .or(c.branch)
-        .filter(|b| !b.is_empty())?
-        .to_string();
-    let pr = c.git.and_then(|g| g.pr_info.as_ref());
-    let state = c.git.map(|g| match (pr, g.unpushed) {
-        (Some(pr), _) => DetectedState::PullRequest {
-            number: pr.number,
-            state: pr.state.clone(),
-        },
-        (None, Some(unpushed)) => DetectedState::Pushed {
-            unpushed,
-            ahead: g.ahead,
-            behind: g.behind,
-        },
-        (None, None) => DetectedState::LocalOnly,
+        .filter(|b| !b.is_empty())
+}
+
+/// A linked checkout's row: its pull request, once it has one. A checkout
+/// without one — local only or pushed — gives none; it shows only under
+/// WORKTREES.
+fn checkout_row(c: &LinkedCheckout<'_>) -> Option<SessionAsset> {
+    let git = c.git?;
+    let pr = git.pr_info.as_ref()?;
+    let branch = checkout_branch(c)?.to_string();
+    let uncommitted = (git.lines_added > 0 || git.lines_removed > 0).then_some(LineChanges {
+        added: git.lines_added,
+        removed: git.lines_removed,
     });
-    let uncommitted = c
-        .git
-        .filter(|g| g.lines_added > 0 || g.lines_removed > 0)
-        .map(|g| LineChanges {
-            added: g.lines_added,
-            removed: g.lines_removed,
-        });
     Some(SessionAsset {
-        kind: if pr.is_some() {
-            AgentAssetKind::PullRequest
-        } else {
-            AgentAssetKind::Branch
-        },
+        kind: AgentAssetKind::PullRequest,
         title: branch.clone(),
-        url: pr.map(|pr| pr.url.clone()),
+        url: Some(pr.url.clone()),
         project: Some(c.project.to_string()),
         branch: Some(branch),
-        state,
+        state: Some(DetectedState::PullRequest {
+            number: pr.number,
+            state: pr.state.clone(),
+        }),
         uncommitted,
-        pr: pr.cloned(),
-        ci: c.git.and_then(|g| g.ci_checks.clone()),
+        pr: Some(pr.clone()),
+        ci: git.ci_checks.clone(),
         task: None,
         registered: false,
     })
@@ -379,16 +382,19 @@ pub fn task_key_from_url(url: &str) -> Option<TaskKey> {
 ///
 /// By [`matches`] first. Failing that, by branch and project — but only for
 /// what can live on a branch, and never for an asset whose URL matched
-/// nothing: that URL names something else, a document or a ticket, which
-/// would otherwise vanish into the branch row and lose its link. The agent
-/// names the branch in `branch`, or — for a branch asset — as its title. With
-/// no project the branch has to be unambiguous, since a task spanning several
-/// repos uses the same branch name in each of them.
+/// nothing unless it is a branch: any other URL names something else, a
+/// document or a ticket, which would otherwise vanish into the PR row and lose
+/// its link, while a branch's link names the branch, which its PR row now is.
+/// The agent names the branch in `branch`, or — for a branch asset — in its
+/// `…/tree/<branch>` link or as its title. With no project the branch has to be
+/// unambiguous, since a task spanning several repos uses the same branch name
+/// in each of them.
 fn detected_match(rows: &[SessionAsset], asset: &AgentAsset) -> Option<usize> {
     if let Some(i) = rows.iter().position(|row| matches(asset, row)) {
         return Some(i);
     }
-    if asset.url.is_some()
+    let links_elsewhere = asset.url.is_some() && asset.kind != AgentAssetKind::Branch;
+    if links_elsewhere
         || !matches!(
             asset.kind,
             AgentAssetKind::Branch | AgentAssetKind::PullRequest | AgentAssetKind::Other
@@ -398,7 +404,11 @@ fn detected_match(rows: &[SessionAsset], asset: &AgentAsset) -> Option<usize> {
     }
 
     let branch = asset.branch.as_deref().or(match asset.kind {
-        AgentAssetKind::Branch => Some(asset.title.as_str()),
+        AgentAssetKind::Branch => asset
+            .url
+            .as_deref()
+            .and_then(branch_from_url)
+            .or(Some(asset.title.as_str())),
         _ => None,
     })?;
     let branch = branch.trim();
@@ -418,6 +428,14 @@ fn detected_match(rows: &[SessionAsset], asset: &AgentAsset) -> Option<usize> {
             }
         }
     }
+}
+
+/// The branch a branch link names: `feat/x` in
+/// `https://github.com/o/r/tree/feat/x`. `None` for any other link.
+fn branch_from_url(url: &str) -> Option<&str> {
+    let url = url.trim().split(['?', '#']).next()?;
+    let (_, branch) = url.split_once("/tree/")?;
+    Some(branch.trim_end_matches('/')).filter(|b| !b.is_empty())
 }
 
 /// A URL in the form two spellings of it share: trimmed, without a trailing
@@ -505,28 +523,13 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_never_pushed_is_local_only() {
-        let g = git(None, None);
-        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[], &[]);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].kind, AgentAssetKind::Branch);
-        assert_eq!(rows[0].state, Some(DetectedState::LocalOnly));
-        assert_eq!(rows[0].project.as_deref(), Some("okena"));
-        assert!(!rows[0].registered);
-    }
-
-    #[test]
-    fn a_pushed_branch_carries_its_counts() {
-        let g = git(Some(0), None);
-        let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[], &[]);
-        assert_eq!(
-            rows[0].state,
-            Some(DetectedState::Pushed {
-                unpushed: 0,
-                ahead: Some(2),
-                behind: Some(1)
-            })
-        );
+    fn a_worktree_without_a_pr_is_not_produced() {
+        // Local only, pushed, or not polled yet: it shows under WORKTREES.
+        let (local, pushed) = (git(None, None), git(Some(0), None));
+        for git in [Some(&local), Some(&pushed), None] {
+            let rows = derive_session_assets(&[], &[checkout("okena", git)], &[], &[]);
+            assert!(rows.is_empty(), "{git:?}: {rows:?}");
+        }
     }
 
     #[test]
@@ -641,7 +644,7 @@ mod tests {
     #[test]
     fn a_task_with_a_link_and_a_branch_keeps_its_own_row() {
         // The branch rule only merges what has no link of its own.
-        let g = git(None, None);
+        let g = git(Some(0), Some((7, PrState::Open)));
         let mut filed = filed_task("QBL-375", "https://linear.app/q/issue/QBL-375/x");
         filed.branch = Some("feat/x".into());
         filed.project = Some("okena".into());
@@ -754,7 +757,7 @@ mod tests {
 
     #[test]
     fn uncommitted_changes_show_on_the_row() {
-        let mut g = git(None, None);
+        let mut g = git(Some(0), Some((7, PrState::Open)));
         g.lines_added = 4;
         let rows = derive_session_assets(&[], &[checkout("okena", Some(&g))], &[], &[]);
         assert_eq!(
@@ -768,7 +771,10 @@ mod tests {
 
     #[test]
     fn several_repos_give_one_labelled_row_each() {
-        let (a, b) = (git(None, None), git(Some(1), None));
+        let (a, b) = (
+            git(Some(0), Some((7, PrState::Open))),
+            git(Some(1), Some((8, PrState::Draft))),
+        );
         let rows = derive_session_assets(
             &[],
             &[checkout("okena", Some(&a)), checkout("web", Some(&b))],
@@ -776,13 +782,6 @@ mod tests {
         );
         let projects: Vec<_> = rows.iter().map(|r| r.project.as_deref()).collect();
         assert_eq!(projects, [Some("okena"), Some("web")]);
-    }
-
-    #[test]
-    fn a_checkout_the_poll_has_not_reached_shows_its_branch_without_state() {
-        let rows = derive_session_assets(&[], &[checkout("okena", None)], &[], &[]);
-        assert_eq!(rows[0].branch.as_deref(), Some("feat/x"));
-        assert_eq!(rows[0].state, None);
     }
 
     #[test]
@@ -802,7 +801,10 @@ mod tests {
 
     #[test]
     fn a_registered_branch_merges_by_branch_and_project() {
-        let (a, b) = (git(None, None), git(None, None));
+        let (a, b) = (
+            git(Some(0), Some((7, PrState::Open))),
+            git(Some(0), Some((8, PrState::Open))),
+        );
         let mut asset = registered(AgentAssetKind::Other, "web side");
         asset.branch = Some("feat/x".into());
         asset.project = Some("WEB".into());
@@ -818,7 +820,7 @@ mod tests {
 
     #[test]
     fn a_branch_named_only_by_title_merges_when_unambiguous() {
-        let g = git(None, None);
+        let g = git(Some(0), Some((7, PrState::Open)));
         let rows = derive_session_assets(
             &[registered(AgentAssetKind::Branch, "feat/x")],
             &[checkout("okena", Some(&g))],
@@ -826,11 +828,15 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].registered);
+        assert_eq!(rows[0].kind, AgentAssetKind::PullRequest);
     }
 
     #[test]
     fn an_ambiguous_branch_without_a_project_stays_separate() {
-        let (a, b) = (git(None, None), git(None, None));
+        let (a, b) = (
+            git(Some(0), Some((7, PrState::Open))),
+            git(Some(0), Some((8, PrState::Open))),
+        );
         let rows = derive_session_assets(
             &[registered(AgentAssetKind::Branch, "feat/x")],
             &[checkout("okena", Some(&a)), checkout("web", Some(&b))],
@@ -842,7 +848,7 @@ mod tests {
 
     #[test]
     fn a_document_on_the_branch_keeps_its_own_row_and_link() {
-        let g = git(None, None);
+        let g = git(Some(0), Some((7, PrState::Open)));
         let mut doc = registered(AgentAssetKind::Document, "Design notes");
         doc.url = Some("https://example.com/doc".into());
         doc.branch = Some("feat/x".into());
@@ -866,9 +872,9 @@ mod tests {
 
     #[test]
     fn a_pr_whose_link_matched_nothing_does_not_merge_by_branch() {
-        // Its PR has not been polled yet; the branch row is a different thing
-        // until it has.
-        let g = git(None, None);
+        // The checkout's PR is a different one than the link names: #8 was
+        // polled, #7 has not been yet.
+        let g = git(Some(0), Some((8, PrState::Open)));
         let mut pr = registered(AgentAssetKind::PullRequest, "Detect assets");
         pr.url = Some("https://github.com/o/r/pull/7".into());
         pr.branch = Some("feat/x".into());
@@ -882,7 +888,7 @@ mod tests {
 
     #[test]
     fn unmatched_registrations_are_listed_after_detected_rows() {
-        let g = git(None, None);
+        let g = git(Some(0), Some((7, PrState::Open)));
         let mut doc = registered(AgentAssetKind::Document, "Design notes");
         doc.url = Some("https://example.com/doc".into());
         let rows = derive_session_assets(&[doc], &[checkout("okena", Some(&g))], &[], &[]);
@@ -997,14 +1003,16 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].pr.as_ref().map(|p| p.number), Some(12));
 
-        // Checked out again with no PR yet: the merged one is still worth a card.
+        // Checked out again with no PR yet: the merged one is still worth a
+        // card, and the checkout is not one.
         let bare = git(Some(0), None);
         let rows = derive_session_assets(
             &[],
             &[checkout("okena", Some(&bare))],
             &[tracked(9, PrState::Merged)], &[],
         );
-        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].pr.as_ref().map(|p| p.number), Some(9));
     }
 
     #[test]
@@ -1042,5 +1050,160 @@ mod tests {
         );
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].kind, AgentAssetKind::PullRequest);
+    }
+
+    #[test]
+    fn a_push_from_a_linked_worktree_is_not_a_branch_row() {
+        let pushed = PushedBranch {
+            project: "okena".into(),
+            repo_path: "/p/okena".into(),
+            branch: "feat/x".into(),
+        };
+        // On the branch, polled or not: the worktree's, under WORKTREES.
+        let g = git(Some(0), None);
+        for git in [Some(&g), None] {
+            let rows = derive_session_assets(
+                &[],
+                &[checkout("okena", git)],
+                &[],
+                std::slice::from_ref(&pushed),
+            );
+            assert!(rows.is_empty(), "{rows:?}");
+        }
+
+        // A worktree on another branch leaves the push its own card.
+        let mut other = git(Some(0), None);
+        other.branch = Some("feat/y".into());
+        let rows = derive_session_assets(
+            &[],
+            &[LinkedCheckout {
+                project: "okena",
+                branch: Some("feat/y"),
+                git: Some(&other),
+            }],
+            &[],
+            std::slice::from_ref(&pushed),
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].kind, AgentAssetKind::Branch);
+    }
+
+    /// A branch as `okena_register_asset` records it, with the agent's title.
+    fn registered_branch() -> AgentAsset {
+        let mut asset = registered(AgentAssetKind::Branch, "Session asset rules");
+        asset.branch = Some("feat/x".into());
+        asset.project = Some("okena".into());
+        asset
+    }
+
+    fn assert_the_prs_row_with_the_agents_title(rows: &[SessionAsset], number: u32) {
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.kind, AgentAssetKind::PullRequest);
+        assert_eq!(row.title, "Session asset rules");
+        assert!(row.registered);
+        assert_eq!(row.pr.as_ref().map(|p| p.number), Some(number));
+        assert_eq!(
+            row.url.as_deref(),
+            Some(format!("https://github.com/o/r/pull/{number}").as_str())
+        );
+    }
+
+    #[test]
+    fn a_registered_branch_becomes_its_prs_row() {
+        let asset = registered_branch();
+
+        // No PR yet: the branch row the agent registered, beside no other.
+        let bare = git(Some(0), None);
+        let rows = derive_session_assets(
+            std::slice::from_ref(&asset),
+            &[checkout("okena", Some(&bare))],
+            &[],
+            &[],
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].kind, AgentAssetKind::Branch);
+        assert!(rows[0].registered);
+
+        // `gh pr create`: one row, the PR's, with okena's state and CI.
+        let mut with_pr = git(Some(0), Some((7, PrState::Open)));
+        with_pr.ci_checks = Some(CiCheckSummary {
+            status: crate::api::CiStatus::Success,
+            passed: 1,
+            failed: 0,
+            pending: 0,
+            total: 1,
+            checks: Vec::new(),
+        });
+        let rows = derive_session_assets(
+            std::slice::from_ref(&asset),
+            &[checkout("okena", Some(&with_pr))],
+            &[],
+            &[],
+        );
+        assert_the_prs_row_with_the_agents_title(&rows, 7);
+        assert!(rows[0].ci.is_some());
+
+        // The worktree removed after: the tracked PR is still that one row.
+        let rows = derive_session_assets(
+            std::slice::from_ref(&asset),
+            &[],
+            &[tracked(9, PrState::Open)],
+            &[],
+        );
+        assert_the_prs_row_with_the_agents_title(&rows, 9);
+    }
+
+    #[test]
+    fn a_registered_branch_with_a_link_becomes_its_prs_row() {
+        let mut asset = registered_branch();
+        asset.url = Some("https://github.com/o/r/tree/feat/x".into());
+        let mut by_link_only = asset.clone();
+        by_link_only.branch = None;
+        by_link_only.project = None;
+
+        let g = git(Some(0), Some((7, PrState::Open)));
+        for asset in [asset, by_link_only] {
+            let rows = derive_session_assets(
+                std::slice::from_ref(&asset),
+                &[checkout("okena", Some(&g))],
+                &[],
+                &[],
+            );
+            assert_the_prs_row_with_the_agents_title(&rows, 7);
+
+            // Without a PR it keeps its link.
+            let rows = derive_session_assets(std::slice::from_ref(&asset), &[], &[], &[]);
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0].kind, AgentAssetKind::Branch);
+            assert_eq!(
+                rows[0].url.as_deref(),
+                Some("https://github.com/o/r/tree/feat/x")
+            );
+        }
+    }
+
+    #[test]
+    fn a_registered_branch_in_a_repo_with_no_known_pr_stays_a_branch_row() {
+        let mut asset = registered_branch();
+        asset.project = Some("web".into());
+        // The PR on `feat/x` is okena's, not web's.
+        let g = git(Some(0), Some((7, PrState::Open)));
+        let rows = derive_session_assets(&[asset], &[checkout("okena", Some(&g))], &[], &[]);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].kind, AgentAssetKind::PullRequest);
+        assert!(!rows[0].registered);
+        assert_eq!(rows[1].kind, AgentAssetKind::Branch);
+        assert_eq!(rows[1].project.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn branches_come_from_tree_links_only() {
+        assert_eq!(
+            branch_from_url("https://github.com/o/r/tree/feat/x/?tab=readme"),
+            Some("feat/x")
+        );
+        assert_eq!(branch_from_url("https://github.com/o/r/pull/7"), None);
+        assert_eq!(branch_from_url("https://github.com/o/r/tree/"), None);
     }
 }
