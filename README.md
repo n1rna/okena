@@ -12,22 +12,26 @@ Tabs, splits, detachable windows, command palette, and automatic workspace resto
 ### macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/contember/okena/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/n1rna/okena/main/install.sh | bash
 ```
 
 ### Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/contember/okena/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/n1rna/okena/main/install.sh | bash
 ```
 
 ### Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/contember/okena/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/n1rna/okena/main/install.ps1 | iex
 ```
 
 The install script includes built-in auto-update support. On macOS and Linux, Okena is installed to `~/.local/bin/okena`. On Windows, it installs to `%LOCALAPPDATA%\Programs\Okena` with a Start Menu shortcut.
+
+### Coming from upstream okena
+
+This fork publishes its own releases from [`n1rna/okena`](https://github.com/n1rna/okena/releases), versioned independently of [`contember/okena`](https://github.com/contember/okena) and starting at `0.1.0`. An install of upstream okena reports a higher version (such as `0.31.0` or `0.32.0`), so its updater will never see this fork's `0.1.0` as newer. Reinstall once with the install command above; from then on the built-in updater follows this fork's releases.
 
 ## Features
 

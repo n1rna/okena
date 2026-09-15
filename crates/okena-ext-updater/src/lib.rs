@@ -22,6 +22,10 @@ use okena_extensions::{ExtensionInstance, ExtensionManifest, ExtensionRegistrati
 #[cfg(feature = "gpui-ui")]
 use std::sync::Arc;
 
+/// The GitHub repo (`owner/name`) okena's releases are published to. The update
+/// check, version history, release links and install scripts all use it.
+pub const RELEASE_REPO: &str = "n1rna/okena";
+
 // Re-export public types used by the host app
 pub use checker::{ReleaseCatalog, RevertRelease};
 #[cfg(feature = "gpui-ui")]
