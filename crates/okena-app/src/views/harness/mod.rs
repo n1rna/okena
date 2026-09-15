@@ -22,6 +22,7 @@ mod tasks_view;
 mod testing_view;
 
 use crate::views::components::SimpleInputState;
+use crate::views::components::source_editor::BriefInput;
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowId, Workspace};
 use gpui::*;
@@ -92,10 +93,14 @@ pub(crate) struct TasksState {
     /// External id of the task whose refine agent is starting, for the same
     /// reason as `breaking_down`.
     pub(crate) refining: Option<String>,
-    /// Open "New task" form, if any.
+    /// The "New task" draft, if one has been started. Kept until the task is
+    /// created or the form is cancelled — not when the form is hidden.
     pub(crate) new_task: Option<new_task_form::NewTaskForm>,
+    /// Whether the form is showing. Apart from `new_task` so that opening a
+    /// task's detail hides the draft rather than throwing it away.
+    pub(crate) new_task_open: bool,
     pub(crate) new_task_title: Entity<SimpleInputState>,
-    pub(crate) new_task_body: Entity<SimpleInputState>,
+    pub(crate) new_task_body: BriefInput,
     /// Open "Start work" dialog, if any.
     pub(crate) start_form: Option<StartWorkForm>,
     /// Starts waiting their turn.
@@ -164,7 +169,7 @@ pub(crate) struct SpecsState {
     pub(crate) documents: editor::Documents,
     pub(crate) content_error: Option<String>,
     /// The idea a new change is drafted from.
-    pub(crate) idea_input: Entity<SimpleInputState>,
+    pub(crate) idea_input: BriefInput,
     /// Whether the document panel is showing the new-change form.
     ///
     /// It stands where a document's text stands rather than taking the whole
@@ -324,12 +329,6 @@ pub struct HarnessPane {
         Rc<RefCell<Option<okena_views_terminal::layout::split_pane::DragState>>>,
     /// Board width from the last frame, used to turn a drag into a fraction.
     pub(crate) board_width: Rc<RefCell<f32>>,
-    /// Scroll position of each multi-line form field, by its element id.
-    ///
-    /// Held here rather than in the fields' own state because the scrolling is
-    /// the wrapper's job, not the input's — the input grows to fit its text
-    /// and knows nothing about the box it is shown in.
-    pub(crate) field_scrolls: RefCell<std::collections::HashMap<&'static str, gpui::ScrollHandle>>,
     pub(crate) section: HarnessSection,
     pub(crate) tasks: TasksState,
     pub(crate) specs: SpecsState,
@@ -393,11 +392,7 @@ impl HarnessPane {
         .detach();
         let new_task_title =
             cx.new(|cx| SimpleInputState::new(cx).placeholder("What needs doing?"));
-        let new_task_body = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .multiline()
-                .placeholder("What it covers, and what finishing it means")
-        });
+        let new_task_body = BriefInput::new("What it covers, and what finishing it means");
         let task_search = cx.new(|cx| SimpleInputState::new(cx).placeholder("Search tasks"));
         // Rows narrow as you type: the loaded tasks are all there is to search.
         cx.subscribe(
@@ -410,19 +405,16 @@ impl HarnessPane {
         )
         .detach();
         let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("add-login"));
-        let idea_input = cx.new(|cx| {
-            SimpleInputState::new(cx).multiline().placeholder(
-                "e.g. let users sign in with Google, alongside the existing \
-                     email flow",
-            )
-        });
+        let idea_input = BriefInput::new(
+            "e.g. let users sign in with Google, alongside the existing email flow",
+        );
         let specs_git = store_git::StoreGitPanel::new(cx);
         let knowledge = knowledge_view::KnowledgeState::new(cx);
         // Their projects-and-context pickers are made when their dialog first
         // opens: most panes never open one.
-        let knowledge_draft = knowledge_draft::DraftForm::new(cx);
-        let spec_refine = doc_agents::DocRefine::new(cx);
-        let knowledge_refine = doc_agents::DocRefine::new(cx);
+        let knowledge_draft = knowledge_draft::DraftForm::new();
+        let spec_refine = doc_agents::DocRefine::new();
+        let knowledge_refine = doc_agents::DocRefine::new();
         let spec_files = file_ops::FileOps::new(cx);
         let knowledge_files = file_ops::FileOps::new(cx);
         let testing = (section == HarnessSection::Testing).then(|| {
@@ -442,7 +434,6 @@ impl HarnessPane {
             terminals: ctx.terminals,
             active_drag: ctx.active_drag,
             board_width: Rc::new(RefCell::new(0.0)),
-            field_scrolls: RefCell::new(std::collections::HashMap::new()),
             section,
             tasks: TasksState {
                 provider_display_name: tasks_view::provider_label(&provider).to_string(),
@@ -464,6 +455,7 @@ impl HarnessPane {
                 breaking_down: None,
                 refining: None,
                 new_task: None,
+                new_task_open: false,
                 new_task_title,
                 new_task_body,
                 start_form: None,

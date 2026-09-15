@@ -47,33 +47,36 @@ pub(crate) struct NewTaskForm {
 }
 
 impl HarnessPane {
-    /// Open the form.
+    /// Open the form: on the draft in progress if there is one, else blank.
     pub(super) fn open_new_task(&mut self, cx: &mut Context<Self>) {
         // The form takes the detail panel, so nothing is selected while it is
         // open: a highlighted row whose detail you cannot see reads as a bug,
         // and closing the form would then restore a selection you had stopped
         // thinking about.
         self.tasks.selected = None;
-        self.tasks.new_task = Some(NewTaskForm {
-            kind: TaskKind::Task,
-            container_id: None,
-            containers: Vec::new(),
-            creating: false,
-            drafting: false,
-            error: None,
-        });
-        self.tasks
-            .new_task_title
-            .update(cx, |i, cx| i.set_value("", cx));
-        self.tasks
-            .new_task_body
-            .update(cx, |i, cx| i.set_value("", cx));
-        self.load_containers(cx);
+        self.tasks.new_task_open = true;
+        if self.tasks.new_task.is_none() {
+            self.tasks.new_task = Some(NewTaskForm {
+                kind: TaskKind::Task,
+                container_id: None,
+                containers: Vec::new(),
+                creating: false,
+                drafting: false,
+                error: None,
+            });
+            self.tasks
+                .new_task_title
+                .update(cx, |i, cx| i.set_value("", cx));
+            self.tasks.new_task_body.clear();
+            self.load_containers(cx);
+        }
         cx.notify();
     }
 
+    /// Throw the draft away: cancelled, or it has become a task.
     pub(super) fn close_new_task(&mut self, cx: &mut Context<Self>) {
         self.tasks.new_task = None;
+        self.tasks.new_task_open = false;
         cx.notify();
     }
 
@@ -152,7 +155,7 @@ impl HarnessPane {
             return;
         }
         let kind = form.kind;
-        let description = self.tasks.new_task_body.read(cx).value().trim().to_string();
+        let description = self.tasks.new_task_body.value(cx).trim().to_string();
         let provider = self.tasks.provider.clone();
 
         if let Some(form) = self.tasks.new_task.as_mut() {
@@ -196,7 +199,7 @@ impl HarnessPane {
                             if let Some(parent) = task.parent_id.as_ref() {
                                 this.tasks.children.remove(parent);
                             }
-                            this.tasks.new_task = None;
+                            this.close_new_task(cx);
                             // Select it: you almost always want to look at what
                             // you just made, and it may not be assigned to you,
                             // in which case the refresh below will not list it.
@@ -402,7 +405,7 @@ impl HarnessPane {
                     .child(
                         // Shorter than the full-page form was: in a panel
                         // this shares the height with everything below it.
-                        self.multiline_field("new-task-body", &self.tasks.new_task_body, 110.0, cx),
+                        self.tasks.new_task_body.render(110.0, cx),
                     ),
             )
             .child(
@@ -555,7 +558,7 @@ impl HarnessPane {
             return;
         }
         let kind = form.kind;
-        let description = self.tasks.new_task_body.read(cx).value().trim().to_string();
+        let description = self.tasks.new_task_body.value(cx).trim().to_string();
         let container = form
             .container_id
             .as_deref()
@@ -808,5 +811,143 @@ mod tests {
         // do rather than more defects.
         assert_eq!(narrower_than(TaskKind::Task), TaskKind::Task);
         assert_eq!(narrower_than(TaskKind::Defect), TaskKind::Task);
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::super::{HarnessPane, HarnessSection, PaneContext};
+    use crate::settings::{GlobalSettings, SettingsState};
+    use crate::views::components::source_editor::BriefInput;
+    use crate::workspace::focus::FocusManager;
+    use crate::workspace::request_broker::RequestBroker;
+    use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
+    use gpui::AppContext as _;
+    use gpui::{Entity, TestAppContext};
+    use okena_core::tasks::TaskKind;
+
+    fn tasks_pane(cx: &mut TestAppContext) -> Entity<HarnessPane> {
+        cx.update(|cx| {
+            let settings = cx.new(|_| SettingsState::new(Default::default()));
+            cx.set_global(GlobalSettings(settings));
+            let config = okena_transport::RemoteConnectionConfig {
+                id: "test".into(),
+                name: "test".into(),
+                host: "127.0.0.1".into(),
+                port: 1,
+                saved_token: None,
+                token_obtained_at: None,
+                tls: false,
+                pinned_cert_sha256: None,
+                local_endpoint: None,
+            };
+            let ctx = PaneContext {
+                client: okena_transport::remote_action::RemoteActionClient::new(
+                    config,
+                    "t".into(),
+                ),
+                request_broker: cx.new(|_| RequestBroker::new()),
+                workspace: cx.new(|_| Workspace::new(WorkspaceData::empty())),
+                focus_manager: cx.new(|_| FocusManager::new()),
+                window_id: WindowId::Main,
+                terminals: Default::default(),
+                active_drag: Default::default(),
+            };
+            cx.new(|cx| HarnessPane::new(HarnessSection::Tasks, ctx, cx))
+        })
+    }
+
+    fn draft(pane: &Entity<HarnessPane>, cx: &mut TestAppContext) -> Option<(String, String, TaskKind)> {
+        pane.read_with(cx, |p, cx| {
+            p.tasks.new_task.as_ref().map(|f| {
+                (
+                    p.tasks.new_task_title.read(cx).value().to_string(),
+                    p.tasks.new_task_body.value(cx),
+                    f.kind,
+                )
+            })
+        })
+    }
+
+    /// A draft with a title, two paragraphs and a kind other than the default.
+    fn start_draft(pane: &Entity<HarnessPane>, cx: &mut TestAppContext) {
+        pane.update(cx, |p, cx| {
+            p.open_new_task(cx);
+            p.tasks.new_task_title.update(cx, |i, cx| i.set_value("Title", cx));
+            // No window here to build the editor in: its text before the
+            // first frame stands in for typing.
+            p.tasks.new_task_body =
+                BriefInput::new("What it covers, and what finishing it means")
+                    .with_value("Para 1\n\nPara 2");
+            p.tasks.new_task.as_mut().unwrap().kind = TaskKind::Epic;
+        });
+    }
+
+    fn typed() -> Option<(String, String, TaskKind)> {
+        Some(("Title".into(), "Para 1\n\nPara 2".into(), TaskKind::Epic))
+    }
+
+    fn open(pane: &Entity<HarnessPane>, cx: &mut TestAppContext) -> bool {
+        pane.read_with(cx, |p, _| p.tasks.new_task_open)
+    }
+
+    #[gpui::test]
+    fn the_draft_survives_leaving_the_view_and_coming_back(cx: &mut TestAppContext) {
+        let pane = tasks_pane(cx);
+        start_draft(&pane, cx);
+        // What leaving for Projects or Agents and coming back does to the
+        // pane: the daemon re-sends settings, auth is re-announced, and the
+        // view is flagged to take focus again.
+        cx.update(|cx| {
+            crate::settings::settings_entity(cx)
+                .update(cx, |s, cx| s.replace_from_daemon(Default::default(), cx));
+            super::super::notify_task_auth_changed(cx);
+        });
+        pane.update(cx, |p, _| p.tasks.focus_on_show = true);
+        cx.run_until_parked();
+        assert_eq!(draft(&pane, cx), typed());
+        assert!(open(&pane, cx));
+    }
+
+    #[gpui::test]
+    fn opening_a_task_hides_the_draft_and_new_brings_it_back(cx: &mut TestAppContext) {
+        let pane = tasks_pane(cx);
+        start_draft(&pane, cx);
+
+        pane.update(cx, |p, cx| p.select_task("TASK-1".into(), cx));
+        assert!(!open(&pane, cx), "the task's detail shows instead");
+        assert_eq!(draft(&pane, cx), typed(), "hidden, not discarded");
+
+        pane.update(cx, |p, cx| p.open_new_task(cx));
+        assert!(open(&pane, cx));
+        assert_eq!(draft(&pane, cx), typed(), "New reopens the draft");
+        assert_eq!(pane.read_with(cx, |p, _| p.tasks.selected.clone()), None);
+    }
+
+    #[gpui::test]
+    fn cancelling_discards_the_draft_and_new_starts_blank(cx: &mut TestAppContext) {
+        let pane = tasks_pane(cx);
+        start_draft(&pane, cx);
+
+        // Cancel/✕, and a created task, both end in `close_new_task`.
+        pane.update(cx, |p, cx| p.close_new_task(cx));
+        assert!(!open(&pane, cx));
+        assert_eq!(draft(&pane, cx), None);
+
+        pane.update(cx, |p, cx| p.open_new_task(cx));
+        assert_eq!(
+            draft(&pane, cx),
+            Some((String::new(), String::new(), TaskKind::Task))
+        );
+    }
+
+    #[gpui::test]
+    fn switching_provider_discards_the_draft(cx: &mut TestAppContext) {
+        let pane = tasks_pane(cx);
+        start_draft(&pane, cx);
+
+        pane.update(cx, |p, cx| p.switch_provider("azure_devops".into(), cx));
+        assert!(!open(&pane, cx));
+        assert_eq!(draft(&pane, cx), None);
     }
 }

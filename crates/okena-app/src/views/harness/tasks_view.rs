@@ -667,6 +667,7 @@ impl HarnessPane {
             .search
             .update(cx, |input, cx| input.set_value("", cx));
         self.tasks.new_task = None;
+        self.tasks.new_task_open = false;
         self.tasks.start_form = None;
         self.refresh_auth(cx);
         cx.notify();
@@ -1817,9 +1818,8 @@ impl HarnessPane {
 
     pub(super) fn select_task(&mut self, external_id: String, cx: &mut Context<Self>) {
         // The form and a task's detail share the one panel, so picking a row
-        // is how you leave the form. Without this, clicking a task while
-        // drafting looked like nothing had happened.
-        self.tasks.new_task = None;
+        // hides the form. Only hides it: the draft comes back with New.
+        self.tasks.new_task_open = false;
         self.tasks.selected = Some(external_id.clone());
         self.fetch_children(external_id, cx);
         cx.notify();
@@ -4260,7 +4260,7 @@ impl HarnessPane {
         // The board renders the rows itself; only emptiness matters here.
         // Building a throwaway element per task would render every row twice.
         let has_rows = !self.tasks.tasks.is_empty();
-        let composing = self.tasks.new_task.is_some();
+        let composing = self.tasks.new_task_open && self.tasks.new_task.is_some();
         // The form stands where a task's detail stands, so the two columns
         // have to exist for it — including on a first run with no tasks yet,
         // which is exactly when someone reaches for "New task".

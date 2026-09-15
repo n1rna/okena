@@ -10,7 +10,7 @@
 use super::{HarnessPane, HarnessSection};
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text_md, ui_text_ms};
-use crate::views::components::{SimpleInput, SimpleInputState};
+use crate::views::components::source_editor::BriefInput;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
@@ -23,7 +23,7 @@ use std::collections::HashSet;
 /// What a document's agent card holds between frames.
 pub(crate) struct DocRefine {
     /// What to change, typed on the card.
-    pub(crate) request: Entity<SimpleInputState>,
+    pub(crate) request: BriefInput,
     /// A start is in flight, which blocks a second one.
     pub(crate) starting: bool,
     /// Projects and context for the agent, once its dialog has been opened.
@@ -31,11 +31,9 @@ pub(crate) struct DocRefine {
 }
 
 impl DocRefine {
-    pub(crate) fn new(cx: &mut Context<HarnessPane>) -> Self {
-        let request =
-            cx.new(|cx| SimpleInputState::new(cx).placeholder("What should change in this file?"));
+    pub(crate) fn new() -> Self {
         Self {
-            request,
+            request: BriefInput::new("What should change in this file?"),
             starting: false,
             pickers: None,
         }
@@ -156,11 +154,8 @@ impl HarnessPane {
             }),
             cx,
         );
-        let request = okena_ui::input::input_container(&t, None)
-            .w_full()
-            .px(px(8.0))
-            .py(px(5.0))
-            .child(SimpleInput::new(&state.request).text_size(ui_text_md(cx)));
+        // A request can run to a few lines, so the box shows a few.
+        let request = state.request.render(72.0, cx);
 
         Some(
             okena_ui::agent_launcher::AgentLauncher::new(
@@ -223,13 +218,7 @@ impl HarnessPane {
             self.report_error("Save your edits first.", cx);
             return;
         }
-        let request = self
-            .doc_refine_mut(section)
-            .request
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
+        let request = self.doc_refine_mut(section).request.value(cx).trim().to_string();
         if request.is_empty() {
             self.report_error("Say what to change first.", cx);
             return;
@@ -270,13 +259,12 @@ impl HarnessPane {
                 let _ = this.update(cx, |this, cx| {
                     let state = this.doc_refine_mut(section);
                     state.starting = false;
-                    let input = state.request.clone();
                     let pickers = state.pickers.clone();
                     // Not opening it: the card lists it, and you are reading
                     // the file it is about to change.
                     match result {
                         Ok(_) => {
-                            input.update(cx, |i, cx| i.set_value("", cx));
+                            this.doc_refine_mut(section).request.clear();
                             super::context_dialog::clear_picked_context(pickers, cx);
                         }
                         Err(e) => this.report_error(e, cx),

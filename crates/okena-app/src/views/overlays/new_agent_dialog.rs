@@ -12,6 +12,7 @@ use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
 use crate::views::components::launch_pickers::{LaunchPickers, LaunchPickersEvent};
+use crate::views::components::source_editor::BriefInput;
 use crate::views::components::{SimpleInput, SimpleInputState};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::state::{WindowId, Workspace};
@@ -33,7 +34,7 @@ pub struct NewAgentDialog {
     focus_manager: Entity<FocusManager>,
     window_id: WindowId,
     focus_handle: FocusHandle,
-    goal_input: Entity<SimpleInputState>,
+    goal_input: BriefInput,
     name_input: Entity<SimpleInputState>,
     root_input: Entity<SimpleInputState>,
     /// Projects the agent is pointed at and the context it is handed, as
@@ -59,16 +60,11 @@ impl NewAgentDialog {
         prefill: NewAgentPrefill,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Multiline: a goal is a paragraph, and a breakdown's brief is several.
-        // A single-line input draws every line of it on top of the form.
-        let goal_input = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .multiline()
-                .placeholder(
-                    "e.g. audit every crate for unwraps on user input and open a PR per crate",
-                )
-                .default_value(prefill.goal)
-        });
+        // An editor: a goal is a paragraph, and a breakdown's brief is several.
+        let goal_input = BriefInput::new(
+            "e.g. audit every crate for unwraps on user input and open a PR per crate",
+        )
+        .with_value(prefill.goal);
         let name_input = cx.new(|cx| {
             SimpleInputState::new(cx)
                 .placeholder("Optional — derived from the goal")
@@ -118,7 +114,7 @@ impl NewAgentDialog {
         if self.starting {
             return;
         }
-        let goal = self.goal_input.read(cx).value().trim().to_string();
+        let goal = self.goal_input.value(cx).trim().to_string();
         if goal.is_empty() {
             self.error = Some("Describe what the agent should do first.".into());
             cx.notify();
@@ -233,6 +229,7 @@ impl Focusable for NewAgentDialog {
 impl Render for NewAgentDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        self.goal_input.ensure(window, cx);
         let focus_handle = self.focus_handle.clone();
         if !focus_handle.contains_focused(window, cx) {
             window.focus(&focus_handle, cx);
@@ -317,23 +314,7 @@ impl Render for NewAgentDialog {
                                     // is a whole brief, and an input sized to
                                     // it would push the rest of the form out
                                     // of the dialog.
-                                    .child(
-                                        okena_ui::input::input_container(&t, None)
-                                            .w_full()
-                                            .h(px(180.0))
-                                            .py(px(6.0))
-                                            .child(
-                                                div()
-                                                    .id("new-agent-goal-scroll")
-                                                    .size_full()
-                                                    .px(px(8.0))
-                                                    .overflow_y_scroll()
-                                                    .child(
-                                                        SimpleInput::new(&self.goal_input)
-                                                            .text_size(ui_text(13.0, cx)),
-                                                    ),
-                                            ),
-                                    )
+                                    .child(self.goal_input.render(180.0, cx))
                                     .child(self.field_hint(
                                         "What the agent is asked to do. This is its opening \
                                          prompt, so context beats brevity.",

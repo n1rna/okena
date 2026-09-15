@@ -236,7 +236,7 @@ impl HarnessPane {
         if self.specs.drafting {
             return;
         }
-        let idea = self.specs.idea_input.read(cx).value().trim().to_string();
+        let idea = self.specs.idea_input.value(cx).trim().to_string();
         if idea.is_empty() {
             self.specs.error = Some("Describe the change first.".into());
             cx.notify();
@@ -282,9 +282,10 @@ impl HarnessPane {
                             // thing worth looking at here is the change itself.
                             this.specs.composing = false;
                             this.specs.draft_root = None;
-                            for input in [&this.specs.idea_input, &this.specs.name_input] {
-                                input.update(cx, |i, cx| i.set_value("", cx));
-                            }
+                            this.specs.idea_input.clear();
+                            this.specs
+                                .name_input
+                                .update(cx, |i, cx| i.set_value("", cx));
                             super::context_dialog::clear_picked_context(
                                 this.specs.pickers.clone(),
                                 cx,
@@ -1078,7 +1079,7 @@ impl HarnessPane {
                 v_flex()
                     .gap(px(5.0))
                     .child(self.field_label("Prompt", cx))
-                    .child(self.multiline_field("spec-idea", &self.specs.idea_input, 110.0, cx))
+                    .child(self.specs.idea_input.render(110.0, cx))
                     .child(self.field_hint(
                         "What the change is for. This is what the agent is \
                          briefed with, so context beats brevity.",
