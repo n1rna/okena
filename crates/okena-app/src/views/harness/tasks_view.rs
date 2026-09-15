@@ -2610,6 +2610,8 @@ impl HarnessPane {
                         project_id: daemon_id,
                         // Nothing to refuse: no checkout to be dirty.
                         force: true,
+                        remove_worktrees: true,
+                        delete_branches: false,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing delete result".to_string()))
             })

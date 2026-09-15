@@ -1056,12 +1056,17 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::AgentRestart { project_id } => ActionRequest::AgentRestart {
             project_id: s(&project_id),
         },
-        ActionRequest::TaskDeleteWorkspace { project_id, force } => {
-            ActionRequest::TaskDeleteWorkspace {
-                project_id: s(&project_id),
-                force,
-            }
-        }
+        ActionRequest::TaskDeleteWorkspace {
+            project_id,
+            force,
+            remove_worktrees,
+            delete_branches,
+        } => ActionRequest::TaskDeleteWorkspace {
+            project_id: s(&project_id),
+            force,
+            remove_worktrees,
+            delete_branches,
+        },
         // Project ids are client-side and must be stripped for the daemon.
         ActionRequest::AgentStartSession {
             goal,
