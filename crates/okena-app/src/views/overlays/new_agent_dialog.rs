@@ -276,7 +276,7 @@ impl Render for NewAgentDialog {
             )
             .child(
                 modal_content("new-agent-modal", &t)
-                    .w(px(640.0))
+                    .w(px(760.0))
                     .max_h(px(700.0))
                     .flex()
                     .flex_col()

@@ -126,7 +126,7 @@ impl HarnessPane {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
                     v_flex()
-                        .w(px(560.0))
+                        .w(px(760.0))
                         .max_h(px(620.0))
                         .rounded(px(8.0))
                         .border_1()
