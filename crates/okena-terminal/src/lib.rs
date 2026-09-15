@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod backend;
+pub mod brief_file;
 pub mod input;
 /// macOS process introspection via libproc (replaces `pgrep`/`lsof`/`ps`).
 #[cfg(target_os = "macos")]

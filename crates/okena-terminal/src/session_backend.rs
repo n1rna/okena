@@ -1770,7 +1770,7 @@ fn profile_dtach_socket_path(
 /// retained legacy sessions remain attachable and closable. New sessions are
 /// created in the isolated path once no legacy socket exists.
 #[allow(dead_code)]
-fn get_dtach_socket_path(session_name: &str) -> std::path::PathBuf {
+pub(crate) fn get_dtach_socket_path(session_name: &str) -> std::path::PathBuf {
     profile_dtach_socket_path(
         &dtach_socket_base_dir(),
         active_profile_id().as_deref(),
