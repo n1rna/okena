@@ -557,9 +557,12 @@ mod tests {
             .expect("clap needs version metadata or `-V` is an unknown argument")
             .to_string();
         assert_eq!(version, env!("CARGO_PKG_VERSION"));
-        // The workspace version is the shipped app version; a per-crate 0.1.0
+        // The workspace version is the shipped app version; a per-crate version
         // here would report a version no release ever had.
-        assert_ne!(version, "0.1.0");
+        assert!(
+            include_str!("../Cargo.toml").contains("version.workspace = true"),
+            "okena-cli must inherit the workspace version"
+        );
 
         for form in ["-V", "--version"] {
             let kind = Cli::try_parse_from(["okena", form])
