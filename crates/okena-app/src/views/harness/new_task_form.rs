@@ -403,9 +403,9 @@ impl HarnessPane {
                     .gap(px(5.0))
                     .child(self.task_form_label("Description", cx))
                     .child(
-                        // Shorter than the full-page form was: in a panel
-                        // this shares the height with everything below it.
-                        self.tasks.new_task_body.render(110.0, cx),
+                        // Room for a real description; the panel scrolls
+                        // when the fields below it no longer fit.
+                        self.tasks.new_task_body.render(220.0, cx),
                     ),
             )
             .child(
