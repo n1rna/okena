@@ -8,7 +8,7 @@
 use super::HarnessPane;
 use crate::theme::theme;
 use crate::ui::tokens::ui_text;
-use crate::views::components::SimpleInputState;
+use crate::views::components::source_editor::BriefInput;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 /// State of the Knowledge view's "New" form.
 pub(crate) struct DraftForm {
     pub(crate) open: bool,
-    pub(crate) request: Entity<SimpleInputState>,
+    pub(crate) request: BriefInput,
     /// Root to write in. Follows the open root until picked in the form.
     pub(crate) root: Option<String>,
     pub(crate) starting: bool,
@@ -35,12 +35,10 @@ pub(crate) struct DraftForm {
 }
 
 impl DraftForm {
-    pub(crate) fn new(cx: &mut Context<HarnessPane>) -> Self {
-        let request = cx.new(|cx| {
-            SimpleInputState::new(cx)
-                .placeholder("e.g. document how CI caches dependencies, and when to bust the cache")
-                .multiline()
-        });
+    pub(crate) fn new() -> Self {
+        let request = BriefInput::new(
+            "e.g. document how CI caches dependencies, and when to bust the cache",
+        );
         Self {
             open: false,
             request,
@@ -87,13 +85,7 @@ impl HarnessPane {
         if self.knowledge_draft.starting {
             return;
         }
-        let request = self
-            .knowledge_draft
-            .request
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
+        let request = self.knowledge_draft.request.value(cx).trim().to_string();
         if request.is_empty() {
             self.knowledge_draft.error = Some("Say what to write first.".into());
             cx.notify();
@@ -127,9 +119,7 @@ impl HarnessPane {
                         Ok(v) => {
                             this.knowledge_draft.open = false;
                             this.knowledge_draft.root = None;
-                            this.knowledge_draft
-                                .request
-                                .update(cx, |i, cx| i.set_value("", cx));
+                            this.knowledge_draft.request.clear();
                             super::context_dialog::clear_picked_context(this.knowledge_draft.pickers.clone(), cx);
                             let name = v
                                 .get("name")
@@ -256,12 +246,7 @@ impl HarnessPane {
                 v_flex()
                     .gap(px(5.0))
                     .child(self.field_label("What to write", cx))
-                    .child(self.multiline_field(
-                        "knowledge-request",
-                        &self.knowledge_draft.request,
-                        110.0,
-                        cx,
-                    ))
+                    .child(self.knowledge_draft.request.render(110.0, cx))
                     .child(self.field_hint(
                         "A new doc, a skill, a subagent or a template — or what to change in \
                          one. This is the agent's brief, so context beats brevity.",

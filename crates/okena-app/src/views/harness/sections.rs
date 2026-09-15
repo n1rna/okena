@@ -10,7 +10,6 @@ use gpui::*;
 use gpui_component::{h_flex, v_flex};
 
 use super::{HarnessPane, HarnessSection};
-use crate::views::components::{SimpleInput, SimpleInputState};
 
 impl HarnessPane {
     /// Translate a client-side project/terminal id into the id the daemon knows.
@@ -78,54 +77,21 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    /// A multi-line field, the same in every harness form.
-    ///
-    /// Three things have to be true together and were not: the input has to be
-    /// in `multiline` mode or a long paragraph is laid out as one endless line
-    /// and runs off the side; the box has to scroll rather than clip, or the
-    /// text you just typed is simply not there; and it has to follow the caret
-    /// down, or writing past the fold means typing blind.
-    ///
-    /// A shared helper because "the same kind of text box" is not a thing you
-    /// can keep true by remembering to.
-    pub(super) fn multiline_field(
-        &self,
-        id: &'static str,
-        state: &Entity<SimpleInputState>,
-        height: f32,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let t = theme(cx);
-        let scroll = self.field_scroll(id);
-        // Following the caret only while it is at the end: someone typing at
-        // the bottom wants to see what they are writing, someone editing a
-        // line higher up does not want the view yanked off it.
-        if state.read(cx).caret_at_end() {
-            scroll.set_offset(point(px(0.0), -scroll.max_offset().y));
+    /// Build the goal and brief editors the showing section has. An editor
+    /// needs the window, which only a frame has.
+    fn ensure_brief_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.section {
+            HarnessSection::Tasks => self.tasks.new_task_body.ensure(window, cx),
+            HarnessSection::Specs => {
+                self.specs.idea_input.ensure(window, cx);
+                self.spec_refine.request.ensure(window, cx);
+            }
+            HarnessSection::Knowledge => {
+                self.knowledge_draft.request.ensure(window, cx);
+                self.knowledge_refine.request.ensure(window, cx);
+            }
+            HarnessSection::Testing => {}
         }
-        okena_ui::input::input_container(&t, None)
-            .w_full()
-            .h(px(height))
-            .py(px(6.0))
-            .child(
-                div()
-                    .id(id)
-                    .size_full()
-                    .px(px(8.0))
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll)
-                    .child(SimpleInput::new(state).text_size(ui_text(13.0, cx))),
-            )
-            .into_any_element()
-    }
-
-    /// The scroll position of one named field, kept across renders.
-    fn field_scroll(&self, id: &'static str) -> ScrollHandle {
-        self.field_scrolls
-            .borrow_mut()
-            .entry(id)
-            .or_default()
-            .clone()
     }
 
     /// The one action a harness view leads with: New.
@@ -287,6 +253,7 @@ impl Render for HarnessPane {
         {
             window.focus(&self.tasks.focus, cx);
         }
+        self.ensure_brief_inputs(window, cx);
         // Exhaustive on purpose: a new section must choose its view here rather
         // than silently falling through to a placeholder.
         let body = match self.section {
