@@ -170,6 +170,10 @@ pub enum OverlayRequest {
     AddProjectDialog,
     /// Configure and start a free-form agent session, starting from `prefill`.
     NewAgentDialog(Box<NewAgentPrefill>),
+    /// Offer to remove a worktree, through the close-worktree dialog.
+    CloseWorktree {
+        project_id: String,
+    },
     /// Open the settings modal, optionally on a named page.
     ///
     /// A string rather than the panel's own enum: that type lives in the app

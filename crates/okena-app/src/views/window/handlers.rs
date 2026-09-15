@@ -1515,6 +1515,21 @@ impl WindowView {
                         }
                     }
                 }
+                OverlayRequest::CloseWorktree { project_id } => {
+                    // The same dialog the sidebar's context menu opens, so
+                    // uncommitted work gets the same stash and force choices.
+                    let params = self
+                        .workspace
+                        .read(cx)
+                        .project(&project_id)
+                        .and_then(|p| p.connection_id.clone())
+                        .and_then(|cid| self.remote_params(&project_id, &cid, cx));
+                    if let Some(params) = params {
+                        self.overlay_manager.update(cx, |om, cx| {
+                            om.show_close_worktree_dialog(project_id, params, cx);
+                        });
+                    }
+                }
                 OverlayRequest::AddProjectDialog => {
                     let rm = self.remote_manager.clone();
                     self.overlay_manager.update(cx, |om, cx| {

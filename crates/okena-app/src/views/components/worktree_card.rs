@@ -201,8 +201,11 @@ pub fn chip(text: String, color: u32, cx: &App) -> AnyElement {
 /// worktree card to see ([`WorktreeSummary::click`] says which diff); the icon
 /// button opens the workspace itself. Both actions are the host's, because
 /// "open" means something slightly different in each place the card appears.
+/// Once its PR is merged, a trash button offers to remove the worktree, through
+/// the same close dialog the sidebar uses.
 pub fn render_worktree_card<V: 'static>(
     w: &WorktreeSummary,
+    request_broker: &Entity<okena_workspace::request_broker::RequestBroker>,
     on_open: impl Fn(&mut V, &str, &mut Context<V>) + 'static,
     on_diff: impl Fn(&mut V, &str, Option<DiffMode>, &mut Context<V>) + 'static,
     cx: &mut Context<V>,
@@ -315,6 +318,36 @@ pub fn render_worktree_card<V: 'static>(
                                     .text_color(rgb(t.error))
                                     .child(format!("−{}", w.lines_removed)),
                             ),
+                    )
+                })
+                // A merged PR means the checkout's work has landed; the
+                // worktree is only clutter now.
+                .when(matches!(w.pr, Some((_, PrState::Merged))), |row| {
+                    let broker = request_broker.clone();
+                    let cleanup_id = w.project_id.clone();
+                    row.child(
+                        okena_ui::icon_button::icon_button_sized(
+                            SharedString::from(format!("wt-cleanup-{}", w.project_id)),
+                            "icons/trash.svg",
+                            22.0,
+                            13.0,
+                            &t,
+                        )
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new("Remove worktree (PR merged)")
+                                .build(window, cx)
+                        })
+                        .on_click(move |_, _window, cx| {
+                            cx.stop_propagation();
+                            broker.update(cx, |broker, cx| {
+                                broker.push_overlay_request(
+                                    okena_workspace::requests::OverlayRequest::CloseWorktree {
+                                        project_id: cleanup_id.clone(),
+                                    },
+                                    cx,
+                                );
+                            });
+                        }),
                     )
                 })
                 .child(
