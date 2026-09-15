@@ -13,13 +13,13 @@
 use crate::keybindings::SaveDocument;
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_ms};
+use crate::views::components::source_editor::{source_editor, sync_editor_colors};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use gpui_component::input::{Input, InputEvent, InputState};
 use okena_core::api::ActionRequest;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use super::markdown::MarkdownCache;
 use super::{HarnessPane, HarnessSection};
@@ -220,15 +220,7 @@ impl HarnessPane {
         }
         let saved = buffer.saved.clone();
         let language = language_for(&path);
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor(language)
-                // Prose, not source: no gutter to fold or number lines in.
-                .line_number(false)
-                .folding(false)
-                .soft_wrap(true)
-                .default_value(saved)
-        });
+        let input = cx.new(|cx| source_editor(language, window, cx).default_value(saved));
         buffer.input = Some(input.clone());
         cx.subscribe(
             &input,
@@ -534,40 +526,6 @@ impl HarnessPane {
             .is_dirty(root.unwrap_or_default(), path)
             .then_some("● ")
     }
-}
-
-/// Paint the editor in okena's theme rather than gpui-component's.
-///
-/// Its caret, selection and background come from gpui-component's global
-/// theme, which okena only ever switches between light and dark. The editor is
-/// the only gpui-component input okena draws, so taking those colours over is
-/// safe; only what differs is written, so a frame that changes nothing does not
-/// mark the global changed.
-fn sync_editor_colors(cx: &mut App) {
-    let t = theme(cx);
-    let caret: Hsla = rgb(t.cursor).into();
-    let selection: Hsla = rgb(t.bg_selection).into();
-    let background: Hsla = rgb(t.bg_primary).into();
-    let foreground: Hsla = rgb(t.text_primary).into();
-
-    let current = gpui_component::Theme::global(cx);
-    let style = &current.highlight_theme.style;
-    let up_to_date = current.caret == caret
-        && current.selection == selection
-        && style.editor_background == Some(background)
-        && style.editor_foreground == Some(foreground)
-        && style.editor_active_line.is_none();
-    if up_to_date {
-        return;
-    }
-    let global = gpui_component::Theme::global_mut(cx);
-    global.caret = caret;
-    global.selection = selection;
-    let mut highlight = (*global.highlight_theme).clone();
-    highlight.style.editor_background = Some(background);
-    highlight.style.editor_foreground = Some(foreground);
-    highlight.style.editor_active_line = None;
-    global.highlight_theme = Arc::new(highlight);
 }
 
 #[cfg(test)]
