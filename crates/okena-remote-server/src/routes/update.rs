@@ -33,6 +33,10 @@ pub async fn post_check(
     let info = state.update_info.clone();
     if info.try_start_manual() {
         let token = info.current_token();
+        // Before spawning, so the snapshot below cannot still say `Idle`: the
+        // caller reads that as "checked, nothing newer" and would report an
+        // up-to-date build without a single request having been made.
+        info.set_status(UpdateStatus::Checking);
         tokio::spawn(async move {
             okena_ext_updater::manager::run_check(info, token, true).await;
         });
