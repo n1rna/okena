@@ -443,7 +443,8 @@ impl Render for UpdateStatusWidget {
         match info.status() {
             UpdateStatus::Ready { version, .. } => {
                 let release_url = format!(
-                    "https://github.com/contember/okena/releases/tag/v{}",
+                    "https://github.com/{}/releases/tag/v{}",
+                    crate::RELEASE_REPO,
                     version
                 );
                 h_flex()

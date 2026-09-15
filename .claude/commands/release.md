@@ -37,4 +37,3 @@ allowed-tools: Bash(git:*), Bash(cargo check), Read, Edit
 
 - CI pipeline automatically builds for Linux, macOS (ARM64/Intel), and Windows
 - GitHub Release is created with auto-generated release notes
-- Homebrew cask is automatically updated with new SHA256 hashes

@@ -3,7 +3,13 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const RELEASES_URL: &str = "https://api.github.com/repos/contember/okena/releases";
+/// GitHub API URL for the release repo's releases, followed by `suffix`.
+fn releases_url(suffix: &str) -> String {
+    format!(
+        "https://api.github.com/repos/{}/releases{suffix}",
+        crate::RELEASE_REPO
+    )
+}
 
 /// Download data for one platform-specific release asset.
 #[derive(Clone, Debug)]
@@ -49,7 +55,7 @@ pub async fn release_for_revert(app_version: String, target: String) -> Result<R
 
 fn check_blocking(app_version: &str) -> Result<Option<ReleaseAsset>> {
     let response = fetch_json(
-        &format!("{RELEASES_URL}/latest"),
+        &releases_url("/latest"),
         app_version,
         "updater.check",
     )?;
@@ -59,7 +65,7 @@ fn check_blocking(app_version: &str) -> Result<Option<ReleaseAsset>> {
 fn list_revert_releases_blocking(app_version: &str) -> Result<ReleaseCatalog> {
     // One page only: 100 releases back is far beyond any sane revert target.
     let response = fetch_json(
-        &format!("{RELEASES_URL}?per_page=100"),
+        &releases_url("?per_page=100"),
         app_version,
         "updater.releases",
     )?;
@@ -86,7 +92,7 @@ fn release_for_revert_blocking(app_version: &str, target: &str) -> Result<Releas
         anyhow::bail!("revert target v{target} must be older than v{current}");
     }
     let response = fetch_json(
-        &format!("{RELEASES_URL}/tags/v{target}"),
+        &releases_url(&format!("/tags/v{target}")),
         app_version,
         "updater.revert.resolve",
     )?;
@@ -264,6 +270,27 @@ mod tests {
         assert!(catalog_release(&release("0.26.0", true, false, true), &current, None).is_none());
         assert!(catalog_release(&release("0.26.0", false, true, true), &current, None).is_none());
         assert!(catalog_release(&release("0.26.0", false, false, false), &current, None).is_none());
+    }
+
+    #[test]
+    fn update_check_offers_only_newer_releases_on_the_fork_line() {
+        let newer = release_asset(
+            &release("0.1.1", false, false, true),
+            Some("0.1.0"),
+            VersionRelation::Newer,
+        )
+        .unwrap()
+        .expect("v0.1.1 is offered to 0.1.0");
+        assert_eq!(newer.version, "0.1.1");
+        assert_eq!(newer.asset_name, platform_asset_name());
+
+        let older = release_asset(
+            &release("0.0.9", false, false, true),
+            Some("0.1.0"),
+            VersionRelation::Newer,
+        )
+        .unwrap();
+        assert!(older.is_none());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 # Okena Windows Installer
-# Usage: irm https://raw.githubusercontent.com/contember/okena/main/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/n1rna/okena/main/install.ps1 | iex
 # Or: .\install.ps1 [-Version "1.0.0"]
 
 param(
@@ -8,7 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "contember/okena"
+$Repo = "n1rna/okena"
 $InstallDir = "$env:LOCALAPPDATA\Programs\Okena"
 $BinName = "okena.exe"
 

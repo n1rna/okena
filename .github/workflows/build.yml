@@ -327,7 +327,7 @@ jobs:
             fi
           done
 
-      # Guards the step above: the Homebrew cask and the shell installer both
+      # Guards the step above: the shell installer and the in-app updater both
       # unpack these archives directly, so a lost exec bit is a broken install.
       - name: Assert executable bits in release archives
         run: |
@@ -370,46 +370,6 @@ jobs:
           [[ ${#assets[@]} -gt 0 ]] || { echo "no release assets to checksum"; exit 1; }
           sha256sum "${assets[@]}" > SHA256SUMS
           cat SHA256SUMS
-
-      # The cask is the stable channel — a prerelease must not overwrite it.
-      - name: Generate ContemberBot token
-        id: app-token
-        if: steps.meta.outputs.prerelease == 'false'
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.CONTEMBER_BOT_APP_ID }}
-          private-key: ${{ secrets.CONTEMBER_BOT_APP_PRIVATE_KEY }}
-          owner: contember
-          repositories: homebrew-okena
-
-      - name: Update Homebrew tap
-        if: steps.meta.outputs.prerelease == 'false'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-
-          # Calculate SHA256 from local zip files
-          ARM64_SHA=$(sha256sum okena-macos-arm64.zip | cut -d' ' -f1)
-          X64_SHA=$(sha256sum okena-macos-x64.zip | cut -d' ' -f1)
-
-          # Clone the tap repo
-          git clone https://x-access-token:${GH_TOKEN}@github.com/contember/homebrew-okena.git /tmp/homebrew-okena
-
-          # Update cask
-          sed -i "s/version \".*\"/version \"${VERSION}\"/" /tmp/homebrew-okena/Casks/okena.rb
-          sed -i "s/sha256 arm:   \".*\",/sha256 arm:   \"${ARM64_SHA}\",/" /tmp/homebrew-okena/Casks/okena.rb
-          sed -i "s/         intel: \".*\"/         intel: \"${X64_SHA}\"/" /tmp/homebrew-okena/Casks/okena.rb
-
-          cat /tmp/homebrew-okena/Casks/okena.rb
-
-          # Commit and push
-          cd /tmp/homebrew-okena
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Casks/okena.rb
-          git commit -m "chore: update cask to v${VERSION}"
-          git push origin main
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

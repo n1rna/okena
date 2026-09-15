@@ -7,7 +7,6 @@ use gpui::*;
 use okena_ext_updater::{GlobalLocalBuild, GlobalUpdateInfo, UpdateStatus};
 
 const WEBSITE_URL: &str = "https://okena.dev";
-const GITHUB_URL: &str = "https://github.com/contember/okena";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateAction {
@@ -166,7 +165,7 @@ impl AboutModal {
         id: &'static str,
         label: &'static str,
         detail: &'static str,
-        url: &'static str,
+        url: String,
         t: &ThemeColors,
         cx: &App,
     ) -> Stateful<Div> {
@@ -209,7 +208,7 @@ impl AboutModal {
                     .size(px(14.0))
                     .text_color(rgb(t.text_muted)),
             )
-            .on_click(move |_, _, _| okena_core::process::open_url(url))
+            .on_click(move |_, _, _| okena_core::process::open_url(&url))
     }
 
     fn render_update_action(
@@ -437,12 +436,19 @@ impl Render for AboutModal {
             .py(px(16.0))
             .flex()
             .gap(px(10.0))
-            .child(self.render_link("about-website", "Website", "okena.dev", WEBSITE_URL, &t, cx))
+            .child(self.render_link(
+                "about-website",
+                "Website",
+                "okena.dev",
+                WEBSITE_URL.to_string(),
+                &t,
+                cx,
+            ))
             .child(self.render_link(
                 "about-github",
                 "GitHub",
                 "Source and releases",
-                GITHUB_URL,
+                format!("https://github.com/{}", okena_ext_updater::RELEASE_REPO),
                 &t,
                 cx,
             ))
