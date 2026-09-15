@@ -267,8 +267,9 @@ A map's entries can be handed to an agent from any launcher, as
   `infrastructure:<name>`.
 - **Path:** an area's or concept's `doc` under the knowledge root when it
   exists, else `project-map.yaml`.
-- **Title and description:** the entry's name (or id) and description. An
-  interface's description leads with its type.
+- **Title and description:** the entry's name (or id) and description, as
+  the launchers show them. An interface's description leads with its type. The
+  brief lists only the kind, map id, title and path.
 - **Invalid map:** contributes no entries.
 - **Not scanned:** a chosen project with no map gets a hint row with **Scan**.
 - **Current:** an edited map shows up in the next search, without restarting.

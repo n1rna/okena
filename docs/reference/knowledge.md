@@ -286,21 +286,50 @@ starts.
 
 ### What the agent gets
 
-The client sends refs, not paths. Each launch action carries
-`context: [{ kind, owner, project_id | root_key, locator }]`, where the locator
-is a map id (`area:checkout`) or a path relative to the owning repository or
-store. The daemon resolves every ref again from its own roots, and drops any
-that no longer resolves.
+From the launcher to the agent's first prompt:
 
-- **The brief:** a block from the `context` partial, grouped by project or
-  store, with each item's kind, title, description and absolute path. A launch
-  with no context has no block.
-- **Skills and agents:** handed over per agent CLI.
+1. **Refs.** The client sends refs, not paths. Each launch action
+   (`TaskStartWork`, `SpecDraftChange`, `KnowledgeDraft`,
+   `SpecRefineDocument`, `KnowledgeRefineDocument`, `AgentStartSession`) carries
+   `context: [{ kind, owner, project_id | root_key, locator }]`, where the
+   locator is a map id (`area:checkout`) or a path relative to the owning
+   repository or store.
+2. **Re-resolution.** The daemon resolves every ref again from its own roots,
+   and drops any that no longer resolves.
+3. **Skills and agents** are handed over per agent CLI.
 
-  | Agent | How |
-  |---|---|
-  | `claude` | A plugin written for the session under `<profile>/agent-context/<id>/`, with copies of each skill directory and agent file, passed with `--plugin-dir`. The brief names them in the `context-installed` line instead of listing them |
-  | Any other | Their `SKILL.md` or agent file paths are listed in the brief |
+   | Agent | How |
+   |---|---|
+   | `claude` | A plugin written for the session under `<profile>/agent-context/<id>/`, with copies of each skill directory and agent file, passed with `--plugin-dir`. The brief names them in the `context-installed` line instead of listing them |
+   | Any other | Their `SKILL.md` or agent file paths are listed in the brief |
+
+4. **The context block.** Everything else is listed in the brief under the
+   `context` partial, grouped by project or store, one line per item: its kind
+   (with the map id), title and absolute path. There are no descriptions; the
+   agent reads what it needs.
+   - **Budget:** the listed lines take at most 4 KB. The item that would go
+     past it, and every item after it, are named by title only, on one line
+     from the `context-more` partial, which points the agent at
+     `okena_context_search` and `okena_context_read`.
+   - **None picked:** a launch with no context has no block.
+5. **The brief file.** The rendered brief is written to
+   `<profile>/agent-briefs/<id>.md`, one file per launch, on every route: task
+   start, several tasks, coordinator, spec draft, knowledge draft, doc refine,
+   custom session and project scans. The agent's command holds
+   `@okena-brief-file:<path>` where the brief went: positional for `claude`,
+   after `--prompt` for `copilot`. Every other argument (`--session-id`,
+   options, `--mcp-config`, `--plugin-dir`) is unchanged, and so is how
+   restart reads that command. It resumes `--session-id` with `--resume`, and
+   sends no prompt.
+6. **The wrapper.** When the terminal spawns, okena runs
+   `/bin/sh -c <wrapper> okena-brief <index> <file> <agent> <args…>`. The
+   wrapper reads the file byte for byte and execs the agent with it at that
+   argument position. This short command is what tmux, screen or dtach carries,
+   and its size does not depend on the brief. tmux refuses a command of more
+   than about 16 KB, which a long brief used to reach.
+   - **Windows and WSL:** the brief is read back into argv. The host has no
+     POSIX `sh`, psmux takes the command as argv tokens, and a WSL terminal
+     would have to translate the Windows path.
 
 - **Scope:** the session records the chosen projects and the projects owning
   the context it was handed (`context_projects`). Its own lookups are scoped to
@@ -404,6 +433,7 @@ the partial it picks.
 | `context` | Heading over the [launch context](#launch-context) listed by path (`{list}`) |
 | `context-installed` | The skills and agents loaded into the session instead of listed (`{list}`) |
 | `context-lookup` | Every flow sent on its own: look context up with `okena_context_search` and `okena_context_read` |
+| `context-more` | The launch context past the brief's 4 KB budget, by title (`{list}`), with the lookup tools |
 
 Some variables are still assembled by okena, because they are lists or
 optional blocks: `store_note`, `references`, `projects`, `note`, `children`,

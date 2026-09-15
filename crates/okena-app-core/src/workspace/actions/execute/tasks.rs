@@ -472,7 +472,7 @@ fn agent_shell(
     // CLI.
     let mut args = super::agent_resume::session_args(&command);
     args.extend(super::agent_options::option_args(&command, settings));
-    args.extend(super::specs::prompt_args(&command, &brief));
+    args.extend(super::briefs::brief_args(&command, &brief));
     // Hand the agent okena's MCP server so it can ask what task it is on and
     // report back without the user configuring anything.
     args.extend(super::agent_mcp::injection_args(&command, settings));
@@ -1717,6 +1717,141 @@ pub(super) mod agent_shell_tests {
     }
 
     #[test]
+    fn every_route_hands_a_long_brief_over_in_a_file() {
+        use okena_terminal::backend::TerminalLaunchPlan;
+        use okena_terminal::brief_file;
+        use okena_terminal::session_backend::{ResolvedBackend, SessionCommand};
+        let dir = tempfile::tempdir().unwrap();
+        super::super::briefs::test_briefs_dir::set(Some(dir.path().to_path_buf()));
+        let mut s = settings_with_mcp_marker();
+        s.harness.agent_command = Some("claude".into());
+        // Past tmux's ~16 KB message limit on its own, with what breaks quoting.
+        let long = "Don't \"quote\" $HOME `id` — ünïcødé\n".repeat(500);
+        assert!(long.len() > 17_000);
+        let group = super::BriefShape::Group {
+            key: "LIN-1, LIN-2".into(),
+            tasks: "- LIN-1\n- LIN-2".into(),
+        };
+        let picked = super::BriefShape::Picked("- LIN-42\n- LIN-7".into());
+        let routes = [
+            (
+                "task start",
+                agent_shell(&s, None, &task(), "b1", &[], Some(&long), None, None, &[]),
+            ),
+            (
+                "multi-task start",
+                agent_shell(
+                    &s,
+                    None,
+                    &task(),
+                    "b1",
+                    &[],
+                    Some(&long),
+                    Some(&group),
+                    None,
+                    &[],
+                ),
+            ),
+            (
+                "coordinator",
+                agent_shell(
+                    &s,
+                    None,
+                    &task(),
+                    "b1",
+                    &[],
+                    Some(&long),
+                    Some(&picked),
+                    None,
+                    &[],
+                ),
+            ),
+            (
+                "custom session",
+                super::custom_agent_shell(&s, None, &long, &Default::default()),
+            ),
+            // Spec drafts, knowledge drafts and doc refine all launch here.
+            (
+                "spec draft",
+                super::super::specs::spec_agent_shell(&s, None, &long, &Default::default()),
+            ),
+        ];
+        for (route, shell) in routes {
+            let shell = shell.expect("an agent");
+            let args = custom_args(Some(shell.clone()));
+            // Named, then the reference where the brief went, then MCP.
+            assert_eq!(args[0], "--session-id", "{route}: {args:?}");
+            let file = brief_file::path_of(&args[2]).unwrap_or_else(|| panic!("{route}: {args:?}"));
+            assert!(
+                std::path::Path::new(file).starts_with(dir.path()),
+                "{route}"
+            );
+            let written = std::fs::read_to_string(file).unwrap();
+            assert!(written.contains(&long), "{route}: the file holds the brief");
+            assert_eq!(args[3..5], ["--mcp-config", "marker"], "{route}");
+            assert!(args.iter().all(|a| a.len() < 1_000), "{route}: {args:?}");
+
+            // What tmux is handed stays far under its limit.
+            let plan = brief_file::resolve_plan(&TerminalLaunchPlan::for_shell(shell.clone()))
+                .expect("a reference to resolve");
+            let ShellType::Custom {
+                path,
+                args: wrapped,
+            } = &plan.route
+            else {
+                panic!("{route}: {:?}", plan.route)
+            };
+            let (_, tmux) = ResolvedBackend::Tmux
+                .build_command_with_custom(
+                    "tm-12345678",
+                    "/Users/someone/p/okena",
+                    Some(SessionCommand::Program {
+                        program: path,
+                        args: wrapped,
+                    }),
+                    &[],
+                )
+                .expect("tmux command");
+            let size: usize = tmux.iter().map(String::len).sum();
+            assert!(size < 4_096, "{route}: {size} bytes");
+
+            // Restart finds the conversation and sends no prompt.
+            use super::super::agent_resume as resume;
+            let id = resume::session_id_of(&args).expect("named").to_string();
+            assert_eq!(
+                resume::resume_args("claude", &args),
+                Some(vec!["--resume".to_string(), id])
+            );
+            assert!(resume::resumable(&shell, true), "{route}");
+        }
+
+        // A short brief with no context: same argv shape, and the file holds
+        // exactly the brief.
+        let args = custom_args(super::custom_agent_shell(
+            &s,
+            None,
+            "goal",
+            &Default::default(),
+        ));
+        assert_eq!(args.len(), 5, "{args:?}");
+        let file = brief_file::path_of(&args[2]).expect("a reference");
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "goal");
+        // Copilot takes it after `--prompt`, as it took the brief.
+        let args = custom_args(super::super::specs::spec_agent_shell(
+            &s,
+            Some("copilot"),
+            "draft",
+            &Default::default(),
+        ));
+        let at = args.iter().position(|a| a == "--prompt").expect("--prompt");
+        assert_eq!(
+            std::fs::read_to_string(brief_file::path_of(&args[at + 1]).unwrap()).unwrap(),
+            "draft"
+        );
+        super::super::briefs::test_briefs_dir::set(None);
+    }
+
+    #[test]
     fn custom_and_draft_sessions_carry_options_with_their_prompt() {
         // Spec drafts, knowledge drafts, doc refine, project scans and links
         // all launch through `spec_agent_shell`.
@@ -2561,7 +2696,7 @@ pub(super) fn custom_agent_shell(
     // agent's own options before the brief, which they never replace.
     let mut args = super::agent_resume::session_args(&command);
     args.extend(super::agent_options::option_args(&command, settings));
-    args.extend(super::specs::prompt_args(&command, brief));
+    args.extend(super::briefs::brief_args(&command, brief));
     args.extend(super::agent_mcp::injection_args(&command, settings));
     args.extend(install.args.iter().cloned());
     Some(okena_terminal::shell_config::ShellType::Custom {

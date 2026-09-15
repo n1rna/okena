@@ -314,18 +314,20 @@ mod tests {
         assert!(shop < acme, "{brief}");
         assert!(
             brief.contains(&format!(
-                "Map entry `area:checkout`: Checkout — Takes payment for a basket. (`{}`)",
+                "Map entry `area:checkout`: Checkout (`{}`)",
                 items[0].path
             )),
             "{brief}"
         );
         assert!(
             brief.contains(&format!(
-                "Knowledge doc: Engineering principles — How we build things. (`{}`)",
+                "Knowledge doc: Engineering principles (`{}`)",
                 items[1].path
             )),
             "{brief}"
         );
+        // Descriptions are left to the lookup tools.
+        assert!(!brief.contains("Takes payment for a basket."), "{brief}");
         // Nothing loaded it, so the skill is listed where it is.
         assert!(brief.contains(&format!("Skill: Release (`{}`)", items[2].path)));
         // Still the goal first and the reporting rule last.
