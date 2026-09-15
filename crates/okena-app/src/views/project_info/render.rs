@@ -4,7 +4,7 @@
 //! who is working on it — so a repo and a session read alike beside their
 //! terminals.
 
-use super::model::{area_labels, group_interfaces, pr_caption};
+use super::model::{compact_links, pr_caption};
 use super::{ProjectInfo, ProjectInfoKind, ProjectInfoPanel};
 use crate::theme::theme;
 use crate::ui::tokens::ui_text_ms;
@@ -14,9 +14,24 @@ use crate::views::components::asset_row::{ci_checks_chip, readiness_chips};
 use crate::views::components::worktree_card::{chip, ci_chip_style, pr_chip_style};
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::RepoPullRequest;
-use okena_core::project_map::{MapStatus, ProjectLink, ProjectMap, ProjectMapState};
+use okena_core::project_map::{MapStatus, ProjectMapState};
+
+/// The map manifest's file name, as `okena-knowledge` writes it.
+pub(super) const MANIFEST_FILE: &str = "project-map.yaml";
+
+/// What pressing one of the panel's chips opens.
+#[derive(Clone, Debug)]
+pub(super) enum ChipTarget {
+    /// The project's `project-map.yaml`.
+    Manifest,
+    /// Knowledge on a store the project follows, by root key.
+    Store(String),
+    /// Another project's info panel, by its daemon id.
+    Project(String),
+}
 
 impl ProjectInfoPanel {
     fn section_heading(&self, label: &str, count: Option<usize>, cx: &App) -> AnyElement {
@@ -87,13 +102,15 @@ impl ProjectInfoPanel {
         chips
     }
 
-    /// The repository's map: its status, and the launcher that scans it.
+    /// The repository's map: the manifest chip, the stores the project
+    /// follows, the menu over everything it owns, and the launcher that scans
+    /// it. The entries themselves live in the menu, not on the panel.
     fn render_map(&self, project_id: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = theme(cx);
         let mut out = Vec::new();
         let state = self.map.as_ref().map(|report| &report.state);
         let (status, color) = match state {
-            None => ("Reading…".to_string(), t.text_muted),
+            None => ("Reading\u{2026}".to_string(), t.text_muted),
             Some(ProjectMapState::NotScanned) => ("Not scanned".to_string(), t.text_muted),
             Some(ProjectMapState::Scanned { map }) => (
                 match &map.scanned {
@@ -107,12 +124,58 @@ impl ProjectInfoPanel {
             ),
             Some(ProjectMapState::Invalid { .. }) => ("Invalid".to_string(), t.warning),
         };
-        out.push(
-            h_flex()
-                .gap(px(4.0))
-                .child(chip(status, color, cx))
-                .into_any_element(),
+        // Any manifest, even a broken one, is a map to bring up to date — and
+        // a file to open. Unscanned there is nothing to open, so the chip is
+        // only a status.
+        let mapped = matches!(
+            state,
+            Some(ProjectMapState::Scanned { .. } | ProjectMapState::Invalid { .. })
         );
+        out.push(
+            self.action_chip(
+                "manifest".to_string(),
+                if mapped {
+                    format!("{MANIFEST_FILE} \u{b7} {status}")
+                } else {
+                    status
+                },
+                color,
+                mapped.then(|| format!("Open {MANIFEST_FILE}.")),
+                mapped.then_some(ChipTarget::Manifest),
+                cx,
+            ),
+        );
+
+        // One chip per store the project follows. A project that follows none
+        // shows no row at all rather than a placeholder.
+        let stores = self.store_chips(cx);
+        if !stores.is_empty() {
+            out.push(
+                h_flex()
+                    .gap(px(4.0))
+                    .flex_wrap()
+                    .children(stores.into_iter().map(|store| {
+                        let available = store.root_key.is_some();
+                        self.action_chip(
+                            format!("store-{}", store.name),
+                            store.name.clone(),
+                            if available {
+                                t.text_secondary
+                            } else {
+                                t.text_muted
+                            },
+                            store
+                                .reason
+                                .clone()
+                                .or_else(|| Some(format!("Open {} in Knowledge.", store.name))),
+                            store.root_key.clone().map(ChipTarget::Store),
+                            cx,
+                        )
+                    }))
+                    .into_any_element(),
+            );
+        }
+
         if let Some(problem) = state.and_then(ProjectMapState::problem) {
             out.push(self.note(problem.message.clone(), cx));
             if let Some(fix) = &problem.fix {
@@ -132,11 +195,10 @@ impl ProjectInfoPanel {
             );
         }
 
-        // Any manifest, even a broken one, is a map to bring up to date.
-        let mapped = matches!(
-            state,
-            Some(ProjectMapState::Scanned { .. } | ProjectMapState::Invalid { .. })
-        );
+        // Everything the project owns, behind one button: its map entries,
+        // specs, knowledge docs, skills, agents and links.
+        out.push(self.menu.clone().into_any_element());
+
         let launcher = okena_ui::agent_launcher::AgentLauncher::new(
             SharedString::from(format!("project-info-scan-{project_id}")),
             if mapped { "Rescan" } else { "Scan" },
@@ -147,95 +209,64 @@ impl ProjectInfoPanel {
             &t,
         ))
         .preferred(self.default_agent.clone())
-        .busy(self.scan_starting.then_some("Starting…"))
+        .busy(self.scan_starting.then_some("Starting\u{2026}"))
         .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
             this.start_scan(command.to_string(), cx);
         }));
         out.push(launcher.into_any_element());
-
-        if let Some(map) = state.and_then(ProjectMapState::map) {
-            out.extend(self.render_map_contents(map, cx));
-        }
         out
     }
 
-    /// This project's links to other scanned projects, and the scan that looks
-    /// for more.
+    /// This project's links, compact: a chip per other project it uses and
+    /// per project using it, what neither matched, and the scan that looks for
+    /// more. Every link's detail is a row in the menu.
     fn render_links(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = theme(cx);
         let mut out = Vec::new();
         let Some(links) = self.links.as_ref() else {
-            out.push(self.note("Reading…", cx));
+            out.push(self.note("Reading\u{2026}", cx));
             return out;
         };
-        let me = self.daemon_project_id();
-        let name_of = |id: &str| links.project(id).map_or(id.to_string(), |p| p.name.clone());
+        let Some(me) = self.daemon_map_id(cx) else {
+            return out;
+        };
+        let compact = compact_links(links, &me);
 
-        let uses: Vec<&ProjectLink> = links.uses(&me).collect();
-        let used_by: Vec<&ProjectLink> = links.used_by(&me).collect();
-        for (heading, list, other_is_provider) in
-            [("Uses", &uses, true), ("Used by", &used_by, false)]
-        {
-            if list.is_empty() {
+        for (heading, chips) in [("Uses", &compact.uses), ("Used by", &compact.used_by)] {
+            if chips.is_empty() {
                 continue;
             }
-            out.push(self.map_subheading(heading, list.len(), cx));
-            for (i, link) in list.iter().enumerate() {
-                let other = if other_is_provider {
-                    &link.provider
-                } else {
-                    &link.consumer
-                };
-                let mut meta = link.source.label().to_string();
-                if let Some(only) = &link.listed_only_by {
-                    meta.push_str(&format!(" · only in {}'s map", name_of(only)));
-                }
-                out.push(self.map_item(
-                    format!("link-{heading}-{i}"),
-                    name_of(other),
-                    Some(format!("{} {}", link.kind.label(), link.name)),
-                    Some(meta),
-                    None,
-                    cx,
-                ));
-            }
+            out.push(
+                h_flex()
+                    .gap(px(4.0))
+                    .flex_wrap()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(heading),
+                    )
+                    .children(chips.iter().map(|chip| {
+                        self.action_chip(
+                            format!("link-{heading}-{}", chip.project_id),
+                            chip.name.clone(),
+                            t.text_secondary,
+                            // What the link is made of, which the chip itself
+                            // has no room for.
+                            Some(chip.interfaces.join(", ")),
+                            Some(ChipTarget::Project(chip.project_id.clone())),
+                            cx,
+                        )
+                    }))
+                    .into_any_element(),
+            );
         }
-
-        let unmatched: Vec<_> = links.unmatched.iter().filter(|u| u.project == me).collect();
-        if !unmatched.is_empty() {
-            out.push(self.map_subheading("No scanned project exposes", unmatched.len(), cx));
-            for (i, u) in unmatched.iter().enumerate() {
-                out.push(self.map_item(
-                    format!("unmatched-{i}"),
-                    u.interface.name.clone(),
-                    Some(u.interface.kind.label().to_string()),
-                    None,
-                    None,
-                    cx,
-                ));
-            }
+        if compact.unresolved > 0 {
+            out.push(self.note(format!("{} unresolved", compact.unresolved), cx));
         }
-
-        let unresolved: Vec<_> = links
-            .unresolved
-            .iter()
-            .filter(|u| u.project == me)
-            .collect();
-        if !unresolved.is_empty() {
-            out.push(self.map_subheading("Names no scanned project", unresolved.len(), cx));
-            for (i, u) in unresolved.iter().enumerate() {
-                out.push(self.map_item(
-                    format!("unresolved-{i}"),
-                    u.link.project.clone(),
-                    Some(format!("{} {}", u.link.kind.label(), u.link.name)),
-                    None,
-                    None,
-                    cx,
-                ));
-            }
-        }
-
-        if uses.is_empty() && used_by.is_empty() && unmatched.is_empty() && unresolved.is_empty() {
+        if compact.uses.is_empty() && compact.used_by.is_empty() && compact.unresolved == 0 {
             out.push(self.note("No links to other scanned projects.", cx));
         }
         if let Some(notice) = &self.links_notice {
@@ -284,7 +315,7 @@ impl ProjectInfoPanel {
             &t,
         ))
         .preferred(self.default_agent.clone())
-        .busy(self.links_starting.then_some("Starting…"))
+        .busy(self.links_starting.then_some("Starting\u{2026}"))
         .on_launch(
             cx.listener(move |this, command: &SharedString, _window, cx| {
                 this.start_links_scan(command.to_string(), project_ids.clone(), cx);
@@ -294,203 +325,58 @@ impl ProjectInfoPanel {
         out
     }
 
-    /// What the scan found: the project, its areas and concepts, what crosses
-    /// its boundary, and how it is built and run. Entries with a doc open it.
-    fn render_map_contents(&self, map: &ProjectMap, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut out = Vec::new();
-        out.push(self.map_item(
-            "project".to_string(),
-            map.project.name.clone(),
-            Some(map.project.description.clone()),
-            None,
-            map.project.doc.clone(),
-            cx,
-        ));
-
-        if !map.areas.is_empty() {
-            out.push(self.map_subheading("Areas", map.areas.len(), cx));
-            for area in &map.areas {
-                out.push(self.map_item(
-                    format!("area-{}", area.id),
-                    area.label().to_string(),
-                    Some(area.description.clone()),
-                    Some(area.paths.join(", ")),
-                    area.doc.clone(),
-                    cx,
-                ));
-            }
+    /// Open what a chip stands for.
+    fn open_chip(&mut self, target: ChipTarget, cx: &mut Context<Self>) {
+        match target {
+            ChipTarget::Manifest => self.open_manifest(cx),
+            ChipTarget::Store(root_key) => self.open_knowledge_root(root_key, cx),
+            ChipTarget::Project(daemon_id) => self.open_project_info(daemon_id, cx),
         }
-
-        if !map.concepts.is_empty() {
-            out.push(self.map_subheading("Concepts", map.concepts.len(), cx));
-            for concept in &map.concepts {
-                out.push(self.map_item(
-                    format!("concept-{}", concept.id),
-                    concept.label().to_string(),
-                    Some(concept.description.clone()),
-                    Some(format!("in {}", area_labels(map, &concept.areas))),
-                    concept.doc.clone(),
-                    cx,
-                ));
-            }
-        }
-
-        for (heading, list) in [("Exposes", &map.exposes), ("Consumes", &map.consumes)] {
-            if list.is_empty() {
-                continue;
-            }
-            out.push(self.map_subheading(heading, list.len(), cx));
-            for (kind, items) in group_interfaces(list) {
-                out.push(self.note(kind.label(), cx));
-                for (i, item) in items.into_iter().enumerate() {
-                    out.push(
-                        self.map_item(
-                            format!("{heading}-{}-{i}", kind.id()),
-                            item.name.clone(),
-                            item.description.clone(),
-                            (!item.areas.is_empty())
-                                .then(|| format!("in {}", area_labels(map, &item.areas))),
-                            None,
-                            cx,
-                        ),
-                    );
-                }
-            }
-        }
-
-        if !map.ci.is_empty() {
-            out.push(self.map_subheading("CI/CD", map.ci.len(), cx));
-            for (i, pipeline) in map.ci.iter().enumerate() {
-                let meta = match &pipeline.provider {
-                    Some(provider) => format!("{provider} · {}", pipeline.files.join(", ")),
-                    None => pipeline.files.join(", "),
-                };
-                out.push(self.map_item(
-                    format!("ci-{i}"),
-                    pipeline.name.clone(),
-                    pipeline.description.clone(),
-                    Some(meta),
-                    None,
-                    cx,
-                ));
-            }
-        }
-
-        if !map.infrastructure.is_empty() {
-            out.push(self.map_subheading("Infrastructure", map.infrastructure.len(), cx));
-            for (i, resource) in map.infrastructure.iter().enumerate() {
-                let meta = resource
-                    .kind
-                    .iter()
-                    .cloned()
-                    .chain((!resource.files.is_empty()).then(|| resource.files.join(", ")))
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                out.push(self.map_item(
-                    format!("infra-{i}"),
-                    resource.name.clone(),
-                    resource.description.clone(),
-                    (!meta.is_empty()).then_some(meta),
-                    None,
-                    cx,
-                ));
-            }
-        }
-        out
     }
 
-    /// A group heading inside the map, a step below the panel's sections.
-    fn map_subheading(&self, label: &str, count: usize, cx: &App) -> AnyElement {
-        let t = theme(cx);
-        h_flex()
-            .items_center()
-            .justify_between()
-            .pt(px(6.0))
-            .child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .child(label.to_string()),
-            )
-            .child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(format!("{count}")),
-            )
-            .into_any_element()
-    }
-
-    /// One entry of the map: a name, what it is, where it is, and its doc.
-    fn map_item(
+    /// A chip that opens something when pressed. Without a `target` it is
+    /// muted and inert — a store that is not on this machine — and `tip` then
+    /// says why.
+    fn action_chip(
         &self,
         key: String,
-        title: String,
-        detail: Option<String>,
-        meta: Option<String>,
-        doc: Option<String>,
+        label: String,
+        color: u32,
+        tip: Option<String>,
+        target: Option<ChipTarget>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        let mut item = v_flex()
-            .id(SharedString::from(format!("project-info-map-{key}")))
-            .w_full()
+        let mut chip = h_flex()
+            .id(SharedString::from(format!("project-info-chip-{key}")))
+            .flex_shrink_0()
+            .max_w_full()
             .min_w_0()
-            .gap(px(2.0))
-            .px(px(8.0))
-            .py(px(5.0))
+            .items_center()
+            .gap(px(4.0))
+            .px(px(6.0))
+            .py(px(1.0))
             .rounded(px(4.0))
-            .border_1()
-            .border_color(rgb(t.border))
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_primary))
-                            .child(title),
-                    )
-                    .children(doc.is_some().then(|| {
-                        div()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child("doc ↗")
-                    })),
-            )
-            .children(detail.filter(|d| !d.trim().is_empty()).map(|detail| {
-                div()
-                    .w_full()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .child(detail)
-            }))
-            .children(meta.map(|meta| {
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(meta)
-            }));
-        if let Some(path) = doc {
-            item = item
+            .bg(rgb(t.bg_secondary))
+            .text_size(ui_text_ms(cx))
+            .text_color(rgb(color))
+            .child(div().min_w_0().truncate().child(label));
+        if let Some(tip) = tip {
+            let tip = SharedString::from(tip);
+            chip = chip.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx));
+        }
+        if let Some(target) = target {
+            chip = chip
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(t.bg_hover)))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, _window, cx| {
-                        this.open_map_doc(path.clone(), cx);
+                        this.open_chip(target.clone(), cx);
                     }),
                 );
         }
-        item.into_any_element()
+        chip.into_any_element()
     }
 
     /// One open pull request of the project's repository: the session PR
@@ -756,9 +642,9 @@ impl Render for ProjectInfoPanel {
         // ── What it is made of ───────────────────────────────────────────────
         // Only a repository is mapped: a worktree is a checkout of one, and the
         // map is committed in the repository.
-        if info.kind == ProjectInfoKind::Repo {
+        if let Some(map_project) = self.map_project_id(cx) {
             body = body.child(self.section_heading("MAP", None, cx));
-            for element in self.render_map(&info.project_id, cx) {
+            for element in self.render_map(&map_project, cx) {
                 body = body.child(element);
             }
             body = body.child(self.section_heading("LINKS", None, cx));

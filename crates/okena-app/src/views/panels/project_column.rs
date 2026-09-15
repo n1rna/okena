@@ -480,6 +480,13 @@ impl ProjectColumn {
         Some(panel)
     }
 
+    /// Show this column's info panel, whatever the grid's switch says — a
+    /// link on another project's panel opening this one's.
+    pub fn show_info_panel(&mut self, cx: &mut Context<Self>) {
+        self.show_info = Some(true);
+        cx.notify();
+    }
+
     /// Whether this column can show its info at all right now.
     ///
     /// A worktree being created or torn down has neither content for a panel

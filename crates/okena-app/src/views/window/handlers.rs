@@ -1254,6 +1254,33 @@ impl WindowView {
                         pane.update(cx, |pane, cx| pane.open_knowledge_doc(root_key, path, cx));
                     }
                 }
+                crate::workspace::requests::WorkbenchRequest::OpenKnowledgeRoot { root_key } => {
+                    self.show_harness_view(okena_core::harness::HarnessSection::Knowledge, cx);
+                    if let Some(pane) = self.active_harness_pane(cx) {
+                        pane.update(cx, |pane, cx| pane.open_knowledge_root(root_key, cx));
+                    }
+                }
+                crate::workspace::requests::WorkbenchRequest::OpenSpecDoc { root_key, path } => {
+                    self.show_harness_view(okena_core::harness::HarnessSection::Specs, cx);
+                    if let Some(pane) = self.active_harness_pane(cx) {
+                        pane.update(cx, |pane, cx| pane.open_spec_doc_in(root_key, path, cx));
+                    }
+                }
+                crate::workspace::requests::WorkbenchRequest::ShowProjectInfo { project_id } => {
+                    // Leaves the harness view for the project's own column,
+                    // then makes that column show its info rather than its
+                    // terminal.
+                    crate::views::components::project_nav::focus_project(
+                        &self.workspace,
+                        &self.focus_manager,
+                        self.window_id,
+                        &project_id,
+                        cx,
+                    );
+                    if let Some(col) = self.project_columns.get(&project_id).cloned() {
+                        col.update(cx, |col, cx| col.show_info_panel(cx));
+                    }
+                }
                 crate::workspace::requests::WorkbenchRequest::OpenTask {
                     provider,
                     external_id,
