@@ -121,20 +121,41 @@ impl AboutModal {
         info.set_status(UpdateStatus::Checking);
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let confirmed_current =
+            let mut confirmed_current =
                 match smol::unblock(okena_ext_updater::daemon_client::request_check).await {
                     Ok(snapshot) => {
-                        let confirmed_current = matches!(&snapshot.status, UpdateStatus::Idle);
                         info.apply_snapshot(snapshot);
-                        confirmed_current
+                        None
                     }
                     Err(error) => {
                         info.set_status(UpdateStatus::Failed {
                             error: error.to_string(),
                         });
-                        false
+                        Some(false)
                     }
                 };
+            // The daemon replies as soon as it has *started* checking; its
+            // verdict lands in a later status. Waiting for that is what makes
+            // "up to date" mean GitHub actually said so.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while confirmed_current.is_none() {
+                if !matches!(info.status(), UpdateStatus::Checking) {
+                    confirmed_current = Some(matches!(info.status(), UpdateStatus::Idle));
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    confirmed_current = Some(false);
+                    break;
+                }
+                smol::Timer::after(std::time::Duration::from_millis(400)).await;
+                if let Ok(snapshot) =
+                    smol::unblock(okena_ext_updater::daemon_client::fetch_status).await
+                {
+                    info.apply_snapshot(snapshot);
+                }
+                let _ = this.update(cx, |_, cx| cx.notify());
+            }
+            let confirmed_current = confirmed_current.unwrap_or(false);
             let _ = this.update(cx, |this, cx| {
                 this.confirmed_current = confirmed_current;
                 cx.notify();
