@@ -272,25 +272,28 @@ impl Render for NewAgentDialog {
                 cx.listener(|this, _, _, cx| this.close(cx)),
             )
             .child(
+                // Laid out like the other launch dialogs (start work, projects
+                // and context): a fixed header, a scrolling body, the launcher
+                // alone in the footer.
                 modal_content("new-agent-modal", &t)
                     .w(px(760.0))
-                    .max_h(px(700.0))
-                    .flex()
-                    .flex_col()
+                    .max_h(px(620.0))
                     .child(
-                        v_flex()
-                            .id("new-agent-body")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .gap(px(16.0))
-                            .p(px(20.0))
+                        h_flex()
+                            .items_start()
+                            .gap(px(8.0))
+                            .px(px(16.0))
+                            .py(px(12.0))
+                            .border_b_1()
+                            .border_color(rgb(t.border))
                             .child(
                                 v_flex()
-                                    .gap(px(4.0))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(2.0))
                                     .child(
                                         div()
-                                            .text_size(ui_text(15.0, cx))
+                                            .text_size(ui_text(14.0, cx))
                                             .text_color(rgb(t.text_primary))
                                             .child(
                                                 self.heading
@@ -298,13 +301,52 @@ impl Render for NewAgentDialog {
                                                     .unwrap_or_else(|| "New agent".to_string()),
                                             ),
                                     )
-                                    .child(self.field_hint(
-                                        "Starts an agent session with okena's MCP server \
-                                         wired in, so it can report status and register \
-                                         what it produces.",
-                                        cx,
-                                    )),
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .text_size(ui_text_ms(cx))
+                                            .text_color(rgb(t.text_muted))
+                                            .child(
+                                                "Starts an agent session with okena's MCP \
+                                                 server wired in, so it can report status \
+                                                 and register what it produces.",
+                                            ),
+                                    ),
                             )
+                            // With the heading, as in the other launch dialogs:
+                            // leaving and starting do not belong side by side.
+                            .child(
+                                div()
+                                    .id("new-agent-cancel")
+                                    .cursor_pointer()
+                                    .flex_shrink_0()
+                                    .px(px(10.0))
+                                    .py(px(3.0))
+                                    .rounded(px(4.0))
+                                    .bg(rgb(t.bg_secondary))
+                                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                                    .text_size(ui_text_md(cx))
+                                    .text_color(rgb(t.text_primary))
+                                    .child("Cancel")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.close(cx);
+                                        }),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .id("new-agent-body")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .gap(px(14.0))
+                            .p(px(16.0))
                             .child(
                                 v_flex()
                                     .gap(px(5.0))
@@ -366,37 +408,13 @@ impl Render for NewAgentDialog {
                             })),
                     )
                     .child(
-                        h_flex()
-                            .gap(px(12.0))
-                            .items_center()
-                            .px(px(20.0))
+                        div()
+                            .px(px(16.0))
                             .py(px(12.0))
                             .border_t_1()
                             .border_color(rgb(t.border))
-                            .child(
-                                div()
-                                    .id("new-agent-cancel")
-                                    .flex_shrink_0()
-                                    .cursor_pointer()
-                                    .px(px(14.0))
-                                    .py(px(6.0))
-                                    .rounded(px(4.0))
-                                    .bg(rgb(t.bg_secondary))
-                                    .hover(|s| s.bg(rgb(t.bg_hover)))
-                                    .text_size(ui_text_md(cx))
-                                    .text_color(rgb(t.text_primary))
-                                    .child("Cancel")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.close(cx);
-                                        }),
-                                    ),
-                            )
-                            .child(div().flex_1().min_w_0().child(launcher)),
-                    )
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+                            .child(launcher),
+                    ),
             )
     }
 }
