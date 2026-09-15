@@ -93,7 +93,7 @@ impl LaunchPickers {
                         cx.emit(LaunchPickersEvent::ProjectsChanged);
                         cx.notify();
                     }
-                    ChipSearchEvent::Hint(_) => {}
+                    ChipSearchEvent::Hint(_) | ChipSearchEvent::Picked(_) => {}
                 },
             ),
             cx.subscribe(
@@ -101,7 +101,7 @@ impl LaunchPickers {
                 |this, _, event: &ChipSearchEvent, cx| match event {
                     ChipSearchEvent::QueryChanged(_) => this.search_context(cx),
                     ChipSearchEvent::Added(item) => this.record_hit(item, cx),
-                    ChipSearchEvent::Removed(_) => {}
+                    ChipSearchEvent::Removed(_) | ChipSearchEvent::Picked(_) => {}
                     ChipSearchEvent::Hint(project_id) => this.scan(project_id.to_string(), cx),
                 },
             ),

@@ -363,6 +363,12 @@ impl HarnessPane {
         self.refresh_knowledge(cx);
     }
 
+    /// Show the root keyed `root_key` with nothing selected — a project's
+    /// store chip opening the store it follows.
+    pub(crate) fn open_knowledge_root(&mut self, root_key: String, cx: &mut Context<Self>) {
+        self.select_knowledge_root(root_key, cx);
+    }
+
     /// Open `path` in the root keyed `root_key`, switching roots when needed.
     ///
     /// For links from outside the view, such as a project map's docs in the

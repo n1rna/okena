@@ -222,6 +222,17 @@ pub enum WorkbenchRequest {
     /// root discovery keyed `root_key`. How the project info panel opens a
     /// project map's docs.
     OpenKnowledgeDoc { root_key: String, path: String },
+    /// Open Harness → Knowledge on a root with nothing selected: `root_key`
+    /// as discovery keys it. How a project info panel's store chip opens the
+    /// store the project follows.
+    OpenKnowledgeRoot { root_key: String },
+    /// Open Harness → Specs on one document: `path` inside the spec root
+    /// keyed `root_key`. How the project info panel opens a project's specs
+    /// and its changes' proposals.
+    OpenSpecDoc { root_key: String, path: String },
+    /// Show one project's info panel, focusing its column. How a link on one
+    /// project's panel opens the other project's.
+    ShowProjectInfo { project_id: String },
     /// Open Harness → Tasks with one task selected, by its provider and its
     /// id there. How an agent panel's task card opens the task it works on —
     /// often one that is not in the list, like a closed epic.

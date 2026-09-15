@@ -158,6 +158,26 @@ impl HarnessPane {
         self.refresh_specs(cx);
     }
 
+    /// Open `path` in the root keyed `root_key`, switching roots when needed.
+    ///
+    /// For links from outside the view, such as a project's specs in the
+    /// project info panel.
+    pub(crate) fn open_spec_doc_in(
+        &mut self,
+        root_key: String,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.specs.root_key.as_deref() != Some(root_key.as_str()) {
+            self.specs.leave_selection();
+            self.specs.root_key = Some(root_key);
+            self.specs.tree = None;
+            self.specs.collapsed.clear();
+            self.refresh_specs(cx);
+        }
+        self.open_spec_doc(path, cx);
+    }
+
     /// Open one document: its held buffer when it has unsaved edits, else a
     /// fresh read.
     pub(super) fn open_spec_doc(&mut self, path: String, cx: &mut Context<Self>) {
