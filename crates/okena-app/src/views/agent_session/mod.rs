@@ -59,6 +59,60 @@ impl PanelDensity {
     }
 }
 
+/// What the delete card takes down with the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DeleteChoice {
+    /// Off keeps each checkout as an ordinary worktree, terminals closed.
+    pub remove_worktrees: bool,
+    /// Only offered while worktrees go: git cannot delete a branch a kept
+    /// worktree has checked out.
+    pub delete_branches: bool,
+}
+
+impl Default for DeleteChoice {
+    fn default() -> Self {
+        Self {
+            remove_worktrees: true,
+            delete_branches: false,
+        }
+    }
+}
+
+/// What a finished delete took that the user may not have expected: work it
+/// discarded and branches that were never merged. One line each, empty when
+/// there is nothing to say.
+fn teardown_notes(result: &serde_json::Value) -> Vec<String> {
+    let mut notes = Vec::new();
+    let discarded: Vec<&str> = result
+        .get("discarded")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|n| n.as_str()).collect())
+        .unwrap_or_default();
+    if !discarded.is_empty() {
+        notes.push(format!(
+            "Discarded uncommitted changes in: {}",
+            discarded.join(", ")
+        ));
+    }
+    let unmerged: Vec<&str> = result
+        .get("deleted_branches")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter(|b| b.get("merged").and_then(|m| m.as_bool()) == Some(false))
+                .filter_map(|b| b.get("branch")?.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !unmerged.is_empty() {
+        notes.push(format!(
+            "Deleted unmerged branches: {}",
+            unmerged.join(", ")
+        ));
+    }
+    notes
+}
+
 /// What a compact panel is showing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PanelTab {
@@ -98,9 +152,9 @@ pub struct AgentSessionPanel {
     /// Info or the live terminal. Only meaningful at compact density; the full
     /// sidebar sits beside a terminal already.
     tab: PanelTab,
-    /// Two-step delete: the first click arms, the second confirms. `Some(force)`
-    /// while armed.
-    pending_delete: Option<bool>,
+    /// Two-step delete: the first click arms, the second confirms. The choices
+    /// on the card while armed, fresh each time it opens.
+    pending_delete: Option<DeleteChoice>,
     /// The embedded terminal, keyed by id so it is rebuilt only when the
     /// session's terminal actually changes — rebuilding each frame would drop
     /// scrollback and selection.
@@ -506,11 +560,12 @@ impl AgentSessionPanel {
         .detach();
     }
 
-    /// Tear down the whole session workspace.
+    /// Tear down the session, and with `choice` its worktrees and branches.
     ///
-    /// Only ever called from the confirmation step: it deletes checkouts, and
-    /// with `force` it discards uncommitted work in them.
-    fn delete_workspace(&mut self, force: bool, cx: &mut Context<Self>) {
+    /// Only ever called from the confirmation step. Removing worktrees always
+    /// forces: what that discarded is reported afterwards rather than asked
+    /// about first.
+    fn delete_workspace(&mut self, choice: DeleteChoice, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let daemon_id =
             okena_transport::client::strip_prefix(&self.project_id, client.connection_id());
@@ -522,17 +577,22 @@ impl AgentSessionPanel {
                 client
                     .post_action(okena_core::api::ActionRequest::TaskDeleteWorkspace {
                         project_id: daemon_id,
-                        force,
+                        force: true,
+                        remove_worktrees: choice.remove_worktrees,
+                        delete_branches: choice.remove_worktrees && choice.delete_branches,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing delete result".to_string()))
             })
             .await;
 
             cx.update(|cx| match result {
-                // A partial delete must be surfaced: git refuses to remove a
-                // dirty checkout, and silently leaving it would look like the
-                // workspace was fully torn down.
+                // Anything that survived must be surfaced: silently leaving it
+                // would look like the workspace was fully torn down.
                 Ok(value) => {
+                    let notes = teardown_notes(&value);
+                    if !notes.is_empty() {
+                        crate::views::panels::toast::ToastManager::warning(notes.join(" · "), cx);
+                    }
                     let failures: Vec<String> = value
                         .get("failed")
                         .and_then(|v| v.as_array())
@@ -701,5 +761,39 @@ impl AgentSessionPanel {
                 AnyView::from(term.content.clone()).cached(StyleRefinement::default().size_full()),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod teardown_notes_tests {
+    use super::teardown_notes;
+
+    #[test]
+    fn names_discarded_work_and_only_the_unmerged_branches() {
+        let result = serde_json::json!({
+            "discarded": ["okena (a)", "web (b)"],
+            "deleted_branches": [
+                { "branch": "feat/merged", "project": "okena (a)", "merged": true },
+                { "branch": "feat/open", "project": "web (b)", "merged": false },
+            ],
+        });
+        assert_eq!(
+            teardown_notes(&result),
+            [
+                "Discarded uncommitted changes in: okena (a), web (b)",
+                "Deleted unmerged branches: feat/open",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clean_delete_and_an_older_daemon_say_nothing() {
+        let clean = serde_json::json!({
+            "discarded": [],
+            "deleted_branches": [{ "branch": "feat/x", "project": "p", "merged": true }],
+        });
+        assert!(teardown_notes(&clean).is_empty());
+        // A daemon that predates these fields answers with neither.
+        assert!(teardown_notes(&serde_json::json!({ "removed": [], "failed": [] })).is_empty());
     }
 }

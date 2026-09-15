@@ -832,9 +832,25 @@ pub fn execute_action(
             settings,
             cx,
         ),
-        ActionRequest::TaskDeleteWorkspace { project_id, force } => {
-            tasks::delete_workspace(ws, focus_manager, project_id, force, settings, cx)
-        }
+        ActionRequest::TaskDeleteWorkspace {
+            project_id,
+            force,
+            remove_worktrees,
+            delete_branches,
+        } => tasks::delete_workspace(
+            ws,
+            focus_manager,
+            project_id,
+            tasks::TeardownChoice {
+                force,
+                remove_worktrees,
+                delete_branches,
+            },
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
         ActionRequest::AgentStartSession {
             goal,
             name,

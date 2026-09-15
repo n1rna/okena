@@ -2777,6 +2777,18 @@ pub(super) fn teardown_plan(
     Some(plan)
 }
 
+/// What the user chose to take down with a session.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TeardownChoice {
+    /// Remove a dirty checkout rather than refusing it.
+    pub force: bool,
+    /// Off keeps each worktree as an ordinary worktree project, terminals
+    /// closed.
+    pub remove_worktrees: bool,
+    /// `git branch -D` each removed worktree's local branch.
+    pub delete_branches: bool,
+}
+
 /// Tear down a task's whole workspace.
 ///
 /// Order is deliberate: worktrees first, session last. The session project is
@@ -2786,11 +2798,14 @@ pub(super) fn teardown_plan(
 /// Failures are collected rather than aborting: a dirty worktree that git
 /// refuses to remove should not prevent the rest from being cleaned up, and the
 /// result names exactly what survived and why.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn delete_workspace(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
     project_id: String,
-    force: bool,
+    choice: TeardownChoice,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
@@ -2814,28 +2829,120 @@ pub(super) fn delete_workspace(
     let (worktrees, sessions) = (plan.worktrees, plan.sessions);
 
     let mut removed: Vec<serde_json::Value> = Vec::new();
+    let mut kept: Vec<serde_json::Value> = Vec::new();
     let mut failed: Vec<serde_json::Value> = Vec::new();
+    // Worktrees whose uncommitted changes a forced removal took with it.
+    let mut discarded: Vec<String> = Vec::new();
+    let mut deleted_branches: Vec<serde_json::Value> = Vec::new();
 
     for (id, name) in worktrees {
+        if !choice.remove_worktrees {
+            // Kept as an ordinary worktree under its repo. Closing its
+            // terminals ends their tmux sessions and any agent inside.
+            let terminal_ids: Vec<String> = ws
+                .project(&id)
+                .and_then(|p| p.layout.as_ref())
+                .map(|l| l.collect_terminal_ids())
+                .unwrap_or_default();
+            let closed = if terminal_ids.is_empty() {
+                ActionResult::Ok(None)
+            } else {
+                super::terminal::close_many(
+                    ws,
+                    focus_manager,
+                    id.clone(),
+                    terminal_ids,
+                    backend,
+                    terminals,
+                    cx,
+                )
+            };
+            match closed {
+                ActionResult::Ok(_) => kept.push(serde_json::json!({
+                    "project": name,
+                    "kind": "worktree",
+                })),
+                ActionResult::Err(error) => failed.push(serde_json::json!({
+                    "project": name,
+                    "kind": "worktree",
+                    "error": error,
+                })),
+            }
+            continue;
+        }
+
+        // Read before the checkout goes: both live in it.
+        let (checkout, main_repo) = match ws.project(&id) {
+            Some(p) => {
+                let info = p.worktree_info.as_ref();
+                let checkout = info
+                    .map(|i| i.worktree_path.clone())
+                    .filter(|path| !path.is_empty())
+                    .unwrap_or_else(|| p.path.clone());
+                let main_repo = info.map(|i| i.main_repo_path.clone()).unwrap_or_default();
+                (std::path::PathBuf::from(checkout), main_repo)
+            }
+            None => (std::path::PathBuf::new(), String::new()),
+        };
+        // A status that cannot be read may hold changes too; naming it is
+        // the honest report of what a forced removal may have taken.
+        let dirty = choice.force
+            && matches!(
+                okena_git::uncommitted_changes(&checkout),
+                okena_git::DirtyCheck::Known(true) | okena_git::DirtyCheck::Unknown
+            );
+        let branch = choice
+            .delete_branches
+            .then(|| okena_git::checked_out_branch(&checkout))
+            .flatten();
+
         // Removes the checkout and closes the project's terminals, which ends
         // the tmux session and with it any agent running inside.
         match super::project::remove_worktree_project(
             ws,
             focus_manager,
             id.clone(),
-            force,
+            choice.force,
             settings,
             cx,
         ) {
-            ActionResult::Ok(_) => removed.push(serde_json::json!({
-                "project": name,
-                "kind": "worktree",
-            })),
-            ActionResult::Err(error) => failed.push(serde_json::json!({
-                "project": name,
-                "kind": "worktree",
-                "error": error,
-            })),
+            ActionResult::Ok(_) => {
+                removed.push(serde_json::json!({
+                    "project": name,
+                    "kind": "worktree",
+                }));
+                if dirty {
+                    discarded.push(name.clone());
+                }
+            }
+            ActionResult::Err(error) => {
+                failed.push(serde_json::json!({
+                    "project": name,
+                    "kind": "worktree",
+                    "error": error,
+                }));
+                continue;
+            }
+        }
+
+        // Only once the checkout is gone: git refuses to delete a branch a
+        // worktree still has checked out.
+        if let Some(branch) = branch {
+            let repo = std::path::Path::new(&main_repo);
+            // Asked before the delete, which leaves nothing to ask about.
+            let merged = okena_git::is_branch_merged(repo, &branch).unwrap_or(false);
+            match okena_git::force_delete_local_branch(repo, &branch) {
+                Ok(()) => deleted_branches.push(serde_json::json!({
+                    "branch": branch,
+                    "project": name,
+                    "merged": merged,
+                })),
+                Err(error) => failed.push(serde_json::json!({
+                    "project": branch,
+                    "kind": "branch",
+                    "error": error.to_string(),
+                })),
+            }
         }
     }
 
@@ -2858,7 +2965,10 @@ pub(super) fn delete_workspace(
     ActionResult::Ok(Some(serde_json::json!({
         "task": task,
         "removed": removed,
+        "kept": kept,
         "failed": failed,
+        "discarded": discarded,
+        "deleted_branches": deleted_branches,
     })))
 }
 
@@ -3021,6 +3131,385 @@ mod teardown_tests {
     #[test]
     fn an_unknown_project_yields_no_plan() {
         assert!(teardown_plan(&[], "ghost").is_none());
+    }
+}
+
+/// The teardown against real repositories: what goes, what stays, and what the
+/// result tells the user about it.
+#[cfg(test)]
+mod delete_workspace_tests {
+    use super::{TeardownChoice, delete_workspace};
+    use crate::workspace::actions::execute::ActionResult;
+    use crate::workspace::focus::FocusManager;
+    use crate::workspace::persistence::AppSettings;
+    use crate::workspace::state::{ProjectData, WindowState, Workspace, WorkspaceData};
+    use okena_terminal::TerminalsRegistry;
+    use okena_terminal::backend::TerminalBackend;
+    use okena_terminal::shell_config::ShellType;
+    use okena_terminal::terminal::TerminalTransport;
+    use okena_workspace::context::WorkspaceCx;
+    use okena_workspace::hook_monitor::HookMonitor;
+    use okena_workspace::hooks::HookRunner;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+
+    struct NoTransport;
+
+    impl TerminalTransport for NoTransport {
+        fn send_input(&self, _terminal_id: &str, _data: &[u8]) {}
+        fn resize(&self, _terminal_id: &str, _cols: u16, _rows: u16) {}
+        fn uses_mouse_backend(&self) -> bool {
+            false
+        }
+    }
+
+    /// Records which terminals were killed; spawns nothing.
+    #[derive(Default)]
+    struct KillRecorder {
+        killed: Mutex<Vec<String>>,
+    }
+
+    impl TerminalBackend for KillRecorder {
+        fn transport(&self) -> Arc<dyn TerminalTransport> {
+            Arc::new(NoTransport)
+        }
+        fn create_terminal(
+            &self,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            unreachable!("a teardown creates no terminals")
+        }
+        fn reconnect_terminal(
+            &self,
+            _terminal_id: &str,
+            _cwd: &str,
+            _shell: Option<&ShellType>,
+        ) -> anyhow::Result<String> {
+            unreachable!("a teardown reconnects no terminals")
+        }
+        fn kill(&self, terminal_id: &str) {
+            self.killed.lock().unwrap().push(terminal_id.to_string());
+        }
+        fn capture_buffer(&self, _terminal_id: &str) -> Option<PathBuf> {
+            None
+        }
+        fn supports_buffer_capture(&self) -> bool {
+            false
+        }
+        fn is_remote(&self) -> bool {
+            false
+        }
+        fn get_shell_pid(&self, _terminal_id: &str) -> Option<u32> {
+            None
+        }
+        fn get_service_pids(&self, _terminal_id: &str) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    struct TestCx {
+        monitor: HookMonitor,
+    }
+
+    impl WorkspaceCx for TestCx {
+        fn notify(&mut self) {}
+        fn refresh_views(&mut self) {}
+        fn hook_runner(&self) -> Option<HookRunner> {
+            None
+        }
+        fn hook_monitor(&self) -> Option<HookMonitor> {
+            Some(self.monitor.clone())
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("run git")
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = git(dir, args);
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn branch_exists(repo: &Path, branch: &str) -> bool {
+        git(
+            repo,
+            &[
+                "show-ref",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .status
+        .success()
+    }
+
+    fn task_ref() -> serde_json::Value {
+        serde_json::json!({
+            "id": { "provider": "linear", "external_id": "u1" },
+            "display_key": "QBL-1", "title": "t", "url": "http://x",
+        })
+    }
+
+    /// A repo, a session for task u1, and two worktrees for it:
+    /// `wt-clean` on `feat/merged` (no commits of its own, so merged) and
+    /// `wt-dirty` on `feat/unmerged` (one commit ahead, plus an uncommitted
+    /// file). Each worktree runs one terminal.
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        repo: PathBuf,
+        clean: PathBuf,
+        dirty: PathBuf,
+        ws: Workspace,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-q", "-b", "main"]);
+        git_ok(&repo, &["config", "user.email", "okena@example.invalid"]);
+        git_ok(&repo, &["config", "user.name", "Okena Test"]);
+        git_ok(&repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git_ok(&repo, &["add", "file.txt"]);
+        git_ok(&repo, &["commit", "-q", "-m", "base"]);
+
+        let clean = root.join("wt-clean");
+        let dirty = root.join("wt-dirty");
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat/merged",
+                clean.to_str().unwrap(),
+            ],
+        );
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat/unmerged",
+                dirty.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(dirty.join("committed.txt"), "ahead\n").unwrap();
+        git_ok(&dirty, &["add", "committed.txt"]);
+        git_ok(&dirty, &["commit", "-q", "-m", "ahead of main"]);
+        std::fs::write(dirty.join("uncommitted.txt"), "work in progress\n").unwrap();
+
+        let parse = |v: serde_json::Value| -> ProjectData { serde_json::from_value(v).unwrap() };
+        let worktree = |id: &str, path: &Path, branch: &str, terminal: &str| {
+            parse(serde_json::json!({
+                "id": id, "name": id, "path": path,
+                "layout": { "type": "terminal", "terminal_id": terminal },
+                "worktree_info": {
+                    "parent_project_id": "repo",
+                    "main_repo_path": repo,
+                    "worktree_path": path,
+                    "branch_name": branch,
+                },
+                "task_ref": task_ref(),
+            }))
+        };
+        let projects = vec![
+            parse(serde_json::json!({
+                "id": "repo", "name": "repo", "path": repo,
+                "worktree_ids": ["wt-clean", "wt-dirty"],
+            })),
+            parse(serde_json::json!({
+                "id": "s1", "name": "s1 (agent)", "path": root,
+                "task_ref": task_ref(),
+            })),
+            worktree("wt-clean", &clean, "feat/merged", "t-clean"),
+            worktree("wt-dirty", &dirty, "feat/unmerged", "t-dirty"),
+        ];
+        let ws = Workspace::new(WorkspaceData {
+            version: 1,
+            projects,
+            project_order: vec!["repo".into(), "s1".into()],
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            folders: Vec::new(),
+            main_window: WindowState::default(),
+            extra_windows: Vec::new(),
+        });
+        Fixture {
+            _dir: dir,
+            repo,
+            clean,
+            dirty,
+            ws,
+        }
+    }
+
+    fn run(f: &mut Fixture, choice: TeardownChoice, backend: &KillRecorder) -> serde_json::Value {
+        let terminals: TerminalsRegistry = Default::default();
+        let mut cx = TestCx {
+            monitor: HookMonitor::new(),
+        };
+        match delete_workspace(
+            &mut f.ws,
+            &mut FocusManager::default(),
+            "s1".into(),
+            choice,
+            backend,
+            &terminals,
+            &AppSettings::default(),
+            &mut cx,
+        ) {
+            ActionResult::Ok(Some(v)) => v,
+            other => panic!("delete failed: {:?}", other.err()),
+        }
+    }
+
+    trait ResultErr {
+        fn err(self) -> Option<String>;
+    }
+
+    impl ResultErr for ActionResult {
+        fn err(self) -> Option<String> {
+            match self {
+                ActionResult::Err(e) => Some(e),
+                ActionResult::Ok(_) => None,
+            }
+        }
+    }
+
+    #[test]
+    fn a_partial_delete_stops_the_worktrees_and_keeps_them() {
+        let mut f = fixture();
+        let backend = KillRecorder::default();
+        let result = run(
+            &mut f,
+            TeardownChoice {
+                force: true,
+                remove_worktrees: false,
+                // Ignored while worktrees stay: a kept checkout holds its branch.
+                delete_branches: true,
+            },
+            &backend,
+        );
+
+        assert_eq!(result["failed"], serde_json::json!([]), "{result}");
+        assert!(f.ws.project("s1").is_none(), "the session goes");
+        for id in ["wt-clean", "wt-dirty"] {
+            let p = f.ws.project(id).unwrap_or_else(|| panic!("{id} kept"));
+            let running = p
+                .layout
+                .as_ref()
+                .map(|l| l.collect_terminal_ids())
+                .unwrap_or_default();
+            assert!(running.is_empty(), "{id} still runs {running:?}");
+        }
+        let mut killed = backend.killed.lock().unwrap().clone();
+        killed.sort();
+        assert_eq!(killed, ["t-clean", "t-dirty"]);
+        assert!(f.clean.exists() && f.dirty.exists(), "checkouts stay");
+        assert!(
+            f.dirty.join("uncommitted.txt").exists(),
+            "uncommitted work stays"
+        );
+        assert!(branch_exists(&f.repo, "feat/merged"));
+        assert!(branch_exists(&f.repo, "feat/unmerged"));
+        assert_eq!(result["discarded"], serde_json::json!([]));
+        assert_eq!(result["deleted_branches"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_full_delete_removes_a_dirty_worktree_and_says_so() {
+        let mut f = fixture();
+        let result = run(
+            &mut f,
+            TeardownChoice {
+                force: true,
+                remove_worktrees: true,
+                delete_branches: false,
+            },
+            &KillRecorder::default(),
+        );
+
+        assert_eq!(result["failed"], serde_json::json!([]), "{result}");
+        for id in ["s1", "wt-clean", "wt-dirty"] {
+            assert!(f.ws.project(id).is_none(), "{id} removed");
+        }
+        assert!(!f.clean.exists() && !f.dirty.exists(), "checkouts removed");
+        assert_eq!(result["discarded"], serde_json::json!(["wt-dirty"]));
+        assert!(branch_exists(&f.repo, "feat/merged"), "branches stay");
+        assert!(branch_exists(&f.repo, "feat/unmerged"), "branches stay");
+        assert_eq!(result["deleted_branches"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_full_delete_with_branches_deletes_unmerged_ones_and_names_them() {
+        let mut f = fixture();
+        let result = run(
+            &mut f,
+            TeardownChoice {
+                force: true,
+                remove_worktrees: true,
+                delete_branches: true,
+            },
+            &KillRecorder::default(),
+        );
+
+        assert_eq!(result["failed"], serde_json::json!([]), "{result}");
+        assert!(!branch_exists(&f.repo, "feat/merged"));
+        assert!(!branch_exists(&f.repo, "feat/unmerged"), "-D, not -d");
+        let mut deleted = result["deleted_branches"].as_array().unwrap().clone();
+        deleted.sort_by_key(|b| b["branch"].as_str().unwrap().to_string());
+        assert_eq!(
+            deleted,
+            [
+                serde_json::json!({ "branch": "feat/merged", "project": "wt-clean", "merged": true }),
+                serde_json::json!({ "branch": "feat/unmerged", "project": "wt-dirty", "merged": false }),
+            ]
+        );
+        assert!(
+            branch_exists(&f.repo, "main"),
+            "the repo's own branch stays"
+        );
+    }
+
+    #[test]
+    fn without_force_a_dirty_worktree_is_kept_and_reported() {
+        // What an older client that never asked to force still gets.
+        let mut f = fixture();
+        let result = run(
+            &mut f,
+            TeardownChoice {
+                force: false,
+                remove_worktrees: true,
+                delete_branches: true,
+            },
+            &KillRecorder::default(),
+        );
+
+        let failed = result["failed"].as_array().unwrap();
+        assert_eq!(failed.len(), 1, "{result}");
+        assert_eq!(failed[0]["project"], "wt-dirty");
+        assert!(f.dirty.join("uncommitted.txt").exists());
+        assert!(branch_exists(&f.repo, "feat/unmerged"), "its branch stays");
+        assert_eq!(result["discarded"], serde_json::json!([]));
     }
 }
 

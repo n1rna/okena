@@ -6,7 +6,9 @@
 //! overview.
 
 use super::model::short_path;
-use super::{AgentSessionInfo, AgentSessionKind, AgentSessionPanel, PanelTab, SessionActivity};
+use super::{
+    AgentSessionInfo, AgentSessionKind, AgentSessionPanel, DeleteChoice, PanelTab, SessionActivity,
+};
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_ms};
 use gpui::prelude::*;
@@ -483,7 +485,7 @@ impl AgentSessionPanel {
         //
         if self.density.allows_delete() {
             body = body.child(match self.pending_delete {
-                Some(force) => self.render_delete_confirm(info, force, cx),
+                Some(choice) => self.render_delete_confirm(info, choice, cx),
                 None => div()
                     .id("agent-panel-delete")
                     .cursor_pointer()
@@ -494,12 +496,13 @@ impl AgentSessionPanel {
                     .hover(|s| s.bg(with_alpha(t.error, 0.1)))
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.error))
-                    .child("Delete workspace…")
+                    .child("Delete")
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _window, cx| {
                             // Two steps on purpose: this removes checkouts.
-                            this.pending_delete = Some(false);
+                            // The defaults come back every time it opens.
+                            this.pending_delete = Some(DeleteChoice::default());
                             cx.notify();
                         }),
                     )
@@ -617,90 +620,146 @@ impl AgentSessionPanel {
     fn render_delete_confirm(
         &self,
         info: &AgentSessionInfo,
-        force: bool,
+        choice: DeleteChoice,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
         let count = info.workspaces.len();
-        v_flex()
+        let title = match count {
+            0 => "Delete this session? It has no checkouts.".to_string(),
+            1 => "Delete this session and its 1 checkout?".to_string(),
+            n => format!("Delete this session and its {n} checkouts?"),
+        };
+
+        let mut card = v_flex()
             .mt(px(10.0))
-            .gap(px(6.0))
-            .p(px(8.0))
-            .rounded(px(4.0))
+            .gap(px(10.0))
+            .p(px(12.0))
+            .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(t.error))
+            .border_color(with_alpha(t.error, 0.5))
             .bg(with_alpha(t.error, 0.06))
             .child(
                 div()
-                    .text_size(ui_text_ms(cx))
+                    .text_size(ui_text(13.0, cx))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(t.text_primary))
-                    .child(match count {
-                        0 => "Delete this session? It has no checkouts.".to_string(),
-                        1 => "Delete this session and its 1 checkout?".to_string(),
-                        n => format!("Delete this session and its {n} checkouts?"),
-                    }),
-            )
+                    .child(title),
+            );
+
+        // Nothing on disk to choose about.
+        if count > 0 {
+            let mut switches = v_flex().gap(px(8.0)).child(self.delete_switch_row(
+                "agent-panel-delete-worktrees",
+                "Remove worktrees",
+                choice.remove_worktrees,
+                DeleteChoice {
+                    remove_worktrees: !choice.remove_worktrees,
+                    // Turning it back on starts the branch switch off again.
+                    delete_branches: false,
+                },
+                cx,
+            ));
+            if choice.remove_worktrees {
+                switches = switches.child(self.delete_switch_row(
+                    "agent-panel-delete-branches",
+                    "Delete local branches",
+                    choice.delete_branches,
+                    DeleteChoice {
+                        delete_branches: !choice.delete_branches,
+                        ..choice
+                    },
+                    cx,
+                ));
+            }
+            card = card.child(switches);
+        }
+
+        card.child(
+            h_flex()
+                .justify_end()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .id("agent-panel-delete-cancel")
+                        .cursor_pointer()
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(t.bg_secondary))
+                        .hover(|s| s.bg(rgb(t.bg_hover)))
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_primary))
+                        .child("Cancel")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _window, cx| {
+                                this.pending_delete = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("agent-panel-delete-go")
+                        .cursor_pointer()
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(t.error))
+                        .hover(|s| s.bg(with_alpha(t.error, 0.85)))
+                        .text_size(ui_text_ms(cx))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(t.button_primary_fg))
+                        .child("Delete")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _window, cx| {
+                                this.delete_workspace(choice, cx);
+                            }),
+                        ),
+                ),
+        )
+        .into_any_element()
+    }
+
+    /// One labelled switch on the delete card, laid out like a settings row:
+    /// label on the left, switch on the right. Clicking anywhere on the row
+    /// sets the card to `next`.
+    fn delete_switch_row(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        enabled: bool,
+        next: DeleteChoice,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        h_flex()
+            .id(id)
+            .cursor_pointer()
+            .items_center()
+            .justify_between()
+            .gap(px(16.0))
             .child(
-                h_flex()
-                    .id("agent-panel-delete-force")
-                    .cursor_pointer()
-                    .gap(px(6.0))
-                    .items_center()
+                div()
+                    .flex_1()
+                    .min_w_0()
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_secondary))
-                    .child(if force { "☑" } else { "☐" })
-                    // Uncommitted work is the one thing git refuses to discard
-                    // on its own, so discarding it has to be asked for.
-                    .child("Discard uncommitted changes")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.pending_delete = Some(!force);
-                            cx.notify();
-                        }),
-                    ),
+                    .child(label),
             )
-            .child(
-                h_flex()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .id("agent-panel-delete-go")
-                            .cursor_pointer()
-                            .px(px(10.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.error))
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.button_primary_fg))
-                            .child("Delete")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _window, cx| {
-                                    this.delete_workspace(force, cx);
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("agent-panel-delete-cancel")
-                            .cursor_pointer()
-                            .px(px(10.0))
-                            .py(px(4.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(t.bg_secondary))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_primary))
-                            .child("Cancel")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, _window, cx| {
-                                    this.pending_delete = None;
-                                    cx.notify();
-                                }),
-                            ),
-                    ),
+            .child(okena_ui::toggle::toggle_switch(
+                format!("{id}-toggle"),
+                enabled,
+                &t,
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.pending_delete = Some(next);
+                    cx.notify();
+                }),
             )
             .into_any_element()
     }

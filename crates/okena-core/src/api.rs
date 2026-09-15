@@ -1574,11 +1574,23 @@ pub enum ActionRequest {
     /// `force` is passed through to `git worktree remove`, which otherwise
     /// refuses to delete a checkout with uncommitted changes. Without it, a
     /// dirty worktree is reported as a failure and left on disk rather than
-    /// silently discarding work.
+    /// silently discarding work. With it, the result's `discarded` names each
+    /// worktree whose uncommitted changes went with it.
+    ///
+    /// `remove_worktrees` off keeps every worktree — checkout, branch and
+    /// sidebar row — and only closes its terminals; the session still goes.
+    /// `delete_branches` deletes each removed worktree's local branch with
+    /// `git branch -D`, merged or not, and is ignored while worktrees are kept.
+    /// Remote branches are never touched. Both default to what a client that
+    /// predates them got: worktrees removed, branches kept.
     TaskDeleteWorkspace {
         project_id: String,
         #[serde(default)]
         force: bool,
+        #[serde(default = "default_true")]
+        remove_worktrees: bool,
+        #[serde(default)]
+        delete_branches: bool,
     },
     /// Start a free-form agent session the user configured themselves.
     ///
@@ -2401,6 +2413,10 @@ fn default_pull_request_limit() -> usize {
     20
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// POST /v1/pair request
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3098,6 +3114,42 @@ mod tests {
             let json = serde_json::to_string(&action).unwrap();
             let _parsed: ActionRequest = serde_json::from_str(&json).unwrap();
         }
+    }
+
+    #[test]
+    fn a_delete_without_the_teardown_choices_removes_worktrees_and_keeps_branches() {
+        // What an older client, and a draft discard, sends: today's teardown.
+        let old: ActionRequest = serde_json::from_value(serde_json::json!({
+            "action": "task_delete_workspace", "project_id": "p1", "force": true,
+        }))
+        .unwrap();
+        let ActionRequest::TaskDeleteWorkspace {
+            force,
+            remove_worktrees,
+            delete_branches,
+            ..
+        } = old
+        else {
+            panic!("expected a delete");
+        };
+        assert!(force);
+        assert!(remove_worktrees, "worktrees go unless asked to stay");
+        assert!(!delete_branches, "branches stay unless asked to go");
+
+        let partial: ActionRequest = serde_json::from_value(serde_json::json!({
+            "action": "task_delete_workspace", "project_id": "p1",
+            "remove_worktrees": false, "delete_branches": true,
+        }))
+        .unwrap();
+        assert!(matches!(
+            partial,
+            ActionRequest::TaskDeleteWorkspace {
+                force: false,
+                remove_worktrees: false,
+                delete_branches: true,
+                ..
+            }
+        ));
     }
 
     #[test]
