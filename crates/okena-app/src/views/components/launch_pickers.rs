@@ -18,9 +18,11 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::v_flex;
 use okena_core::api::ActionRequest;
-use okena_core::context::{ContextRef, ContextSearchResult};
+use okena_core::context::{
+    ContextItem, ContextKind, ContextOwner, ContextRef, ContextSearchResult,
+};
 use okena_transport::remote_action::RemoteActionClient;
-use okena_ui::chip_search::{ChipHint, ChipItem, ChipSearch, ChipSearchEvent};
+use okena_ui::chip_search::{ChipGroup, ChipHint, ChipItem, ChipSearch, ChipSearchEvent};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -241,13 +243,16 @@ impl LaunchPickers {
             let id = chip_id(&item.reference);
             let mut chip = ChipItem::new(id.clone(), item.title.clone())
                 .kind(item.reference.kind.label())
-                .owner(item.owner_name.clone());
-            let description = match (&item.map_id, item.description.is_empty()) {
-                (Some(map_id), true) => map_id.clone(),
-                (Some(map_id), false) => format!("{map_id} · {}", item.description),
-                (None, _) => item.description.clone(),
-            };
-            chip = chip.description(description);
+                .icon(kind_icon(item.reference.kind))
+                .description(item.description.clone())
+                .group(ChipGroup {
+                    id: format!("{:?}", item.reference.owner).into(),
+                    name: item.owner_name.clone().into(),
+                    icon: Some(owner_icon(&item.reference.owner).into()),
+                });
+            for tag in context_tags(&item) {
+                chip = chip.tag(tag);
+            }
             self.refs.insert(id, item.reference);
             results.push(chip);
         }
@@ -371,6 +376,64 @@ fn project_item(id: &str, name: &str, path: &str) -> ChipItem {
     ChipItem::new(id.to_string(), name.to_string()).description(path.to_string())
 }
 
+/// What a context result's row shows for its kind; the kind's name is its
+/// tooltip.
+fn kind_icon(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::MapEntry => "icons/map.svg",
+        ContextKind::Spec => "icons/file-text.svg",
+        ContextKind::Doc => "icons/book-open.svg",
+        ContextKind::Skill => "icons/sparkles.svg",
+        ContextKind::Agent => "icons/bot.svg",
+    }
+}
+
+/// The labels at the end of a context result's row: a map entry's id, what
+/// the item is, and whose it is.
+fn context_tags(item: &ContextItem) -> Vec<String> {
+    let mut tags: Vec<String> = item.map_id.iter().cloned().collect();
+    tags.push(kind_tag(item));
+    tags.push(item.owner_name.clone());
+    tags
+}
+
+/// What an item is, a little finer than its kind: a change is not a spec, and
+/// a map entry says which part of the map it is.
+fn kind_tag(item: &ContextItem) -> String {
+    match item.reference.kind {
+        ContextKind::MapEntry => {
+            let section = item
+                .map_id
+                .as_deref()
+                .and_then(|id| id.split_once(':'))
+                .map(|(section, _)| section);
+            match section {
+                Some("area") => "Area",
+                Some("concept") => "Concept",
+                Some("exposes") => "Exposes",
+                Some("consumes") => "Consumes",
+                Some("ci") => "CI",
+                Some("infrastructure") => "Infrastructure",
+                _ => "Map entry",
+            }
+            .to_string()
+        }
+        ContextKind::Spec if item.reference.locator.split('/').any(|s| s == "changes") => {
+            "Change".to_string()
+        }
+        ContextKind::Doc => "Doc".to_string(),
+        kind => kind.label().to_string(),
+    }
+}
+
+/// What a group's header shows: a project, or a store.
+fn owner_icon(owner: &ContextOwner) -> &'static str {
+    match owner {
+        ContextOwner::Project { .. } => "icons/folder.svg",
+        ContextOwner::Store { .. } => "icons/library.svg",
+    }
+}
+
 /// The chip id a context ref is picked under.
 fn chip_id(reference: &ContextRef) -> SharedString {
     format!(
@@ -399,7 +462,83 @@ pub fn match_projects<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::match_projects;
+    use super::{context_tags, kind_icon, match_projects, owner_icon};
+    use okena_core::context::{ContextItem, ContextKind, ContextOwner, ContextRef};
+
+    fn item(kind: ContextKind, locator: &str, map_id: Option<&str>) -> ContextItem {
+        ContextItem {
+            reference: ContextRef {
+                kind,
+                owner: ContextOwner::project("p"),
+                locator: locator.to_string(),
+            },
+            title: "t".into(),
+            description: "d".into(),
+            owner_name: "shop".into(),
+            path: "/x".into(),
+            map_id: map_id.map(str::to_string),
+            chosen: true,
+        }
+    }
+
+    #[test]
+    fn tags_name_the_map_id_a_finer_kind_and_the_origin() {
+        let tags = |i: ContextItem| context_tags(&i);
+        assert_eq!(
+            tags(item(ContextKind::MapEntry, "area:cart", Some("area:cart"))),
+            ["area:cart", "Area", "shop"]
+        );
+        assert_eq!(
+            tags(item(ContextKind::MapEntry, "ci:build", Some("ci:build"))),
+            ["ci:build", "CI", "shop"]
+        );
+        assert_eq!(
+            tags(item(ContextKind::Spec, "openspec/specs/cart/spec.md", None)),
+            ["Spec", "shop"]
+        );
+        // A change folder is a change, not a spec — but a spec named after
+        // changes is still a spec.
+        assert_eq!(
+            tags(item(
+                ContextKind::Spec,
+                "openspec/changes/add-gift-cards",
+                None
+            )),
+            ["Change", "shop"]
+        );
+        assert_eq!(
+            tags(item(
+                ContextKind::Spec,
+                "openspec/specs/changes-feed/spec.md",
+                None
+            )),
+            ["Spec", "shop"]
+        );
+        assert_eq!(
+            tags(item(ContextKind::Doc, "docs/ci.md", None)),
+            ["Doc", "shop"]
+        );
+        assert_eq!(
+            tags(item(ContextKind::Skill, "skills/release/SKILL.md", None)),
+            ["Skill", "shop"]
+        );
+    }
+
+    #[test]
+    fn every_kind_and_owner_has_an_icon_that_ships() {
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut icons: Vec<&str> = ContextKind::all().into_iter().map(kind_icon).collect();
+        icons.push(owner_icon(&ContextOwner::project("p")));
+        icons.push(owner_icon(&ContextOwner::store("store:kb")));
+        for icon in &icons {
+            assert!(assets.join(icon).is_file(), "{icon} is missing");
+        }
+        // One icon per kind, and a project's differs from a store's.
+        let mut distinct = icons.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), icons.len());
+    }
 
     fn workspace(n: usize) -> Vec<(String, String, String)> {
         (0..n)

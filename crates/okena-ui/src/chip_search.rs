@@ -7,19 +7,38 @@
 //! filter over projects, a daemon round trip — and hands the results back with
 //! [`ChipSearch::set_results`].
 //!
-//! Keyboard: ↑/↓ move through results, Enter adds the highlighted one,
-//! Backspace in an empty box removes the last chip, Esc closes the list. They
-//! are taken in the capture phase, before the text input sees them, and only
-//! when they mean something here — an Esc with the list closed still reaches
-//! the dialog around it.
+//! The results float beside the box as a launcher panel (QBL-411), drawn over
+//! whatever is around it — a dialog's footer, its edge — so opening them never
+//! moves the layout. It opens below the box, or above it when the window has
+//! more room there, and never grows past a few rows. Results that name a
+//! [`ChipGroup`] are listed under a header per group, in the order each group's
+//! first result ranks, and with more than one group a row of pills on top
+//! narrows the list to one.
+//!
+//! Keyboard: ↑/↓ move through results, Enter adds the highlighted one, Tab and
+//! Shift-Tab step through the groups, Backspace in an empty box removes the
+//! last chip, Esc closes the list. They are taken in the capture phase, before
+//! the text input sees them, and only when they mean something here — an Esc
+//! or a Tab with the list closed still reaches the dialog around it.
 
-use crate::selectable_list::selectable_list_item;
 use crate::simple_input::{InputChangedEvent, SimpleInput, SimpleInputState};
 use crate::theme::{theme, with_alpha};
-use crate::tokens::{ui_text_md, ui_text_ms};
+use crate::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 use gpui::prelude::*;
 use gpui::*;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
+
+/// Where a result comes from — a project, a store. Results sharing one are
+/// listed together under a header naming it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChipGroup {
+    /// Identity: results with one group id share a header.
+    pub id: SharedString,
+    pub name: SharedString,
+    /// An icon path drawn before the name, e.g. `icons/folder.svg`.
+    pub icon: Option<SharedString>,
+}
 
 /// One pickable thing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,12 +46,17 @@ pub struct ChipItem {
     /// Identity: two results with one id are the same item.
     pub id: SharedString,
     pub title: SharedString,
-    /// What it is, e.g. "Skill", drawn as a label before the title.
+    /// What it is, e.g. "Skill": a label on the chip, the icon's tooltip in
+    /// the list.
     pub kind: Option<SharedString>,
-    /// One line under the title.
+    /// Muted, after the title in the list.
     pub description: Option<SharedString>,
-    /// Whose it is — a project or a store — drawn on the right.
-    pub owner: Option<SharedString>,
+    /// An icon path drawn at the start of its row, e.g. `icons/map.svg`.
+    pub icon: Option<SharedString>,
+    /// The header it is listed under.
+    pub group: Option<ChipGroup>,
+    /// Short labels at the end of its row, e.g. "Spec" or "area:cart".
+    pub tags: Vec<SharedString>,
 }
 
 impl ChipItem {
@@ -42,7 +66,9 @@ impl ChipItem {
             title: title.into(),
             kind: None,
             description: None,
-            owner: None,
+            icon: None,
+            group: None,
+            tags: Vec::new(),
         }
     }
 
@@ -57,8 +83,22 @@ impl ChipItem {
         self
     }
 
-    pub fn owner(mut self, owner: impl Into<SharedString>) -> Self {
-        self.owner = Some(owner.into());
+    pub fn icon(mut self, icon: impl Into<SharedString>) -> Self {
+        self.icon = Some(icon.into());
+        self
+    }
+
+    pub fn group(mut self, group: ChipGroup) -> Self {
+        self.group = Some(group);
+        self
+    }
+
+    /// Add a label at the end of the row. An empty one is skipped.
+    pub fn tag(mut self, tag: impl Into<SharedString>) -> Self {
+        let tag = tag.into();
+        if !tag.is_empty() {
+            self.tags.push(tag);
+        }
         self
     }
 }
@@ -83,8 +123,44 @@ pub enum ChipSearchEvent {
     Hint(SharedString),
 }
 
-/// Rows shown before the list scrolls, at their usual height.
-const LIST_MAX_HEIGHT: f32 = 220.0;
+/// A row of the results: a group's header, or a result under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResultRow<'a> {
+    Header(&'a ChipGroup),
+    Item(&'a ChipItem),
+}
+
+/// The whole panel's height at most: about eight rows with the pills and the
+/// footer.
+const PANEL_MAX_HEIGHT: f32 = 340.0;
+/// The scrolling rows' height at least, however little room the window has.
+const MIN_SCROLL_HEIGHT: f32 = 64.0;
+/// Between the box and the panel.
+const LIST_GAP: f32 = 4.0;
+/// Kept clear between the panel and the window's edge.
+const WINDOW_MARGIN: f32 = 16.0;
+const ROW_HEIGHT: f32 = 32.0;
+const HEADER_HEIGHT: f32 = 28.0;
+const PILLS_HEIGHT: f32 = 38.0;
+const FOOTER_HEIGHT: f32 = 30.0;
+/// The panel's border, top and bottom.
+const PANEL_BORDER: f32 = 2.0;
+/// The icon column every row's text starts after.
+const ICON_SLOT: f32 = 16.0;
+const ICON_SIZE: f32 = 14.0;
+
+/// Whether the panel opens above the box, and how tall its scrolling rows may
+/// get. It opens below unless that leaves it short of its full height and
+/// above has more room; either way it keeps [`WINDOW_MARGIN`] from the edge.
+/// `chrome` is everything in the panel that does not scroll.
+fn placement(anchor: Bounds<Pixels>, viewport_height: Pixels, chrome: f32) -> (bool, f32) {
+    let below = f32::from(viewport_height - anchor.bottom()) - LIST_GAP - WINDOW_MARGIN;
+    let above = f32::from(anchor.top()) - LIST_GAP - WINDOW_MARGIN;
+    let up = below < PANEL_MAX_HEIGHT && above > below;
+    let room = if up { above } else { below };
+    let scroll = (room.min(PANEL_MAX_HEIGHT) - chrome).max(MIN_SCROLL_HEIGHT);
+    (up, scroll)
+}
 
 pub struct ChipSearch {
     id: SharedString,
@@ -95,8 +171,14 @@ pub struct ChipSearch {
     /// Index into [`Self::visible_results`].
     highlighted: usize,
     open: bool,
+    /// The group id the list is narrowed to; `None` for every group.
+    origin: Option<SharedString>,
     /// Said in the list when a search found nothing.
     empty_text: Option<SharedString>,
+    /// Where the box was last painted, which the floating list hangs from.
+    box_bounds: Option<Bounds<Pixels>>,
+    /// Where the floating list was last painted: a press there is not outside.
+    list_bounds: Option<Bounds<Pixels>>,
     scroll: ScrollHandle,
     _input_changed: Subscription,
 }
@@ -126,7 +208,10 @@ impl ChipSearch {
             chips: Vec::new(),
             highlighted: 0,
             open: false,
+            origin: None,
             empty_text: None,
+            box_bounds: None,
+            list_bounds: None,
             scroll: ScrollHandle::new(),
             _input_changed: input_changed,
         }
@@ -152,13 +237,13 @@ impl ChipSearch {
     /// picking.
     pub fn set_chips(&mut self, chips: Vec<ChipItem>, cx: &mut Context<Self>) {
         self.chips = chips;
-        self.clamp_highlight();
+        self.settle();
         cx.notify();
     }
 
     pub fn set_results(&mut self, results: Vec<ChipItem>, cx: &mut Context<Self>) {
         self.results = results;
-        self.clamp_highlight();
+        self.settle();
         cx.notify();
     }
 
@@ -167,16 +252,132 @@ impl ChipSearch {
         cx.notify();
     }
 
-    /// Results not already picked: an added item does not show again.
-    pub fn visible_results(&self) -> Vec<&ChipItem> {
+    /// Results not already picked, whatever group the list is narrowed to.
+    fn unpicked(&self) -> impl Iterator<Item = &ChipItem> {
         self.results
             .iter()
             .filter(|r| !self.chips.iter().any(|c| c.id == r.id))
+    }
+
+    /// The groups of the results not already picked, each with how many it
+    /// holds, in the order their first result ranks.
+    pub fn origins(&self) -> Vec<(&ChipGroup, usize)> {
+        let mut origins: Vec<(&ChipGroup, usize)> = Vec::new();
+        for group in self.unpicked().filter_map(|item| item.group.as_ref()) {
+            match origins.iter_mut().find(|(g, _)| g.id == group.id) {
+                Some((_, count)) => *count += 1,
+                None => origins.push((group, 1)),
+            }
+        }
+        origins
+    }
+
+    /// The group the list is narrowed to.
+    pub fn origin(&self) -> Option<&SharedString> {
+        self.origin.as_ref()
+    }
+
+    /// Narrow the list to one group, or show them all with `None`.
+    pub fn set_origin(&mut self, origin: Option<SharedString>, cx: &mut Context<Self>) {
+        self.origin = origin;
+        self.highlighted = 0;
+        self.settle();
+        self.scroll.scroll_to_item(self.highlighted_child());
+        cx.notify();
+    }
+
+    /// Step to the next group, or the previous with `back`, through "every
+    /// group" at either end.
+    fn cycle_origin(&mut self, back: bool, cx: &mut Context<Self>) {
+        let mut stops: Vec<Option<SharedString>> = vec![None];
+        stops.extend(self.origins().into_iter().map(|(g, _)| Some(g.id.clone())));
+        let at = stops.iter().position(|s| *s == self.origin).unwrap_or(0);
+        let next = if back {
+            (at + stops.len() - 1) % stops.len()
+        } else {
+            (at + 1) % stops.len()
+        };
+        self.set_origin(stops[next].clone(), cx);
+    }
+
+    /// Keep the filter and the highlight pointing at something that is still
+    /// listed: a group that has left the results goes back to every group.
+    fn settle(&mut self) {
+        if let Some(origin) = &self.origin
+            && !self.origins().iter().any(|(g, _)| &g.id == origin)
+        {
+            self.origin = None;
+        }
+        let len = self.visible_results().len();
+        self.highlighted = self.highlighted.min(len.saturating_sub(1));
+    }
+
+    /// The rows of the list: results not already picked, each group's under
+    /// its header. Groups come in the order their first result ranks, and
+    /// results keep their order within one. Results with no group are listed
+    /// the same way, without a header. Narrowed to one group, only its results
+    /// are listed, and the pills name it instead of a header.
+    fn rows(&self) -> Vec<ResultRow<'_>> {
+        let mut sections: Vec<(Option<&ChipGroup>, Vec<&ChipItem>)> = Vec::new();
+        for item in self.unpicked() {
+            let group = item.group.as_ref();
+            if let Some(origin) = &self.origin
+                && group.map(|g| &g.id) != Some(origin)
+            {
+                continue;
+            }
+            match sections
+                .iter_mut()
+                .find(|(g, _)| g.map(|g| &g.id) == group.map(|g| &g.id))
+            {
+                Some((_, items)) => items.push(item),
+                None => sections.push((group, vec![item])),
+            }
+        }
+        let headers = self.origin.is_none();
+        sections
+            .into_iter()
+            .flat_map(|(group, items)| {
+                group
+                    .filter(|_| headers)
+                    .map(ResultRow::Header)
+                    .into_iter()
+                    .chain(items.into_iter().map(ResultRow::Item))
+            })
+            .collect()
+    }
+
+    /// Results not already picked, in the order the list shows them: an added
+    /// item does not show again.
+    pub fn visible_results(&self) -> Vec<&ChipItem> {
+        self.rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                ResultRow::Item(item) => Some(item),
+                ResultRow::Header(_) => None,
+            })
             .collect()
     }
 
     pub fn highlighted(&self) -> Option<&ChipItem> {
         self.visible_results().get(self.highlighted).copied()
+    }
+
+    /// The highlighted result's position among the scrolling list's children:
+    /// past the hints, and past every header above it.
+    fn highlighted_child(&self) -> usize {
+        let mut seen = 0;
+        let row = self
+            .rows()
+            .iter()
+            .position(|row| {
+                if matches!(row, ResultRow::Item(_)) {
+                    seen += 1;
+                }
+                seen == self.highlighted + 1
+            })
+            .unwrap_or(0);
+        self.hints.len() + row
     }
 
     pub fn is_open(&self) -> bool {
@@ -213,7 +414,7 @@ impl ChipSearch {
         self.chips.push(item.clone());
         cx.emit(ChipSearchEvent::Added(item));
         self.input.update(cx, |input, cx| input.set_value("", cx));
-        self.clamp_highlight();
+        self.settle();
         cx.notify();
     }
 
@@ -225,14 +426,9 @@ impl ChipSearch {
         }
     }
 
-    fn clamp_highlight(&mut self) {
-        let len = self.visible_results().len();
-        self.highlighted = self.highlighted.min(len.saturating_sub(1));
-    }
-
-    /// Act on `key`. `true` when it meant something here, so it goes no
-    /// further.
-    fn handle_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+    /// Act on `key`, Shift held or not. `true` when it meant something here,
+    /// so it goes no further.
+    fn handle_key(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) -> bool {
         let len = self.visible_results().len();
         match key {
             "down" => {
@@ -240,8 +436,7 @@ impl ChipSearch {
                     self.open(cx);
                 } else if self.highlighted + 1 < len {
                     self.highlighted += 1;
-                    self.scroll
-                        .scroll_to_item(self.hints.len() + self.highlighted);
+                    self.scroll.scroll_to_item(self.highlighted_child());
                 }
                 cx.notify();
                 true
@@ -249,10 +444,13 @@ impl ChipSearch {
             "up" if self.open => {
                 if self.highlighted > 0 {
                     self.highlighted -= 1;
-                    self.scroll
-                        .scroll_to_item(self.hints.len() + self.highlighted);
+                    self.scroll.scroll_to_item(self.highlighted_child());
                     cx.notify();
                 }
+                true
+            }
+            "tab" if self.open && self.origins().len() > 1 => {
+                self.cycle_origin(shift, cx);
                 true
             }
             "enter" if self.open && len > 0 => {
@@ -328,27 +526,276 @@ impl ChipSearch {
             .into_any_element()
     }
 
-    fn render_list(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let visible: Vec<ChipItem> = self.visible_results().into_iter().cloned().collect();
-        let empty = visible.is_empty() && self.hints.is_empty();
-        if !self.open || (empty && self.empty_text.is_none()) {
-            return None;
-        }
+    /// The fixed column a row's text starts after, with `icon` in it.
+    fn icon_slot(icon: Option<SharedString>, color: u32) -> Div {
+        div()
+            .flex_shrink_0()
+            .w(px(ICON_SLOT))
+            .h(px(ICON_SLOT))
+            .flex()
+            .items_center()
+            .justify_center()
+            .children(icon.map(|path| svg().path(path).size(px(ICON_SIZE)).text_color(rgb(color))))
+    }
+
+    /// The pills that narrow the list to one group: every group first, then
+    /// each group with how many results it holds.
+    fn render_pills(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        let total = self.unpicked().count();
+        let mut stops: Vec<(
+            Option<SharedString>,
+            SharedString,
+            Option<SharedString>,
+            usize,
+        )> = vec![(None, "All".into(), None, total)];
+        stops.extend(
+            self.origins()
+                .into_iter()
+                .map(|(g, count)| (Some(g.id.clone()), g.name.clone(), g.icon.clone(), count)),
+        );
+        h_flex()
+            .id(SharedString::from(format!("{}-origins", self.id)))
+            .flex_shrink_0()
+            .w_full()
+            .h(px(PILLS_HEIGHT))
+            .px(px(8.0))
+            .gap(px(4.0))
+            .items_center()
+            .overflow_x_scroll()
+            .border_b_1()
+            .border_color(rgb(t.border))
+            .children(stops.into_iter().map(|(origin, name, icon, count)| {
+                let active = origin == self.origin;
+                let selector = format!("{}-origin-{}", self.id, origin.as_deref().unwrap_or("all"));
+                h_flex()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector.clone())
+                    .flex_shrink_0()
+                    .h(px(24.0))
+                    .px(px(8.0))
+                    .gap(px(5.0))
+                    .items_center()
+                    .rounded(px(12.0))
+                    .cursor_pointer()
+                    .text_size(ui_text_ms(cx))
+                    .when(active, |d| {
+                        d.bg(rgb(t.bg_selection)).text_color(rgb(t.text_primary))
+                    })
+                    .when(!active, |d| {
+                        d.text_color(rgb(t.text_secondary))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                    })
+                    .children(icon.map(|path| {
+                        svg().path(path).size(px(12.0)).text_color(rgb(if active {
+                            t.text_primary
+                        } else {
+                            t.text_muted
+                        }))
+                    }))
+                    .child(div().max_w(px(180.0)).truncate().child(name))
+                    .child(
+                        div()
+                            .text_size(ui_text_sm(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(count.to_string()),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.set_origin(origin.clone(), cx);
+                        }),
+                    )
+            }))
+            .into_any_element()
+    }
+
+    fn render_header(
+        &self,
+        group: &ChipGroup,
+        with_icons: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .h(px(HEADER_HEIGHT))
+            .flex_shrink_0()
+            .items_end()
+            .pb(px(4.0))
+            // Lined up with the rows' icons and text.
+            .px(px(14.0))
+            .gap(px(10.0))
+            .when(with_icons, |d| {
+                d.child(Self::icon_slot(group.icon.clone(), t.text_muted))
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_text_sm(cx))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(t.text_muted))
+                    .child(group.name.clone()),
+            )
+            .into_any_element()
+    }
+
+    fn render_item(
+        &self,
+        item: &ChipItem,
+        highlighted: bool,
+        with_icons: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let picked = item.clone();
+        let row_id = format!("{}-result-{}", self.id, item.id);
+        let kind = item.kind.clone();
+        h_flex()
+            .id(SharedString::from(row_id.clone()))
+            .debug_selector(move || row_id.clone())
+            .flex_shrink_0()
+            .h(px(ROW_HEIGHT))
+            .mx(px(6.0))
+            .px(px(8.0))
+            .gap(px(10.0))
+            .items_center()
+            .min_w_0()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .when(highlighted, |d| d.bg(rgb(t.bg_selection)))
+            .when(!highlighted, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+            .when(with_icons, |d| {
+                d.child(
+                    Self::icon_slot(
+                        item.icon.clone(),
+                        if highlighted {
+                            t.text_primary
+                        } else {
+                            t.text_secondary
+                        },
+                    )
+                    .id(SharedString::from(format!(
+                        "{}-result-{}-kind",
+                        self.id, item.id
+                    )))
+                    .when_some(kind, |d, kind| {
+                        d.tooltip(move |window, cx| Tooltip::new(kind.clone()).build(window, cx))
+                    }),
+                )
+            })
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(8.0))
+                    .items_baseline()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .max_w(relative(0.6))
+                            .truncate()
+                            .text_size(ui_text_md(cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(item.title.clone()),
+                    )
+                    .children(item.description.clone().map(|description| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(description)
+                    })),
+            )
+            .children(item.tags.iter().map(|tag| {
+                div()
+                    .flex_shrink_0()
+                    .max_w(px(160.0))
+                    .truncate()
+                    .px(px(6.0))
+                    .py(px(1.0))
+                    .rounded(px(4.0))
+                    .bg(with_alpha(t.text_primary, 0.06))
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_secondary))
+                    .child(tag.clone())
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.add(picked.clone(), cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// What the keys do, along the panel's bottom.
+    fn render_footer(&self, with_origins: bool, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let hint = |key: &'static str, label: &'static str| {
+            h_flex()
+                .gap(px(5.0))
+                .items_center()
+                .child(
+                    div()
+                        .px(px(5.0))
+                        .rounded(px(3.0))
+                        .bg(with_alpha(t.text_primary, 0.08))
+                        .text_color(rgb(t.text_secondary))
+                        .child(key),
+                )
+                .child(label)
+        };
+        h_flex()
+            .flex_shrink_0()
+            .w_full()
+            .h(px(FOOTER_HEIGHT))
+            .px(px(12.0))
+            .gap(px(14.0))
+            .items_center()
+            .border_t_1()
+            .border_color(rgb(t.border))
+            .bg(rgb(t.bg_secondary))
+            .text_size(ui_text_sm(cx))
+            .text_color(rgb(t.text_muted))
+            .child(hint("↑↓", "Navigate"))
+            .child(hint("↵", "Add"))
+            .when(with_origins, |d| d.child(hint("⇥", "Origin")))
+            .child(hint("esc", "Close"))
+            .into_any_element()
+    }
+
+    fn render_list(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows: Vec<ResultRow> = self.rows();
+        let empty = rows.is_empty() && self.hints.is_empty();
+        let anchor = self.box_bounds;
+        let (true, false, Some(anchor)) = (self.open, empty && self.empty_text.is_none(), anchor)
+        else {
+            self.list_bounds = None;
+            return None;
+        };
+        let t = theme(cx);
+        let with_icons = rows.iter().any(|row| match row {
+            ResultRow::Header(group) => group.icon.is_some(),
+            ResultRow::Item(item) => item.icon.is_some(),
+        });
+        let with_origins = self.origins().len() > 1;
+        let chrome = PANEL_BORDER + FOOTER_HEIGHT + if with_origins { PILLS_HEIGHT } else { 0.0 };
+        let (up, scroll_height) = placement(anchor, window.viewport_size().height, chrome);
+
         let mut list = v_flex()
             .id(SharedString::from(format!("{}-results", self.id)))
             .w_full()
-            .max_h(px(LIST_MAX_HEIGHT))
+            .max_h(px(scroll_height))
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
-            // The list scrolls on its own: without this the wheel also scrolled
-            // the dialog it sits in.
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .py(px(2.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(rgb(t.border))
-            .bg(rgb(t.bg_primary));
+            .py(px(4.0));
 
         for hint in &self.hints {
             let hint_id = hint.id.clone();
@@ -358,7 +805,7 @@ impl ChipSearch {
                     .min_w_0()
                     .items_center()
                     .gap(px(8.0))
-                    .px(px(12.0))
+                    .px(px(14.0))
                     .py(px(6.0))
                     .child(
                         div()
@@ -395,85 +842,77 @@ impl ChipSearch {
         if empty && let Some(text) = self.empty_text.clone() {
             list = list.child(
                 div()
-                    .px(px(12.0))
-                    .py(px(6.0))
+                    .px(px(14.0))
+                    .py(px(8.0))
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_muted))
                     .child(text),
             );
         }
 
-        for (i, item) in visible.into_iter().enumerate() {
-            let picked = item.clone();
-            list = list.child(
-                selectable_list_item(
-                    SharedString::from(format!("{}-result-{}", self.id, item.id)),
-                    i == self.highlighted,
-                    &t,
-                )
-                .w_full()
-                .min_w_0()
-                .py(px(5.0))
-                .child(
-                    v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap(px(1.0))
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .items_center()
-                                .gap(px(6.0))
-                                .children(item.kind.clone().map(|kind| {
-                                    div()
-                                        .flex_shrink_0()
-                                        .px(px(5.0))
-                                        .rounded(px(3.0))
-                                        .bg(rgb(t.bg_secondary))
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(kind)
-                                }))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(ui_text_md(cx))
-                                        .text_color(rgb(t.text_primary))
-                                        .child(item.title.clone()),
-                                )
-                                .children(item.owner.clone().map(|owner| {
-                                    div()
-                                        .flex_shrink_0()
-                                        .max_w(px(140.0))
-                                        .truncate()
-                                        .text_size(ui_text_ms(cx))
-                                        .text_color(rgb(t.text_muted))
-                                        .child(owner)
-                                })),
-                        )
-                        .children(item.description.clone().map(|description| {
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(ui_text_ms(cx))
-                                .text_color(rgb(t.text_secondary))
-                                .child(description)
-                        })),
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.add(picked.clone(), cx);
-                    }),
-                ),
-            );
+        let mut index = 0;
+        for row in rows {
+            list = list.child(match row {
+                ResultRow::Header(group) => self.render_header(group, with_icons, cx),
+                ResultRow::Item(item) => {
+                    let highlighted = index == self.highlighted;
+                    index += 1;
+                    self.render_item(item, highlighted, with_icons, cx)
+                }
+            });
         }
-        Some(list.into_any_element())
+
+        let this = cx.entity().downgrade();
+        let panel = v_flex()
+            .id(SharedString::from(format!("{}-results-panel", self.id)))
+            .occlude()
+            .w(anchor.size.width)
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(rgb(t.border))
+            .bg(rgb(t.bg_primary))
+            .shadow_xl()
+            .overflow_hidden()
+            // The list scrolls on its own: without this the wheel also scrolled
+            // the dialog under it.
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(with_origins, |d| d.child(self.render_pills(cx)))
+            .child(list)
+            .child(self.render_footer(with_origins, cx));
+        // Measured around the panel, not inside it, so its border counts.
+        let panel = div().relative().child(panel).child(
+            canvas(
+                move |bounds, _, cx| {
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, _| this.list_bounds = Some(bounds));
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            // Pinned to the corner: left to flow, it sat under the panel.
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
+
+        let anchored = if up {
+            anchored()
+                .anchor(Anchor::BottomLeft)
+                .position(point(anchor.origin.x, anchor.top() - px(LIST_GAP)))
+        } else {
+            anchored().position(point(anchor.origin.x, anchor.bottom() + px(LIST_GAP)))
+        };
+        Some(
+            deferred(
+                anchored
+                    .snap_to_window_with_margin(px(LIST_GAP))
+                    .child(panel),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
     }
 }
 
@@ -487,47 +926,95 @@ impl Render for ChipSearch {
             .iter()
             .map(|item| self.render_chip(item, cx))
             .collect();
-        let list = self.render_list(cx);
+        let list = self.render_list(window, cx);
+        let this = cx.entity().downgrade();
 
         v_flex()
             .id(self.id.clone())
             .w_full()
             .min_w_0()
-            .gap(px(4.0))
             // A press anywhere outside the box and its list closes the list.
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close(cx)))
+            // The list floats outside this element, so a press on it is let
+            // through here.
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                if this
+                    .list_bounds
+                    .is_some_and(|bounds| bounds.contains(&event.position))
+                {
+                    return;
+                }
+                this.close(cx);
+            }))
             .child(
-                crate::input::input_container(&t, Some(focused))
+                div()
+                    .relative()
                     .w_full()
                     .min_w_0()
-                    .px(px(6.0))
-                    .py(px(4.0))
                     .child(
-                        h_flex()
+                        crate::input::input_container(&t, Some(focused))
                             .w_full()
                             .min_w_0()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(4.0))
-                            .children(chips)
+                            .px(px(6.0))
+                            .py(px(4.0))
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(80.0))
-                                    .px(px(2.0))
-                                    .capture_key_down(cx.listener(
-                                        |this, event: &KeyDownEvent, _window, cx| {
-                                            if this.handle_key(&event.keystroke.key, cx) {
-                                                cx.stop_propagation();
-                                            }
-                                        },
-                                    ))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| this.open(cx)),
-                                    )
-                                    .child(SimpleInput::new(&self.input).text_size(ui_text_md(cx))),
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .children(chips)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(80.0))
+                                            .px(px(2.0))
+                                            .capture_key_down(cx.listener(
+                                                |this, event: &KeyDownEvent, _window, cx| {
+                                                    let keystroke = &event.keystroke;
+                                                    if this.handle_key(
+                                                        &keystroke.key,
+                                                        keystroke.modifiers.shift,
+                                                        cx,
+                                                    ) {
+                                                        cx.stop_propagation();
+                                                    }
+                                                },
+                                            ))
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| this.open(cx)),
+                                            )
+                                            .child(
+                                                SimpleInput::new(&self.input)
+                                                    .text_size(ui_text_md(cx)),
+                                            ),
+                                    ),
                             ),
+                    )
+                    // Where the list hangs from, measured around the box so
+                    // its border counts. Rendered again only when the box moved
+                    // or resized, which is rare and settles at once.
+                    .child(
+                        canvas(
+                            move |bounds, _, cx| {
+                                if let Some(this) = this.upgrade() {
+                                    this.update(cx, |this, cx| {
+                                        if this.box_bounds != Some(bounds) {
+                                            this.box_bounds = Some(bounds);
+                                            if this.open {
+                                                cx.notify();
+                                            }
+                                        }
+                                    });
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
                     ),
             )
             .children(list)
@@ -536,38 +1023,63 @@ impl Render for ChipSearch {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChipHint, ChipItem, ChipSearch, ChipSearchEvent};
+    use super::{
+        ChipGroup, ChipHint, ChipItem, ChipSearch, ChipSearchEvent, LIST_GAP, PANEL_MAX_HEIGHT,
+        ResultRow, WINDOW_MARGIN, placement,
+    };
     use gpui::prelude::*;
-    use gpui::{Context, Entity, TestAppContext, VisualTestContext, Window, div};
+    use gpui::{
+        Bounds, Context, Entity, TestAppContext, VisualTestContext, Window, div, point, px, size,
+    };
     use okena_theme::{DARK_THEME, GlobalThemeProvider};
     use std::cell::RefCell;
     use std::rc::Rc;
 
     struct TestRoot {
         search: Entity<ChipSearch>,
+        /// Height of the space above the search.
+        above: f32,
     }
 
     impl Render for TestRoot {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .w(gpui::px(400.0))
-                .child(self.search.clone())
-                // Somewhere to click that is not the search.
+                // Somewhere to click that is not the search, above it: the
+                // list floats over what is below.
                 .child(
                     div()
-                        .h(gpui::px(200.0))
+                        .h(gpui::px(self.above))
                         .debug_selector(|| "outside".to_string()),
                 )
+                .child(self.search.clone())
         }
     }
 
     type Events = Rc<RefCell<Vec<ChipSearchEvent>>>;
 
     fn draw(cx: &mut TestAppContext) -> (Entity<ChipSearch>, Events, &mut VisualTestContext) {
+        draw_with_space_above(cx, None)
+    }
+
+    /// With `Some(from_bottom)`, the search sits that far above the window's
+    /// bottom edge; otherwise near the top.
+    fn draw_with_space_above(
+        cx: &mut TestAppContext,
+        from_bottom: Option<f32>,
+    ) -> (Entity<ChipSearch>, Events, &mut VisualTestContext) {
         cx.update(|cx| cx.set_global(GlobalThemeProvider(|_| DARK_THEME)));
         let (root, vcx) = cx.add_window_view(|_window, cx| TestRoot {
             search: cx.new(|cx| ChipSearch::new("s", "Search", cx)),
+            above: 100.0,
         });
+        if let Some(from_bottom) = from_bottom {
+            let height = vcx.update(|window, _| f32::from(window.viewport_size().height));
+            root.update(vcx, |root, cx| {
+                root.above = height - from_bottom;
+                cx.notify();
+            });
+        }
         let search = root.read_with(vcx, |root, _| root.search.clone());
         let events: Events = Rc::default();
         let sink = events.clone();
@@ -589,6 +1101,46 @@ mod tests {
             .collect()
     }
 
+    fn group(id: &str) -> ChipGroup {
+        ChipGroup {
+            id: id.to_string().into(),
+            name: id.to_uppercase().into(),
+            icon: Some("icons/folder.svg".into()),
+        }
+    }
+
+    /// Ranked best first, owners interleaved: shop, then the knowledge store,
+    /// then shop again, then billing.
+    fn grouped_items() -> Vec<ChipItem> {
+        [
+            ("shop-map", "shop"),
+            ("kb-doc", "kb"),
+            ("shop-spec", "shop"),
+            ("billing-map", "billing"),
+            ("kb-skill", "kb"),
+        ]
+        .into_iter()
+        .map(|(id, owner)| {
+            ChipItem::new(id, id)
+                .icon("icons/map.svg")
+                .group(group(owner))
+                .tag("Spec")
+        })
+        .collect()
+    }
+
+    fn row_names(search: &Entity<ChipSearch>, vcx: &mut VisualTestContext) -> Vec<String> {
+        search.read_with(vcx, |s, _| {
+            s.rows()
+                .into_iter()
+                .map(|row| match row {
+                    ResultRow::Header(g) => format!("# {}", g.name),
+                    ResultRow::Item(i) => i.id.to_string(),
+                })
+                .collect()
+        })
+    }
+
     fn set_results(
         search: &Entity<ChipSearch>,
         vcx: &mut VisualTestContext,
@@ -602,6 +1154,26 @@ mod tests {
         search.read_with(vcx, |s, _| {
             s.chips().iter().map(|c| c.id.to_string()).collect()
         })
+    }
+
+    fn highlighted_id(search: &Entity<ChipSearch>, vcx: &mut VisualTestContext) -> Option<String> {
+        search.read_with(vcx, |s, _| s.highlighted().map(|h| h.id.to_string()))
+    }
+
+    fn origin(search: &Entity<ChipSearch>, vcx: &mut VisualTestContext) -> Option<String> {
+        search.read_with(vcx, |s, _| s.origin().map(|o| o.to_string()))
+    }
+
+    fn click(vcx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was painted"));
+        vcx.simulate_mouse_down(
+            bounds.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        vcx.run_until_parked();
     }
 
     #[gpui::test]
@@ -623,10 +1195,7 @@ mod tests {
         set_results(&search, vcx, items());
 
         vcx.simulate_keystrokes("down down up down");
-        assert_eq!(
-            search.read_with(vcx, |s, _| s.highlighted().map(|h| h.id.to_string())),
-            Some("search".into())
-        );
+        assert_eq!(highlighted_id(&search, vcx), Some("search".into()));
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
 
@@ -647,6 +1216,193 @@ mod tests {
                 .collect()
         });
         assert_eq!(visible, ["shop", "billing"]);
+    }
+
+    #[gpui::test]
+    fn results_are_grouped_under_headers_in_ranked_order(cx: &mut TestAppContext) {
+        let (search, _, vcx) = draw(cx);
+        vcx.simulate_input("s");
+        set_results(&search, vcx, grouped_items());
+        // Owners in the order their first item ranks; items in ranked order
+        // within their owner.
+        assert_eq!(
+            row_names(&search, vcx),
+            [
+                "# SHOP",
+                "shop-map",
+                "shop-spec",
+                "# KB",
+                "kb-doc",
+                "kb-skill",
+                "# BILLING",
+                "billing-map",
+            ]
+        );
+        // Results without a group get no header.
+        set_results(&search, vcx, items());
+        assert_eq!(row_names(&search, vcx), ["shop", "billing", "search"]);
+    }
+
+    #[gpui::test]
+    fn arrows_skip_headers_and_enter_adds_the_highlighted_item(cx: &mut TestAppContext) {
+        let (search, events, vcx) = draw(cx);
+        vcx.simulate_input("s");
+        set_results(&search, vcx, grouped_items());
+        search.update(vcx, |s, cx| {
+            s.set_hints(
+                vec![ChipHint {
+                    id: "p-shop".into(),
+                    text: "shop isn't mapped yet".into(),
+                    action: "Scan".into(),
+                }],
+                cx,
+            )
+        });
+        assert_eq!(highlighted_id(&search, vcx), Some("shop-map".into()));
+
+        // Across the KB header, and back over it.
+        vcx.simulate_keystrokes("down down");
+        assert_eq!(highlighted_id(&search, vcx), Some("kb-doc".into()));
+        // Scrolled to kb-doc's own child: the hint, two headers and two items
+        // come before it.
+        assert_eq!(search.read_with(vcx, |s, _| s.highlighted_child()), 5);
+        vcx.simulate_keystrokes("up");
+        assert_eq!(highlighted_id(&search, vcx), Some("shop-spec".into()));
+        vcx.simulate_keystrokes("down down down down down");
+        // The last item, never the header past kb-skill.
+        assert_eq!(highlighted_id(&search, vcx), Some("billing-map".into()));
+        assert_eq!(search.read_with(vcx, |s, _| s.highlighted_child()), 8);
+
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert_eq!(chip_ids(&search, vcx), ["billing-map"]);
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, ChipSearchEvent::Added(i) if i.id.as_ref() == "billing-map"))
+        );
+    }
+
+    #[gpui::test]
+    fn a_group_goes_when_its_last_visible_item_is_added(cx: &mut TestAppContext) {
+        let (search, _, vcx) = draw(cx);
+        vcx.simulate_input("s");
+        set_results(&search, vcx, grouped_items());
+        let billing = grouped_items()[3].clone();
+        search.update(vcx, |s, cx| s.add(billing, cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            row_names(&search, vcx),
+            [
+                "# SHOP",
+                "shop-map",
+                "shop-spec",
+                "# KB",
+                "kb-doc",
+                "kb-skill"
+            ]
+        );
+        // A group with an item left keeps its header.
+        let doc = grouped_items()[1].clone();
+        search.update(vcx, |s, cx| s.add(doc, cx));
+        assert_eq!(
+            row_names(&search, vcx),
+            ["# SHOP", "shop-map", "shop-spec", "# KB", "kb-skill"]
+        );
+    }
+
+    #[gpui::test]
+    fn origins_are_counted_and_one_narrows_the_list(cx: &mut TestAppContext) {
+        let (search, _, vcx) = draw(cx);
+        vcx.simulate_input("s");
+        set_results(&search, vcx, grouped_items());
+        let origins: Vec<(String, usize)> = search.read_with(vcx, |s, _| {
+            s.origins()
+                .into_iter()
+                .map(|(g, n)| (g.id.to_string(), n))
+                .collect()
+        });
+        assert_eq!(
+            origins,
+            [("shop".into(), 2), ("kb".into(), 2), ("billing".into(), 1)]
+        );
+
+        search.update(vcx, |s, cx| s.set_origin(Some("kb".into()), cx));
+        // Only its results, and no header: the pills already name it.
+        assert_eq!(row_names(&search, vcx), ["kb-doc", "kb-skill"]);
+        assert_eq!(highlighted_id(&search, vcx), Some("kb-doc".into()));
+        vcx.simulate_keystrokes("down enter");
+        vcx.run_until_parked();
+        assert_eq!(chip_ids(&search, vcx), ["kb-skill"]);
+        // Counts leave picked items out.
+        let kb = search.read_with(vcx, |s, _| {
+            s.origins()
+                .into_iter()
+                .find(|(g, _)| g.id.as_ref() == "kb")
+                .map(|(_, n)| n)
+        });
+        assert_eq!(kb, Some(1));
+    }
+
+    #[gpui::test]
+    fn tab_steps_through_origins_and_wraps(cx: &mut TestAppContext) {
+        let (search, _, vcx) = draw(cx);
+        vcx.simulate_input("s");
+        set_results(&search, vcx, grouped_items());
+        vcx.simulate_keystrokes("tab");
+        assert_eq!(origin(&search, vcx), Some("shop".into()));
+        vcx.simulate_keystrokes("tab tab");
+        assert_eq!(origin(&search, vcx), Some("billing".into()));
+        vcx.simulate_keystrokes("tab");
+        assert_eq!(origin(&search, vcx), None);
+        vcx.simulate_keystrokes("shift-tab");
+        assert_eq!(origin(&search, vcx), Some("billing".into()));
+        assert_eq!(highlighted_id(&search, vcx), Some("billing-map".into()));
+
+        // Closed, or with one origin, Tab is not ours.
+        search.update(vcx, |s, cx| s.close(cx));
+        assert!(!search.update(vcx, |s, cx| s.handle_key("tab", false, cx)));
+        search.update(vcx, |s, cx| s.open(cx));
+        set_results(&search, vcx, items());
+        assert!(!search.update(vcx, |s, cx| s.handle_key("tab", false, cx)));
+    }
+
+    #[gpui::test]
+    fn the_filter_falls_back_to_every_origin_when_its_own_leaves(cx: &mut TestAppContext) {
+        let (search, _, vcx) = draw(cx);
+        vcx.simulate_input("s");
+        set_results(&search, vcx, grouped_items());
+
+        // Its last item picked.
+        search.update(vcx, |s, cx| s.set_origin(Some("billing".into()), cx));
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert_eq!(chip_ids(&search, vcx), ["billing-map"]);
+        assert_eq!(origin(&search, vcx), None);
+        assert_eq!(row_names(&search, vcx)[0], "# SHOP");
+
+        // A new search without it.
+        search.update(vcx, |s, cx| s.set_origin(Some("kb".into()), cx));
+        let shop_only: Vec<ChipItem> = grouped_items()
+            .into_iter()
+            .filter(|i| i.id.starts_with("shop"))
+            .collect();
+        set_results(&search, vcx, shop_only);
+        assert_eq!(origin(&search, vcx), None);
+        assert_eq!(row_names(&search, vcx), ["# SHOP", "shop-map", "shop-spec"]);
+    }
+
+    #[gpui::test]
+    fn clicking_an_origin_pill_narrows_the_floating_list(cx: &mut TestAppContext) {
+        let (search, _, vcx) = draw(cx);
+        search.update(vcx, |s, cx| s.open(cx));
+        set_results(&search, vcx, grouped_items());
+        click(vcx, "s-origin-kb");
+        assert_eq!(origin(&search, vcx), Some("kb".into()));
+        assert!(search.read_with(vcx, |s, _| s.is_open()));
+        click(vcx, "s-origin-all");
+        assert_eq!(origin(&search, vcx), None);
     }
 
     #[gpui::test]
@@ -693,12 +1449,12 @@ mod tests {
         vcx.simulate_input("s");
         set_results(&search, vcx, items());
         assert!(search.read_with(vcx, |s, _| s.is_open()));
-        let handled = search.update(vcx, |s, cx| s.handle_key("escape", cx));
+        let handled = search.update(vcx, |s, cx| s.handle_key("escape", false, cx));
         assert!(handled);
         assert!(!search.read_with(vcx, |s, _| s.is_open()));
         // Closed: a second Esc is not ours, so the dialog around can close.
-        assert!(!search.update(vcx, |s, cx| s.handle_key("escape", cx)));
-        assert!(!search.update(vcx, |s, cx| s.handle_key("enter", cx)));
+        assert!(!search.update(vcx, |s, cx| s.handle_key("escape", false, cx)));
+        assert!(!search.update(vcx, |s, cx| s.handle_key("enter", false, cx)));
     }
 
     #[gpui::test]
@@ -730,21 +1486,79 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_press_outside_closes_the_list(cx: &mut TestAppContext) {
+    fn a_press_outside_closes_the_floating_list(cx: &mut TestAppContext) {
         let (search, _, vcx) = draw(cx);
         vcx.simulate_input("s");
-        set_results(&search, vcx, items());
+        set_results(&search, vcx, grouped_items());
         assert!(search.read_with(vcx, |s, _| s.is_open()));
-        let outside = vcx
-            .debug_bounds("outside")
-            .expect("outside bounds recorded");
-        vcx.simulate_mouse_down(
-            outside.center(),
-            gpui::MouseButton::Left,
-            gpui::Modifiers::default(),
-        );
-        vcx.run_until_parked();
+        // It is drawn, and outside the search's own bounds.
+        let list = search
+            .read_with(vcx, |s, _| s.list_bounds)
+            .expect("the floating list was painted");
+        let boxed = search
+            .read_with(vcx, |s, _| s.box_bounds)
+            .expect("the box was painted");
+        assert!(list.top() >= boxed.bottom());
+        // Hung right under the box, as wide as it.
+        assert!(list.top() - boxed.bottom() <= gpui::px(super::LIST_GAP + 1.0));
+        assert_eq!(list.size.width, boxed.size.width);
+        click(vcx, "outside");
         assert!(!search.read_with(vcx, |s, _| s.is_open()));
+        assert!(search.read_with(vcx, |s, _| s.list_bounds.is_none()));
+    }
+
+    #[gpui::test]
+    fn clicking_a_floating_row_adds_it_and_keeps_the_list_open(cx: &mut TestAppContext) {
+        let (search, _, vcx) = draw(cx);
+        // Opened with an empty box: typed text would reopen the list when the
+        // add clears it, hiding a press on the row closing it.
+        search.update(vcx, |s, cx| s.open(cx));
+        set_results(&search, vcx, grouped_items());
+        click(vcx, "s-result-kb-doc");
+        assert_eq!(chip_ids(&search, vcx), ["kb-doc"]);
+        assert!(search.read_with(vcx, |s, _| s.is_open()));
+    }
+
+    #[test]
+    fn the_panel_opens_below_unless_above_has_more_room() {
+        let viewport = px(1000.0);
+        let chrome = 70.0;
+        let at = |top: f32| Bounds::new(point(px(0.0), px(top)), size(px(400.0), px(32.0)));
+
+        // Plenty of room below: below, at its full height.
+        let (up, scroll) = placement(at(100.0), viewport, chrome);
+        assert!(!up);
+        assert_eq!(scroll, PANEL_MAX_HEIGHT - chrome);
+
+        // Near the bottom, with more room above: above.
+        let (up, scroll) = placement(at(850.0), viewport, chrome);
+        assert!(up);
+        assert_eq!(scroll, PANEL_MAX_HEIGHT - chrome);
+
+        // Short both ways: the roomier side, shrunk to stay off the edge.
+        let short = px(300.0);
+        let (up, scroll) = placement(at(60.0), short, chrome);
+        let below = 300.0 - 92.0 - LIST_GAP - WINDOW_MARGIN;
+        assert!(!up);
+        assert_eq!(scroll, below - chrome);
+    }
+
+    #[gpui::test]
+    fn the_list_opens_above_a_box_near_the_windows_bottom(cx: &mut TestAppContext) {
+        let (search, _, vcx) = draw_with_space_above(cx, Some(120.0));
+        let many: Vec<ChipItem> = (0..40)
+            .map(|i| ChipItem::new(format!("p{i}"), format!("project {i}")))
+            .collect();
+        search.update(vcx, |s, cx| s.open(cx));
+        set_results(&search, vcx, many);
+        let list = search
+            .read_with(vcx, |s, _| s.list_bounds)
+            .expect("the floating list was painted");
+        let boxed = search
+            .read_with(vcx, |s, _| s.box_bounds)
+            .expect("the box was painted");
+        assert!(list.bottom() <= boxed.top(), "{list:?} above {boxed:?}");
+        assert!(f32::from(list.size.height) <= PANEL_MAX_HEIGHT + 0.5);
     }
 
     #[gpui::test]
@@ -755,23 +1569,24 @@ mod tests {
             .collect();
         vcx.simulate_input("p");
         set_results(&search, vcx, many);
+        // Never taller than the cap, and clear of the window's bottom.
+        let list = search
+            .read_with(vcx, |s, _| s.list_bounds)
+            .expect("the floating list was painted");
+        let height = vcx.update(|window, _| window.viewport_size().height);
+        assert!(f32::from(list.size.height) <= PANEL_MAX_HEIGHT + 0.5);
+        assert!(f32::from(height - list.bottom()) >= WINDOW_MARGIN - 0.5);
         // Driven directly rather than as 150 simulated keystrokes: those take
         // long enough for the input's cursor-blink timer to fire on smol's
         // reactor thread, which the test scheduler does not allow.
         search.update(vcx, |s, cx| {
             for _ in 0..150 {
-                s.handle_key("down", cx);
+                s.handle_key("down", false, cx);
             }
         });
-        assert_eq!(
-            search.read_with(vcx, |s, _| s.highlighted().map(|h| h.id.to_string())),
-            Some("p149".into())
-        );
+        assert_eq!(highlighted_id(&search, vcx), Some("p149".into()));
         // Past the end it stays on the last.
-        search.update(vcx, |s, cx| s.handle_key("down", cx));
-        assert_eq!(
-            search.read_with(vcx, |s, _| s.highlighted().map(|h| h.id.to_string())),
-            Some("p149".into())
-        );
+        search.update(vcx, |s, cx| s.handle_key("down", false, cx));
+        assert_eq!(highlighted_id(&search, vcx), Some("p149".into()));
     }
 }
