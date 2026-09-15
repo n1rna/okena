@@ -15,6 +15,10 @@
 //! first result ranks, and with more than one group a row of pills on top
 //! narrows the list to one.
 //!
+//! Built with [`ChipSearch::menu`] it is a menu instead (QBL-414): a button
+//! opens the same panel with the search box on top, and picking a result hands
+//! it back as [`ChipSearchEvent::Picked`] and closes, keeping no chips.
+//!
 //! Keyboard: ↑/↓ move through results, Enter adds the highlighted one, Tab and
 //! Shift-Tab step through the groups, Backspace in an empty box removes the
 //! last chip, Esc closes the list. They are taken in the capture phase, before
@@ -119,6 +123,8 @@ pub enum ChipSearchEvent {
     QueryChanged(String),
     Added(ChipItem),
     Removed(ChipItem),
+    /// A menu's result was picked. The menu has closed.
+    Picked(ChipItem),
     /// A hint's action was clicked.
     Hint(SharedString),
 }
@@ -148,6 +154,10 @@ const PANEL_BORDER: f32 = 2.0;
 /// The icon column every row's text starts after.
 const ICON_SLOT: f32 = 16.0;
 const ICON_SIZE: f32 = 14.0;
+/// A menu's panel width at least: its button is far narrower than a box.
+const MENU_WIDTH: f32 = 440.0;
+/// The search box on top of a menu's panel.
+const MENU_SEARCH_HEIGHT: f32 = 44.0;
 
 /// Whether the panel opens above the box, and how tall its scrolling rows may
 /// get. It opens below unless that leaves it short of its full height and
@@ -175,7 +185,10 @@ pub struct ChipSearch {
     origin: Option<SharedString>,
     /// Said in the list when a search found nothing.
     empty_text: Option<SharedString>,
-    /// Where the box was last painted, which the floating list hangs from.
+    /// A menu's button label: set, picking opens rather than adds.
+    menu: Option<SharedString>,
+    /// Where the box (a menu's button) was last painted, which the floating
+    /// list hangs from.
     box_bounds: Option<Bounds<Pixels>>,
     /// Where the floating list was last painted: a press there is not outside.
     list_bounds: Option<Bounds<Pixels>>,
@@ -195,6 +208,12 @@ impl ChipSearch {
         let input = cx.new(|cx| SimpleInputState::new(cx).placeholder(placeholder));
         let input_changed = cx.subscribe(&input, |this, input, _: &InputChangedEvent, cx| {
             let query = input.read(cx).value().to_string();
+            // A closed menu emptied its box on a pick: that must not reopen
+            // it, and nobody typed into a panel that is not drawn.
+            if this.menu.is_some() && !this.open && query.is_empty() {
+                cx.emit(ChipSearchEvent::QueryChanged(query));
+                return;
+            }
             this.open = true;
             this.highlighted = 0;
             cx.emit(ChipSearchEvent::QueryChanged(query));
@@ -210,6 +229,7 @@ impl ChipSearch {
             open: false,
             origin: None,
             empty_text: None,
+            menu: None,
             box_bounds: None,
             list_bounds: None,
             scroll: ScrollHandle::new(),
@@ -222,6 +242,23 @@ impl ChipSearch {
     pub fn empty_text(mut self, text: impl Into<SharedString>) -> Self {
         self.empty_text = Some(text.into());
         self
+    }
+
+    /// Make this a menu behind a button labelled `label`: the search box moves
+    /// into the panel, and picking a result emits [`ChipSearchEvent::Picked`]
+    /// and closes instead of adding a chip.
+    pub fn menu(mut self, label: impl Into<SharedString>) -> Self {
+        self.menu = Some(label.into());
+        self
+    }
+
+    /// Relabel a menu's button, e.g. when the count on it changes.
+    pub fn set_menu_label(&mut self, label: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let label = label.into();
+        if self.menu.as_ref() != Some(&label) {
+            self.menu = Some(label);
+            cx.notify();
+        }
     }
 
     pub fn query(&self, cx: &App) -> String {
@@ -418,6 +455,19 @@ impl ChipSearch {
         cx.notify();
     }
 
+    /// What choosing a result does: a menu hands it back and closes, a chip
+    /// search adds it.
+    fn pick(&mut self, item: ChipItem, cx: &mut Context<Self>) {
+        if self.menu.is_none() {
+            self.add(item, cx);
+            return;
+        }
+        self.open = false;
+        cx.emit(ChipSearchEvent::Picked(item));
+        self.input.update(cx, |input, cx| input.set_value("", cx));
+        cx.notify();
+    }
+
     pub fn remove(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(at) = self.chips.iter().position(|c| c.id.as_ref() == id) {
             let item = self.chips.remove(at);
@@ -455,7 +505,7 @@ impl ChipSearch {
             }
             "enter" if self.open && len > 0 => {
                 if let Some(item) = self.highlighted().cloned() {
-                    self.add(item, cx);
+                    self.pick(item, cx);
                 }
                 true
             }
@@ -729,7 +779,7 @@ impl ChipSearch {
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.add(picked.clone(), cx);
+                    this.pick(picked.clone(), cx);
                 }),
             )
             .into_any_element()
@@ -765,7 +815,7 @@ impl ChipSearch {
             .text_size(ui_text_sm(cx))
             .text_color(rgb(t.text_muted))
             .child(hint("↑↓", "Navigate"))
-            .child(hint("↵", "Add"))
+            .child(hint("↵", if self.menu.is_some() { "Open" } else { "Add" }))
             .when(with_origins, |d| d.child(hint("⇥", "Origin")))
             .child(hint("esc", "Close"))
             .into_any_element()
@@ -775,8 +825,9 @@ impl ChipSearch {
         let rows: Vec<ResultRow> = self.rows();
         let empty = rows.is_empty() && self.hints.is_empty();
         let anchor = self.box_bounds;
-        let (true, false, Some(anchor)) = (self.open, empty && self.empty_text.is_none(), anchor)
-        else {
+        // A menu opens even on nothing: its search box is in the panel.
+        let silent = empty && self.empty_text.is_none() && self.menu.is_none();
+        let (true, false, Some(anchor)) = (self.open, silent, anchor) else {
             self.list_bounds = None;
             return None;
         };
@@ -786,7 +837,33 @@ impl ChipSearch {
             ResultRow::Item(item) => item.icon.is_some(),
         });
         let with_origins = self.origins().len() > 1;
-        let chrome = PANEL_BORDER + FOOTER_HEIGHT + if with_origins { PILLS_HEIGHT } else { 0.0 };
+        let search = self.menu.is_some().then(|| {
+            div()
+                .flex_shrink_0()
+                .w_full()
+                .h(px(MENU_SEARCH_HEIGHT))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(rgb(t.border))
+                .child(
+                    crate::input::input_container(&t, Some(self.is_input_focused(window, cx)))
+                        .w_full()
+                        .px(px(6.0))
+                        .py(px(4.0))
+                        .child(self.render_input(cx)),
+                )
+        });
+        let width = if self.menu.is_some() {
+            anchor.size.width.max(px(MENU_WIDTH))
+        } else {
+            anchor.size.width
+        };
+        let chrome = PANEL_BORDER
+            + FOOTER_HEIGHT
+            + if with_origins { PILLS_HEIGHT } else { 0.0 }
+            + if search.is_some() { MENU_SEARCH_HEIGHT } else { 0.0 };
         let (up, scroll_height) = placement(anchor, window.viewport_size().height, chrome);
 
         let mut list = v_flex()
@@ -866,7 +943,7 @@ impl ChipSearch {
         let panel = v_flex()
             .id(SharedString::from(format!("{}-results-panel", self.id)))
             .occlude()
-            .w(anchor.size.width)
+            .w(width)
             .rounded(px(10.0))
             .border_1()
             .border_color(rgb(t.border))
@@ -877,6 +954,7 @@ impl ChipSearch {
             // the dialog under it.
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .children(search)
             .when(with_origins, |d| d.child(self.render_pills(cx)))
             .child(list)
             .child(self.render_footer(with_origins, cx));
@@ -916,10 +994,135 @@ impl ChipSearch {
     }
 }
 
+impl ChipSearch {
+    fn is_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.input.read(cx).focus_handle(cx).is_focused(window)
+    }
+
+    /// The text input, taking the keys that mean something to the list.
+    fn render_input(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex_1()
+            .min_w(px(80.0))
+            .px(px(2.0))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                let keystroke = &event.keystroke;
+                if this.handle_key(&keystroke.key, keystroke.modifiers.shift, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.open(cx)),
+            )
+            .child(SimpleInput::new(&self.input).text_size(ui_text_md(cx)))
+    }
+
+    /// Where the list hangs from, measured around the box (or a menu's
+    /// button) so its border counts. Rendered again only when that moved or
+    /// resized, which is rare and settles at once.
+    fn anchor_canvas(&self, cx: &mut Context<Self>) -> AnyElement {
+        let this = cx.entity().downgrade();
+        canvas(
+            move |bounds, _, cx| {
+                if let Some(this) = this.upgrade() {
+                    this.update(cx, |this, cx| {
+                        if this.box_bounds != Some(bounds) {
+                            this.box_bounds = Some(bounds);
+                            if this.open {
+                                cx.notify();
+                            }
+                        }
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
+    }
+
+    /// A press anywhere outside the box and its list closes the list. The
+    /// list floats outside the element this is on, so a press on it is let
+    /// through.
+    fn close_on_press_outside(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+            if this
+                .list_bounds
+                .is_some_and(|bounds| bounds.contains(&event.position))
+            {
+                return;
+            }
+            this.close(cx);
+        })
+    }
+
+    /// A menu's button: it opens the panel, with the search box focused.
+    fn render_menu_button(
+        &mut self,
+        label: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let open = self.open;
+        let list = self.render_list(window, cx);
+        let selector = format!("{}-trigger", self.id);
+        div()
+            .id(self.id.clone())
+            .flex_shrink_0()
+            .on_mouse_down_out(self.close_on_press_outside(cx))
+            .child(
+                div()
+                    .relative()
+                    .child(
+                        h_flex()
+                            .id(SharedString::from(selector.clone()))
+                            .debug_selector(move || selector.clone())
+                            .cursor_pointer()
+                            .h(px(24.0))
+                            .px(px(10.0))
+                            .gap(px(6.0))
+                            .items_center()
+                            .rounded(px(4.0))
+                            .bg(rgb(if open { t.bg_selection } else { t.bg_secondary }))
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_primary))
+                            .child(label)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    if this.open {
+                                        this.close(cx);
+                                    } else {
+                                        this.open(cx);
+                                        this.focus(window, cx);
+                                    }
+                                }),
+                            ),
+                    )
+                    .child(self.anchor_canvas(cx)),
+            )
+            .children(list)
+            .into_any_element()
+    }
+}
+
 impl Render for ChipSearch {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(label) = self.menu.clone() {
+            return self.render_menu_button(label, window, cx);
+        }
         let t = theme(cx);
-        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let focused = self.is_input_focused(window, cx);
         let chips: Vec<AnyElement> = self
             .chips
             .clone()
@@ -927,24 +1130,12 @@ impl Render for ChipSearch {
             .map(|item| self.render_chip(item, cx))
             .collect();
         let list = self.render_list(window, cx);
-        let this = cx.entity().downgrade();
 
         v_flex()
             .id(self.id.clone())
             .w_full()
             .min_w_0()
-            // A press anywhere outside the box and its list closes the list.
-            // The list floats outside this element, so a press on it is let
-            // through here.
-            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                if this
-                    .list_bounds
-                    .is_some_and(|bounds| bounds.contains(&event.position))
-                {
-                    return;
-                }
-                this.close(cx);
-            }))
+            .on_mouse_down_out(self.close_on_press_outside(cx))
             .child(
                 div()
                     .relative()
@@ -964,60 +1155,13 @@ impl Render for ChipSearch {
                                     .items_center()
                                     .gap(px(4.0))
                                     .children(chips)
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(80.0))
-                                            .px(px(2.0))
-                                            .capture_key_down(cx.listener(
-                                                |this, event: &KeyDownEvent, _window, cx| {
-                                                    let keystroke = &event.keystroke;
-                                                    if this.handle_key(
-                                                        &keystroke.key,
-                                                        keystroke.modifiers.shift,
-                                                        cx,
-                                                    ) {
-                                                        cx.stop_propagation();
-                                                    }
-                                                },
-                                            ))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| this.open(cx)),
-                                            )
-                                            .child(
-                                                SimpleInput::new(&self.input)
-                                                    .text_size(ui_text_md(cx)),
-                                            ),
-                                    ),
+                                    .child(self.render_input(cx)),
                             ),
                     )
-                    // Where the list hangs from, measured around the box so
-                    // its border counts. Rendered again only when the box moved
-                    // or resized, which is rare and settles at once.
-                    .child(
-                        canvas(
-                            move |bounds, _, cx| {
-                                if let Some(this) = this.upgrade() {
-                                    this.update(cx, |this, cx| {
-                                        if this.box_bounds != Some(bounds) {
-                                            this.box_bounds = Some(bounds);
-                                            if this.open {
-                                                cx.notify();
-                                            }
-                                        }
-                                    });
-                                }
-                            },
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
-                    ),
+                    .child(self.anchor_canvas(cx)),
             )
             .children(list)
+            .into_any_element()
     }
 }
 
@@ -1517,6 +1661,110 @@ mod tests {
         click(vcx, "s-result-kb-doc");
         assert_eq!(chip_ids(&search, vcx), ["kb-doc"]);
         assert!(search.read_with(vcx, |s, _| s.is_open()));
+    }
+
+    /// A menu behind a button, drawn near the top of the window.
+    fn draw_menu(cx: &mut TestAppContext) -> (Entity<ChipSearch>, Events, &mut VisualTestContext) {
+        cx.update(|cx| cx.set_global(GlobalThemeProvider(|_| DARK_THEME)));
+        let (root, vcx) = cx.add_window_view(|_window, cx| TestRoot {
+            search: cx.new(|cx| ChipSearch::new("s", "Search", cx).menu("Browse · 5")),
+            above: 100.0,
+        });
+        let search = root.read_with(vcx, |root, _| root.search.clone());
+        let events: Events = Rc::default();
+        let sink = events.clone();
+        vcx.update(|_, cx| {
+            cx.subscribe(&search, move |_, event: &ChipSearchEvent, _| {
+                sink.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        vcx.run_until_parked();
+        (search, events, vcx)
+    }
+
+    fn picked(events: &Events) -> Vec<String> {
+        events
+            .borrow()
+            .iter()
+            .filter_map(|e| match e {
+                ChipSearchEvent::Picked(i) => Some(i.id.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn a_menu_opens_from_its_button_and_enter_emits_the_pick_and_closes(
+        cx: &mut TestAppContext,
+    ) {
+        let (search, events, vcx) = draw_menu(cx);
+        assert!(!search.read_with(vcx, |s, _| s.is_open()));
+        click(vcx, "s-trigger");
+        assert!(search.read_with(vcx, |s, _| s.is_open()));
+        set_results(&search, vcx, grouped_items());
+
+        // Typed into the panel's own box, which the button focused.
+        vcx.simulate_input("s");
+        vcx.run_until_parked();
+        assert!(search.read_with(vcx, |s, _| s.is_open()));
+        vcx.simulate_keystrokes("down enter");
+        vcx.run_until_parked();
+
+        assert_eq!(picked(&events), ["shop-spec"]);
+        assert!(chip_ids(&search, vcx).is_empty(), "a menu keeps no chips");
+        assert!(
+            !events
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, ChipSearchEvent::Added(_))),
+            "and adds nothing"
+        );
+        assert!(!search.read_with(vcx, |s, _| s.is_open()));
+        assert!(search.read_with(vcx, |s, _| s.list_bounds.is_none()));
+        assert_eq!(search.read_with(vcx, |s, cx| s.query(cx)), "");
+        // Picked, the item is still listed the next time it opens.
+        click(vcx, "s-trigger");
+        let visible = search.read_with(vcx, |s, _| s.visible_results().len());
+        assert_eq!(visible, grouped_items().len());
+    }
+
+    #[gpui::test]
+    fn clicking_a_menu_row_emits_the_pick_and_closes(cx: &mut TestAppContext) {
+        let (search, events, vcx) = draw_menu(cx);
+        click(vcx, "s-trigger");
+        set_results(&search, vcx, grouped_items());
+        click(vcx, "s-result-kb-doc");
+        assert_eq!(picked(&events), ["kb-doc"]);
+        assert!(chip_ids(&search, vcx).is_empty());
+        assert!(!search.read_with(vcx, |s, _| s.is_open()));
+    }
+
+    #[gpui::test]
+    fn a_menus_panel_is_wider_than_its_button_and_stays_in_the_window(
+        cx: &mut TestAppContext,
+    ) {
+        let (search, _, vcx) = draw_menu(cx);
+        click(vcx, "s-trigger");
+        set_results(&search, vcx, grouped_items());
+        let list = search
+            .read_with(vcx, |s, _| s.list_bounds)
+            .expect("the menu's panel was painted");
+        let button = search
+            .read_with(vcx, |s, _| s.box_bounds)
+            .expect("the button was painted");
+        assert!(list.size.width > button.size.width);
+        assert!(list.top() >= button.bottom());
+        let viewport = vcx.update(|window, _| window.viewport_size());
+        assert!(list.right() <= viewport.width, "{list:?} in {viewport:?}");
+        assert!(list.bottom() <= viewport.height);
+        // Escape closes it; a press on the button again toggles it.
+        search.update(vcx, |s, cx| s.handle_key("escape", false, cx));
+        assert!(!search.read_with(vcx, |s, _| s.is_open()));
+        click(vcx, "s-trigger");
+        assert!(search.read_with(vcx, |s, _| s.is_open()));
+        click(vcx, "s-trigger");
+        assert!(!search.read_with(vcx, |s, _| s.is_open()));
     }
 
     #[test]
