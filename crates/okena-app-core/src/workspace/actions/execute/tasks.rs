@@ -437,6 +437,9 @@ fn agent_shell(
     shape: Option<&BriefShape>,
     prompts: &PromptRoots,
     context_items: &[okena_core::context::ContextItem],
+    // Whether `context` lists worktrees cut for this work, or the repos
+    // themselves. The brief must not call a shared checkout a worktree.
+    worktrees: bool,
 ) -> Option<okena_terminal::shell_config::ShellType> {
     // An explicit override wins, including an explicit empty string, which is
     // how a caller says "worktrees only" despite a configured default.
@@ -465,6 +468,7 @@ fn agent_shell(
         context_items,
         install.loaded(),
         prompts,
+        worktrees,
     );
     // Named, so a restart can resume this exact conversation, then the agent's
     // own options. Both before the brief rather than after: a flag after a
@@ -757,6 +761,8 @@ pub(super) fn start_work(
 
     // ── Worktrees, one per task per assigned project ─────────────────────────
     let mut created: Vec<serde_json::Value> = Vec::new();
+    // Projects that were never candidates: not a checkout, so nothing to cut.
+    let mut skipped: Vec<serde_json::Value> = Vec::new();
 
     for (work_task, work_branch) in &work {
         let work_ref = okena_core::tasks::TaskRef::from(work_task);
@@ -772,6 +778,22 @@ pub(super) fn start_work(
             } else {
                 project_name.clone()
             };
+
+            // Asked first: outside a repository `git worktree add` exits 128,
+            // and a project pointed at a projects root is a plain directory.
+            let project_path = ws
+                .project(project_id)
+                .map(|p| p.path.clone())
+                .unwrap_or_default();
+            if let Some(reason) = worktree_skip_reason(&project_path) {
+                skipped.push(serde_json::json!({
+                    "task": work_task.display_key,
+                    "project": label,
+                    "path": project_path,
+                    "reason": reason,
+                }));
+                continue;
+            }
 
             let result = super::project::create_worktree(
                 ws,
@@ -834,7 +856,7 @@ pub(super) fn start_work(
         }
     }
 
-    if !lone_coordinator && created.is_empty() {
+    if no_worktrees_is_fatal(lone_coordinator, &created, &failed) {
         let detail = failed
             .iter()
             .filter_map(|f| {
@@ -883,7 +905,11 @@ pub(super) fn start_work(
         }
     });
     let shape = coordination.or(group);
-    let context: &[(String, String)] = if lone_coordinator { &given } else { &worktrees };
+    // With no worktree of its own the agent is given the repos instead, and
+    // must be told that is what they are: briefed as worktrees, it would take a
+    // shared checkout for its own task branch and commit there.
+    let has_worktrees = !worktrees.is_empty();
+    let context: &[(String, String)] = if has_worktrees { &worktrees } else { &given };
     let shell = agent_shell(
         settings,
         agent_command.as_deref(),
@@ -894,12 +920,18 @@ pub(super) fn start_work(
         shape.as_ref(),
         &prompts,
         &context_items,
+        has_worktrees,
     );
     let mut agent_session: Option<serde_json::Value> = None;
     // No agent and one worktree: nothing would run in a session, so there is
     // no session. Several worktrees still get one — it is the place above
     // them — and a coordinator always does: it is the whole of what starts.
-    let wants_session = lone_coordinator || shell.is_some() || created.len() > 1;
+    // Nothing was cut and nothing failed: every project was a plain directory.
+    // The session is then the only thing this start produces, so it must exist
+    // — otherwise the call reports success having done nothing at all.
+    let nothing_to_cut = created.is_empty() && !skipped.is_empty();
+    let wants_session =
+        lone_coordinator || shell.is_some() || created.len() > 1 || nothing_to_cut;
     let root = if lone_coordinator {
         let paths: Vec<String> = given.iter().map(|(_, path)| path.clone()).collect();
         coordinator_root(agent_root, &paths, settings)
@@ -935,7 +967,7 @@ pub(super) fn start_work(
                     p.agent_purpose = Some(okena_core::harness::AgentPurpose::Work);
                     // With no worktree to say which repos it was given, a
                     // coordinator keeps them: its agents start there.
-                    if lone_coordinator {
+                    if lone_coordinator || nothing_to_cut {
                         p.repo_ids = project_ids.clone();
                     }
                     // The repositories, not their worktrees: the stores a
@@ -988,9 +1020,35 @@ pub(super) fn start_work(
         "branch": (!branch.is_empty()).then_some(branch),
         "branches": branches,
         "created": created,
+        // Reported, not silent: the caller sees why there is no worktree.
+        "skipped": skipped,
         "failed": failed,
         "agent_session": agent_session,
     })))
+}
+
+/// Why this project cannot be given a worktree, if it cannot.
+///
+/// A projects root is a plain directory holding repositories, not a checkout of
+/// one. `git worktree add` there exits 128, so such a project is skipped up
+/// front rather than driven into a call that cannot succeed.
+fn worktree_skip_reason(path: &str) -> Option<String> {
+    okena_git::get_repo_root(std::path::Path::new(path))
+        .is_none()
+        .then(|| "not a git repository".to_string())
+}
+
+/// Whether cutting no worktrees should fail the whole start.
+///
+/// Only when one was meant to be cut and could not. Having nothing to cut —
+/// every assigned project a plain directory — is what a coordinator has always
+/// done: the start goes ahead and the agent works in the repos themselves.
+fn no_worktrees_is_fatal(
+    lone_coordinator: bool,
+    created: &[serde_json::Value],
+    failed: &[serde_json::Value],
+) -> bool {
+    !lone_coordinator && created.is_empty() && !failed.is_empty()
 }
 
 /// Where a coordinator over picked tasks runs, having no worktree of its own.
@@ -1484,14 +1542,18 @@ pub(super) mod agent_shell_tests {
     fn no_agent_configured_means_no_launch() {
         // Starting work must not spawn an AI agent unless asked to.
         let s = AppSettings::default();
-        assert!(agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[]).is_none());
+        assert!(
+            agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[], true).is_none()
+        );
     }
 
     #[test]
     fn blank_command_is_treated_as_unset() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("   ".into());
-        assert!(agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[]).is_none());
+        assert!(
+            agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[], true).is_none()
+        );
     }
 
     /// `args` of a custom shell, or a panic.
@@ -1525,6 +1587,7 @@ pub(super) mod agent_shell_tests {
             None,
             &Vec::new(),
             &[],
+            true,
         ));
         assert_eq!(args[0], "--session-id");
         assert!(uuid::Uuid::parse_str(&args[1]).is_ok(), "{args:?}");
@@ -1562,7 +1625,8 @@ pub(super) mod agent_shell_tests {
         // gap.
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("codex".into());
-        match agent_shell(&s, None, &task(), "b1", &[], None, None, &Vec::new(), &[]).expect("configured")
+        match agent_shell(&s, None, &task(), "b1", &[], None, None, &Vec::new(), &[], true)
+            .expect("configured")
         {
             ShellType::Custom { path, args } => {
                 assert_eq!(path, "codex");
@@ -1581,7 +1645,8 @@ pub(super) mod agent_shell_tests {
     #[test]
     fn a_started_task_is_told_to_plan_and_verify_its_work() {
         // With no per-project configuration: the built-in carries it.
-        let brief = super::task_brief(&task(), "b1", &[], None, None, &[], false, &Vec::new());
+        let brief =
+            super::task_brief(&task(), "b1", &[], None, None, &[], false, &Vec::new(), true);
         for needle in [
             "okena_test_plan",
             "okena_test_step_start",
@@ -1608,7 +1673,7 @@ pub(super) mod agent_shell_tests {
         )
         .expect("write");
         let root = vec![("acme".to_string(), dir.clone())];
-        let brief = super::task_brief(&task(), "b1", &[], None, None, &[], false, &root);
+        let brief = super::task_brief(&task(), "b1", &[], None, None, &[], false, &root, true);
         std::fs::remove_dir_all(&dir).ok();
         assert!(brief.contains("Verify LIN-42 on staging."), "{brief}");
         assert!(!brief.contains("okena_test_plan"), "{brief}");
@@ -1636,6 +1701,7 @@ pub(super) mod agent_shell_tests {
             None,
             &Vec::new(),
             &[],
+            true,
         ));
         assert_eq!(
             args[..2],
@@ -1663,6 +1729,7 @@ pub(super) mod agent_shell_tests {
             None,
             &Vec::new(),
             &[],
+            true,
         ));
         assert!(args[0].contains("LIN-42"), "brief comes first: {args:?}");
         // Then only okena's wiring (MCP flags, Codex's notify hook).
@@ -1692,6 +1759,7 @@ pub(super) mod agent_shell_tests {
                 None,
                 &Vec::new(),
                 &[],
+                true,
             )),
             custom_args(super::custom_agent_shell(
                 &s,
@@ -1736,7 +1804,9 @@ pub(super) mod agent_shell_tests {
         let routes = [
             (
                 "task start",
-                agent_shell(&s, None, &task(), "b1", &[], Some(&long), None, &Vec::new(), &[]),
+                agent_shell(
+                    &s, None, &task(), "b1", &[], Some(&long), None, &Vec::new(), &[], true,
+                ),
             ),
             (
                 "multi-task start",
@@ -1750,6 +1820,7 @@ pub(super) mod agent_shell_tests {
                     Some(&group),
                     &Vec::new(),
                     &[],
+                    true,
                 ),
             ),
             (
@@ -1764,6 +1835,7 @@ pub(super) mod agent_shell_tests {
                     Some(&picked),
                     &Vec::new(),
                     &[],
+                    true,
                 ),
             ),
             (
@@ -1905,7 +1977,7 @@ pub(super) mod agent_shell_tests {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("codex".into());
         let given = [("okena".to_string(), "/p/okena".to_string())];
-        match agent_shell(&s, None, &task(), "b1", &given, None, None, &Vec::new(), &[])
+        match agent_shell(&s, None, &task(), "b1", &given, None, None, &Vec::new(), &[], true)
             .expect("configured")
         {
             ShellType::Custom { args, .. } => {
@@ -1923,7 +1995,7 @@ pub(super) mod agent_shell_tests {
         let picked = super::BriefShape::Picked(
             "- LIN-42 (Task): Ship the harness\n- LIN-7 (Defect): Fix the login".into(),
         );
-        match agent_shell(&s, None, &task(), "b1", &[], None, Some(&picked), &Vec::new(), &[])
+        match agent_shell(&s, None, &task(), "b1", &[], None, Some(&picked), &Vec::new(), &[], true)
             .expect("configured")
         {
             ShellType::Custom { args, .. } => {
@@ -1968,12 +2040,88 @@ pub(super) mod agent_shell_tests {
     fn a_coordinator_is_given_repos_not_worktrees() {
         let picked = super::BriefShape::Picked("- LIN-42 (Task): Ship the harness".into());
         let given = [("okena".to_string(), "/p/okena".to_string())];
-        let brief = super::task_brief(&task(), "", &given, None, Some(&picked), &[], false, &Vec::new());
+        let brief = super::task_brief(
+            &task(),
+            "",
+            &given,
+            None,
+            Some(&picked),
+            &[],
+            false,
+            &Vec::new(),
+            true,
+        );
         assert!(
             brief.contains("Projects you were given:\n- okena (/p/okena)"),
             "{brief}"
         );
         assert!(!brief.contains("Worktrees you were given"), "{brief}");
+    }
+
+    #[test]
+    fn a_plain_directory_gets_no_worktree() {
+        // The bug: a project pointed at a projects root — a directory holding
+        // repositories, not a checkout — was still driven into
+        // `git worktree add`, which exits 128 outside a repository.
+        let root = std::env::temp_dir().join("okena-worktree-skip-test");
+        std::fs::create_dir_all(&root).expect("a temp directory");
+        let reason = super::worktree_skip_reason(&root.to_string_lossy());
+        std::fs::remove_dir_all(&root).ok();
+        assert!(reason.is_some(), "a plain directory is not a checkout");
+
+        // A real checkout, and a subdirectory of one, are both cuttable.
+        let checkout = env!("CARGO_MANIFEST_DIR");
+        assert!(super::worktree_skip_reason(checkout).is_none());
+        assert!(super::worktree_skip_reason(&format!("{checkout}/src")).is_none());
+    }
+
+    #[test]
+    fn only_a_worktree_that_failed_refuses_the_start() {
+        let one = vec![serde_json::json!({ "project": "okena" })];
+        // Meant to cut one and could not: the start cannot go ahead.
+        assert!(super::no_worktrees_is_fatal(false, &[], &one));
+        // Nothing was ever meant to be cut, so there is nothing to refuse.
+        assert!(!super::no_worktrees_is_fatal(false, &[], &[]));
+        // Some were cut, so a failure elsewhere is reported, not fatal.
+        assert!(!super::no_worktrees_is_fatal(false, &one, &one));
+        // A coordinator never has one of its own.
+        assert!(!super::no_worktrees_is_fatal(true, &[], &one));
+    }
+
+    #[test]
+    fn with_no_worktrees_the_brief_names_repos() {
+        // Briefed as worktrees, the agent would take a shared checkout for its
+        // own task branch and commit there.
+        let given = [("okena".to_string(), "/p/okena".to_string())];
+        let repos = super::task_brief(
+            &task(),
+            "b1",
+            &given,
+            None,
+            None,
+            &[],
+            false,
+            &Vec::new(),
+            false,
+        );
+        assert!(
+            repos.contains("Projects you were given:\n- okena (/p/okena)"),
+            "{repos}"
+        );
+        assert!(!repos.contains("Worktrees you were given"), "{repos}");
+
+        let cut = super::task_brief(
+            &task(),
+            "b1",
+            &given,
+            None,
+            None,
+            &[],
+            false,
+            &Vec::new(),
+            true,
+        );
+        assert!(cut.contains("Worktrees you were given"), "{cut}");
     }
 
     #[test]
@@ -2009,6 +2157,7 @@ pub(super) mod agent_shell_tests {
             &[],
             false,
             &Vec::new(),
+            true,
         );
         for needle in [
             "Work on LIN-42 and LIN-7, together.",
@@ -2360,7 +2509,7 @@ mod agent_override_tests {
     fn an_explicit_command_overrides_the_configured_one() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        match agent_shell(&s, Some("codex"), &task(), "b", &[], None, None, &Vec::new(), &[])
+        match agent_shell(&s, Some("codex"), &task(), "b", &[], None, None, &Vec::new(), &[], true)
             .expect("override applies")
         {
             ShellType::Custom { path, .. } => assert_eq!(path, "codex"),
@@ -2373,15 +2522,23 @@ mod agent_override_tests {
         // "Worktrees only" must be expressible even when a default is set.
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        assert!(agent_shell(&s, Some(""), &task(), "b", &[], None, None, &Vec::new(), &[]).is_none());
-        assert!(agent_shell(&s, Some("   "), &task(), "b", &[], None, None, &Vec::new(), &[]).is_none());
+        assert!(
+            agent_shell(&s, Some(""), &task(), "b", &[], None, None, &Vec::new(), &[], true)
+                .is_none()
+        );
+        assert!(
+            agent_shell(&s, Some("   "), &task(), "b", &[], None, None, &Vec::new(), &[], true)
+                .is_none()
+        );
     }
 
     #[test]
     fn no_override_falls_back_to_the_setting() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        match agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[]).expect("falls back") {
+        match agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[], true)
+            .expect("falls back")
+        {
             ShellType::Custom { path, .. } => assert_eq!(path, "claude"),
             other => panic!("expected a custom shell, got {other:?}"),
         }
@@ -2619,6 +2776,7 @@ fn task_brief(
     context_items: &[okena_core::context::ContextItem],
     loaded: bool,
     prompts: &PromptRoots,
+    worktrees: bool,
 ) -> String {
     let mut vars = Vars::new();
     vars.insert("key", task.display_key.clone());
@@ -2629,9 +2787,11 @@ fn task_brief(
         "description",
         briefs::block(task.description.as_deref().unwrap_or_default()),
     );
-    // A coordinator over picked tasks has no worktrees; it is given repos.
+    // A coordinator over picked tasks has no worktrees, and neither has a start
+    // whose projects were all plain directories; both are given repos.
     let heading = match shape {
         Some(BriefShape::Picked(_)) => "given-projects",
+        _ if !worktrees => "given-projects",
         _ => "given-worktrees",
     };
     vars.insert(
