@@ -501,6 +501,11 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    pub fn set_spec_clone_dir(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.harness.specs.clone_dir = opt_trimmed(value);
+        self.save_and_notify(cx);
+    }
+
     pub fn set_harness_agent_root(&mut self, value: String, cx: &mut Context<Self>) {
         // Blank means "unset", not a literal empty path — the daemon falls back
         // to the first project's parent directory.

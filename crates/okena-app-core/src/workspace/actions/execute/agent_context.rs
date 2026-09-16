@@ -308,7 +308,7 @@ mod tests {
     fn a_started_sessions_brief_names_every_picked_item_by_owner() {
         let dir = tempfile::tempdir().unwrap();
         let items = picked(dir.path());
-        let brief = super::super::tasks::custom_brief("Fix checkout", &[], &items, false, None);
+        let brief = super::super::tasks::custom_brief("Fix checkout", &[], &items, false, &Vec::new());
         let shop = brief.find("- shop:").expect("grouped under the project");
         let acme = brief.find("- acme:").expect("grouped under the store");
         assert!(shop < acme, "{brief}");
@@ -353,7 +353,7 @@ mod tests {
         assert!(plugin.join(".claude-plugin/plugin.json").is_file());
 
         let brief =
-            super::super::tasks::custom_brief("Ship it", &[], &items, install.loaded(), None);
+            super::super::tasks::custom_brief("Ship it", &[], &items, install.loaded(), &Vec::new());
         assert!(
             brief.contains("Loaded into this session: Release (skill)"),
             "{brief}"
@@ -382,7 +382,7 @@ mod tests {
         let install = install_in(Some(base.path()), "codex", &items);
         assert!(!install.loaded());
         assert_eq!(std::fs::read_dir(base.path()).unwrap().count(), 0);
-        let brief = super::super::tasks::custom_brief("Ship it", &[], &items, false, None);
+        let brief = super::super::tasks::custom_brief("Ship it", &[], &items, false, &Vec::new());
         assert!(brief.contains(&items[2].path), "{brief}");
         let settings = AppSettings::default();
         let args = args_of(
@@ -402,18 +402,18 @@ mod tests {
             &store.path().join("templates/partials/context.md"),
             "Acme house rule — read these first:\n{list}",
         );
-        let root = Some(("store:acme".to_string(), store.path().to_path_buf()));
-        let brief = super::super::tasks::custom_brief("Ship it", &[], &items, false, root);
+        let root = vec![("store:acme".to_string(), store.path().to_path_buf())];
+        let brief = super::super::tasks::custom_brief("Ship it", &[], &items, false, &root);
         assert!(
             brief.contains("Acme house rule — read these first:\n- shop:"),
             "{brief}"
         );
         assert!(!brief.contains("Nothing here is inlined"), "{brief}");
         // Without the store, okena's own words.
-        let plain = super::super::tasks::custom_brief("Ship it", &[], &items, false, None);
+        let plain = super::super::tasks::custom_brief("Ship it", &[], &items, false, &Vec::new());
         assert!(plain.contains("Nothing here is inlined"));
         // No items, no block at all: a launch without context is unchanged.
-        let none = super::super::tasks::custom_brief("Ship it", &[], &[], false, None);
+        let none = super::super::tasks::custom_brief("Ship it", &[], &[], false, &Vec::new());
         assert!(!none.contains("Context picked"));
     }
 }

@@ -309,6 +309,7 @@ pub(crate) mod tests {
             description: None,
             remote: None,
             healthy: true,
+            builtin: false,
             git: None,
             counts: Default::default(),
             used_by: vec!["shop".into()],

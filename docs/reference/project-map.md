@@ -337,10 +337,10 @@ rather than code. A team can change it without an okena release.
 - **Built in:** okena ships the skill at `skills/project-map/SKILL.md` and
   writes it into the [`okena-defaults` store](knowledge.md#the-okena-defaults-store)
   with the templates.
-- **Resolution:** the store named by `harness.knowledge.prompts`, when it has
-  `skills/project-map/SKILL.md`, else the built-in, the same way
+- **Resolution:** the first knowledge root with `skills/project-map/SKILL.md`,
+  else the built-in, the same way
   [launch prompts resolve](knowledge.md#resolution). A scan names the copy it
-  resolved: the store's file, or the one in `okena-defaults`.
+  resolved: that root's file, or the one in `okena-defaults`.
 - **Override:** the whole file is replaced, frontmatter included. An empty file
   falls back to the built-in.
 - **Not rendered:** unlike a template, a skill has no `{placeholder}`s.

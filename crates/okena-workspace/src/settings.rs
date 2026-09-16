@@ -410,6 +410,28 @@ pub struct SpecDiscoveryConfig {
     /// lives. Same resolution and reason as `data_dir`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_dir: Option<String>,
+
+    /// Folder a store is cloned into when no destination is given. Unset is
+    /// `~/openspec`, the convention the CLI uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_dir: Option<String>,
+}
+
+/// Where an OpenSpec clone goes when no destination is given, before `~`
+/// expansion.
+pub const DEFAULT_SPEC_CLONE_DIR: &str = "~/openspec";
+
+impl SpecDiscoveryConfig {
+    /// The clone folder with `~` expanded; blank counts as unset.
+    pub fn clone_dir(&self) -> std::path::PathBuf {
+        let dir = self
+            .clone_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .unwrap_or(DEFAULT_SPEC_CLONE_DIR);
+        okena_core::fs::expand_home(dir)
+    }
 }
 
 impl Default for SpecDiscoveryConfig {
@@ -421,6 +443,7 @@ impl Default for SpecDiscoveryConfig {
             folders: Vec::new(),
             data_dir: None,
             config_dir: None,
+            clone_dir: None,
         }
     }
 }
@@ -444,17 +467,12 @@ pub struct KnowledgeConfig {
     /// `~/knowledge`, beside OpenSpec's `~/openspec` convention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_dir: Option<String>,
-
-    /// Knowledge root whose `templates/` folder supplies okena's launch
-    /// briefs, by store key.
-    ///
-    /// Unset means okena's own built-in templates, which are also written to
-    /// the `okena-defaults` store so they can be read and copied. A store that
-    /// is set but has no template for a given flow falls through to the
-    /// built-in for that flow alone — overriding one brief must not mean
-    /// supplying all of them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompts: Option<String>,
+    //
+    // There is deliberately no setting naming one root as the source of launch
+    // briefs (QBL-415). Templates, partials and skills resolve across every
+    // healthy root in discovery order, so overriding one is a matter of putting
+    // the file somewhere, not of pointing a setting at it. A `prompts` key left
+    // in an older settings.json is ignored on load and gone on the next save.
 }
 
 impl Default for KnowledgeConfig {
@@ -463,23 +481,11 @@ impl Default for KnowledgeConfig {
             // Must match the serde default above.
             projects: true,
             clone_dir: None,
-            prompts: None,
         }
     }
 }
 
 impl KnowledgeConfig {
-    /// The store key briefs are read from, if one is configured.
-    ///
-    /// Blank counts as unset, because that is what clearing a text field in
-    /// settings leaves behind.
-    pub fn prompt_root(&self) -> Option<&str> {
-        self.prompts
-            .as_deref()
-            .map(str::trim)
-            .filter(|k| !k.is_empty())
-    }
-
     /// The clone folder with `~` expanded; blank counts as unset.
     pub fn clone_dir(&self) -> std::path::PathBuf {
         let dir = self
@@ -1486,6 +1492,29 @@ mod tests {
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         let migrated = migrate_settings(settings);
         assert!(!migrated.enabled_extensions.contains("updater"));
+    }
+
+    #[test]
+    fn a_settings_file_still_naming_a_prompts_store_loads_and_drops_it() {
+        // QBL-415 removed `harness.knowledge.prompts`: briefs resolve across
+        // every root now, so there is nothing to point at. A settings file
+        // written before that must still load — with the rest of the knowledge
+        // block intact — and must not carry the dead key forward on a save.
+        let json = r#"{
+            "harness": {
+                "knowledge": {
+                    "projects": false,
+                    "clone_dir": "~/k",
+                    "prompts": "store:acme-eng"
+                }
+            }
+        }"#;
+        let loaded: AppSettings = serde_json::from_str(json).expect("an old file still loads");
+        assert!(!loaded.harness.knowledge.projects);
+        assert_eq!(loaded.harness.knowledge.clone_dir.as_deref(), Some("~/k"));
+
+        let saved = serde_json::to_string(&loaded).expect("serialize");
+        assert!(!saved.contains("prompts"), "the dead key survived a save");
     }
 
     #[test]

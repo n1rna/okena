@@ -237,10 +237,10 @@ used by OpenSpec stores, is described in
   - **In a project root:** committing is left to you.
   - **Agent:** it starts the agent you pick, else `harness.agent_command`;
     without an agent it refuses.
-- **Settings → Knowledge** clones, adds and creates stores. `prompts` names the
-  store launch briefs are read from; unset is okena's built-ins. It removes a store
-  from the registry while leaving the checkout on disk. It also switches
-  project discovery on or off and sets the clone folder.
+- **Settings → Knowledge** clones a repository, adds an existing folder or
+  creates a new store — the same three choices Settings → Specs offers. It
+  removes a store from the registry while leaving the checkout on disk. It also
+  switches project discovery on or off and sets the clone folder.
 
 ## Launch context
 
@@ -444,15 +444,27 @@ words come from the partials above.
 
 ### Resolution
 
-Per flow and per partial:
+Per flow, per partial and per skill, okena reads every root it can see, in
+order, and uses the first one that has the file:
 
-1. The store named by `harness.knowledge.prompts`, if it has the file.
-2. okena's built-in.
+1. Registered stores, in registry order.
+2. Project roots, by project name.
+3. okena's built-in, which is compiled in.
 
-A store can override one partial — say, `reporting` — without supplying any
-template, and one template without supplying any partial. A store that is
-unregistered, moved or unreadable degrades to the built-ins rather than
-breaking every launch.
+Nothing configures this — there is no setting naming one root as the source of
+briefs, and a file overrides a default simply by existing at the same path in a
+root that comes earlier. `okena-defaults` is never a layer: it holds a copy of
+the built-ins for reading, and the built-ins are step 3 already.
+
+A root can override one partial — say, `reporting` — without supplying any
+template, and one template without supplying any partial. An empty file is not
+an override and falls through to the next root, so a placeholder does not
+silence the layer below it. A store that is unregistered, moved or unreadable
+degrades to the next root rather than breaking every launch.
+
+Only the kinds okena ships defaults for are layered: templates, partials and
+skills. Docs and agents are listed from every root and read from the one you
+opened them in.
 
 Every launch is briefed. An agent's permission options and extra arguments
 (`harness.agents`, see [configuration](configuration.md#agent-options)) are
@@ -467,13 +479,17 @@ readable in Harness → Knowledge like any other store. They are the same bytes
 the built-ins render from.
 
 - It is a knowledge root, not a git repository.
-- okena keeps it current. `.okena-knowledge/defaults.lock` records a hash of
-  each file as okena writes it. On start, a file still matching its hash is
-  updated when the built-in changes; a file you have edited no longer matches
-  and is left alone. A file with no record is only adopted if it already
-  matches the built-in, since okena cannot tell an old default from an edit.
-- To override a file for everyone, copy it into your own store at the same path
-  and point `harness.knowledge.prompts` at that store.
+- **It is read-only.** okena rewrites every file in it to match the build on
+  each start, so what the Knowledge view shows is always the text a launch
+  would send. A file opens as a preview: there is no edit, save, rename, delete
+  or refine, `New` and `Write with an agent` cannot target it, and the daemon
+  refuses those actions rather than only hiding them. Editing a file here on
+  disk does nothing — it is back to the built-in by the next start.
+- To change a default, **Override** it: open it and pick one of your own roots.
+  okena copies the file there at the same path, ready to edit, and
+  [resolution](#resolution) then prefers it. A root that already has the file
+  is opened rather than overwritten, and the picker says when a copy would lose
+  to a root that comes earlier. Deleting your copy restores okena's.
 
 ## Limits
 

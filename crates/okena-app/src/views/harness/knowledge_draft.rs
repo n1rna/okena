@@ -75,10 +75,14 @@ impl HarnessPane {
 
     /// Where the draft goes: the root picked in the form, else the open one.
     fn knowledge_draft_target(&self) -> Option<String> {
-        self.knowledge_draft
-            .root
-            .clone()
-            .or_else(|| self.knowledge.root_key.clone())
+        self.knowledge_draft.root.clone().or_else(|| {
+            // The open root, unless it is okena's own — falling back to a root
+            // nothing can be written to would preselect a chip that is not
+            // even offered.
+            self.knowledge_open_root()
+                .filter(|r| !r.builtin)
+                .map(|r| r.key.clone())
+        })
     }
 
     fn start_knowledge_draft(&mut self, agent: String, cx: &mut Context<Self>) {
@@ -163,7 +167,9 @@ impl HarnessPane {
 
         let target = self.knowledge_draft_target();
         let mut roots = h_flex().gap(px(6.0)).flex_wrap();
-        for root in stores.roots.iter().filter(|r| r.healthy) {
+        // Never okena's own store: it is rewritten on every start, so an
+        // agent briefed to write there would lose its work.
+        for root in stores.roots.iter().filter(|r| r.healthy && !r.builtin) {
             let key = root.key.clone();
             let kind = match root.kind {
                 KnowledgeRootKind::Store => "store",

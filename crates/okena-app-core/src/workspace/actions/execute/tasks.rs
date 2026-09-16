@@ -9,7 +9,7 @@
 //! worse than a slow one. Only the task↔worktree link persists, on the project.
 
 use super::ActionResult;
-use super::briefs::{self, PromptRoot};
+use super::briefs::{self, PromptRoots};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{WindowId, Workspace};
@@ -435,7 +435,7 @@ fn agent_shell(
     context: &[(String, String)],
     note: Option<&str>,
     shape: Option<&BriefShape>,
-    prompts: PromptRoot,
+    prompts: &PromptRoots,
     context_items: &[okena_core::context::ContextItem],
 ) -> Option<okena_terminal::shell_config::ShellType> {
     // An explicit override wins, including an explicit empty string, which is
@@ -642,7 +642,7 @@ pub(super) fn start_work(
 
     // Resolved once: every launch below briefs from the same root, and
     // discovery walks the disk.
-    let prompts = briefs::prompt_root(&ws.data.projects, settings);
+    let prompts = briefs::prompt_roots(&ws.data.projects, settings);
     let task_ref = okena_core::tasks::TaskRef::from(&task);
 
     // Every task the session covers beyond its own, read so each is linked
@@ -892,7 +892,7 @@ pub(super) fn start_work(
         context,
         note.as_deref(),
         shape.as_ref(),
-        prompts.clone(),
+        &prompts,
         &context_items,
     );
     let mut agent_session: Option<serde_json::Value> = None;
@@ -1050,13 +1050,13 @@ type GroupedTask<'a> = (&'a okena_core::tasks::Task, &'a str, Vec<(String, Strin
 
 /// Each task of a group with its branch and the worktrees that are its own,
 /// one `task-in-group` partial apiece.
-fn list_group(tasks: &[GroupedTask<'_>], prompts: &PromptRoot) -> String {
+fn list_group(tasks: &[GroupedTask<'_>], prompts: &PromptRoots) -> String {
     let listed = tasks
         .iter()
         .map(|(t, branch, worktrees)| {
             briefs::fragment(
                 "task-in-group",
-                prompts.as_ref(),
+                prompts,
                 &Vars::from([
                     ("key", t.display_key.clone()),
                     ("title", t.title.clone()),
@@ -1076,10 +1076,10 @@ fn list_group(tasks: &[GroupedTask<'_>], prompts: &PromptRoot) -> String {
 }
 
 /// One other picked task in a one-per-task note, with where its agent works.
-fn picked_sibling(key: &str, branch: &str, paths: &[String], prompts: &PromptRoot) -> String {
+fn picked_sibling(key: &str, branch: &str, paths: &[String], prompts: &PromptRoots) -> String {
     briefs::fragment(
         "picked-sibling",
-        prompts.as_ref(),
+        prompts,
         &Vars::from([
             ("key", key.to_string()),
             ("branch", branch.to_string()),
@@ -1138,7 +1138,7 @@ fn compose_note(
     siblings: &[String],
     hand_picked: bool,
     task: &okena_core::tasks::Task,
-    prompts: &PromptRoot,
+    prompts: &PromptRoots,
 ) -> Option<String> {
     let mut parts: Vec<String> = written
         .map(|n| n.trim().to_string())
@@ -1152,7 +1152,7 @@ fn compose_note(
             } else {
                 "group-note"
             },
-            prompts.as_ref(),
+            prompts,
             &Vars::from([("also", also.join(", "))]),
         ));
     }
@@ -1162,7 +1162,7 @@ fn compose_note(
             // worktrees.
             parts.push(briefs::fragment(
                 "picked-fan-out-note",
-                prompts.as_ref(),
+                prompts,
                 &Vars::from([("siblings", siblings.join("\n"))]),
             ));
         } else {
@@ -1172,7 +1172,7 @@ fn compose_note(
                 .unwrap_or_else(|| "the parent task".to_string());
             parts.push(briefs::fragment(
                 "fan-out-note",
-                prompts.as_ref(),
+                prompts,
                 &Vars::from([("parent", parent), ("siblings", siblings.join(", "))]),
             ));
         }
@@ -1184,7 +1184,7 @@ fn compose_note(
 ///
 /// The first lines of a description ride along: enough to judge whether two
 /// children touch the same thing, not so much that the list stops being one.
-fn list_children(children: &[okena_core::tasks::Task], prompts: &PromptRoot) -> String {
+fn list_children(children: &[okena_core::tasks::Task], prompts: &PromptRoots) -> String {
     children
         .iter()
         .map(|c| {
@@ -1197,7 +1197,7 @@ fn list_children(children: &[okena_core::tasks::Task], prompts: &PromptRoot) -> 
                 .unwrap_or_default();
             briefs::fragment(
                 "coordinate-child",
-                prompts.as_ref(),
+                prompts,
                 &Vars::from([
                     ("key", c.display_key.clone()),
                     ("kind", c.kind.label().to_string()),
@@ -1247,7 +1247,7 @@ mod tests {
         }))
         .unwrap();
         let also = ["QBL-2".to_string(), "QBL-3".to_string()];
-        let note = compose_note(None, &also, &[], true, &task, &None).expect("a note");
+        let note = compose_note(None, &also, &[], true, &task, &Vec::new()).expect("a note");
         assert!(note.contains("QBL-2, QBL-3"), "got: {note}");
     }
 
@@ -1484,14 +1484,14 @@ pub(super) mod agent_shell_tests {
     fn no_agent_configured_means_no_launch() {
         // Starting work must not spawn an AI agent unless asked to.
         let s = AppSettings::default();
-        assert!(agent_shell(&s, None, &task(), "b", &[], None, None, None, &[]).is_none());
+        assert!(agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[]).is_none());
     }
 
     #[test]
     fn blank_command_is_treated_as_unset() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("   ".into());
-        assert!(agent_shell(&s, None, &task(), "b", &[], None, None, None, &[]).is_none());
+        assert!(agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[]).is_none());
     }
 
     /// `args` of a custom shell, or a panic.
@@ -1523,7 +1523,7 @@ pub(super) mod agent_shell_tests {
             &[],
             None,
             None,
-            None,
+            &Vec::new(),
             &[],
         ));
         assert_eq!(args[0], "--session-id");
@@ -1562,7 +1562,7 @@ pub(super) mod agent_shell_tests {
         // gap.
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("codex".into());
-        match agent_shell(&s, None, &task(), "b1", &[], None, None, None, &[]).expect("configured")
+        match agent_shell(&s, None, &task(), "b1", &[], None, None, &Vec::new(), &[]).expect("configured")
         {
             ShellType::Custom { path, args } => {
                 assert_eq!(path, "codex");
@@ -1581,7 +1581,7 @@ pub(super) mod agent_shell_tests {
     #[test]
     fn a_started_task_is_told_to_plan_and_verify_its_work() {
         // With no per-project configuration: the built-in carries it.
-        let brief = super::task_brief(&task(), "b1", &[], None, None, &[], false, None);
+        let brief = super::task_brief(&task(), "b1", &[], None, None, &[], false, &Vec::new());
         for needle in [
             "okena_test_plan",
             "okena_test_step_start",
@@ -1607,8 +1607,8 @@ pub(super) mod agent_shell_tests {
             "---\nfor: task-verify\n---\nVerify {key} on staging.\n",
         )
         .expect("write");
-        let root = Some(("acme".to_string(), dir.clone()));
-        let brief = super::task_brief(&task(), "b1", &[], None, None, &[], false, root);
+        let root = vec![("acme".to_string(), dir.clone())];
+        let brief = super::task_brief(&task(), "b1", &[], None, None, &[], false, &root);
         std::fs::remove_dir_all(&dir).ok();
         assert!(brief.contains("Verify LIN-42 on staging."), "{brief}");
         assert!(!brief.contains("okena_test_plan"), "{brief}");
@@ -1634,7 +1634,7 @@ pub(super) mod agent_shell_tests {
             &[],
             None,
             None,
-            None,
+            &Vec::new(),
             &[],
         ));
         assert_eq!(
@@ -1661,7 +1661,7 @@ pub(super) mod agent_shell_tests {
             &[],
             None,
             None,
-            None,
+            &Vec::new(),
             &[],
         ));
         assert!(args[0].contains("LIN-42"), "brief comes first: {args:?}");
@@ -1690,7 +1690,7 @@ pub(super) mod agent_shell_tests {
                 &[],
                 None,
                 None,
-                None,
+                &Vec::new(),
                 &[],
             )),
             custom_args(super::custom_agent_shell(
@@ -1736,7 +1736,7 @@ pub(super) mod agent_shell_tests {
         let routes = [
             (
                 "task start",
-                agent_shell(&s, None, &task(), "b1", &[], Some(&long), None, None, &[]),
+                agent_shell(&s, None, &task(), "b1", &[], Some(&long), None, &Vec::new(), &[]),
             ),
             (
                 "multi-task start",
@@ -1748,7 +1748,7 @@ pub(super) mod agent_shell_tests {
                     &[],
                     Some(&long),
                     Some(&group),
-                    None,
+                    &Vec::new(),
                     &[],
                 ),
             ),
@@ -1762,7 +1762,7 @@ pub(super) mod agent_shell_tests {
                     &[],
                     Some(&long),
                     Some(&picked),
-                    None,
+                    &Vec::new(),
                     &[],
                 ),
             ),
@@ -1905,7 +1905,7 @@ pub(super) mod agent_shell_tests {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("codex".into());
         let given = [("okena".to_string(), "/p/okena".to_string())];
-        match agent_shell(&s, None, &task(), "b1", &given, None, None, None, &[])
+        match agent_shell(&s, None, &task(), "b1", &given, None, None, &Vec::new(), &[])
             .expect("configured")
         {
             ShellType::Custom { args, .. } => {
@@ -1923,7 +1923,7 @@ pub(super) mod agent_shell_tests {
         let picked = super::BriefShape::Picked(
             "- LIN-42 (Task): Ship the harness\n- LIN-7 (Defect): Fix the login".into(),
         );
-        match agent_shell(&s, None, &task(), "b1", &[], None, Some(&picked), None, &[])
+        match agent_shell(&s, None, &task(), "b1", &[], None, Some(&picked), &Vec::new(), &[])
             .expect("configured")
         {
             ShellType::Custom { args, .. } => {
@@ -1953,12 +1953,12 @@ pub(super) mod agent_shell_tests {
 
     #[test]
     fn picked_tasks_are_not_told_they_share_a_parent() {
-        let fanned = super::compose_note(None, &[], &["LIN-7".into()], true, &task(), &None)
+        let fanned = super::compose_note(None, &[], &["LIN-7".into()], true, &task(), &Vec::new())
             .expect("a note");
         assert!(fanned.contains("LIN-7"), "{fanned}");
         assert!(!fanned.contains("parent"), "{fanned}");
 
-        let grouped = super::compose_note(None, &["LIN-7".into()], &[], true, &task(), &None)
+        let grouped = super::compose_note(None, &["LIN-7".into()], &[], true, &task(), &Vec::new())
             .expect("a note");
         assert!(grouped.contains("LIN-7"), "{grouped}");
         assert!(!grouped.contains("verified apart"), "{grouped}");
@@ -1968,7 +1968,7 @@ pub(super) mod agent_shell_tests {
     fn a_coordinator_is_given_repos_not_worktrees() {
         let picked = super::BriefShape::Picked("- LIN-42 (Task): Ship the harness".into());
         let given = [("okena".to_string(), "/p/okena".to_string())];
-        let brief = super::task_brief(&task(), "", &given, None, Some(&picked), &[], false, None);
+        let brief = super::task_brief(&task(), "", &given, None, Some(&picked), &[], false, &Vec::new());
         assert!(
             brief.contains("Projects you were given:\n- okena (/p/okena)"),
             "{brief}"
@@ -1998,7 +1998,7 @@ pub(super) mod agent_shell_tests {
         ];
         let shape = super::BriefShape::Group {
             key: super::join_keys(&["LIN-42", "LIN-7"]),
-            tasks: super::list_group(&listed, &None),
+            tasks: super::list_group(&listed, &Vec::new()),
         };
         let brief = super::task_brief(
             &first,
@@ -2008,7 +2008,7 @@ pub(super) mod agent_shell_tests {
             Some(&shape),
             &[],
             false,
-            None,
+            &Vec::new(),
         );
         for needle in [
             "Work on LIN-42 and LIN-7, together.",
@@ -2040,9 +2040,9 @@ pub(super) mod agent_shell_tests {
             "LIN-7",
             "fix/lin-7",
             &["/wt/okena-fix-lin-7".into(), "/wt/web-fix-lin-7".into()],
-            &None,
+            &Vec::new(),
         );
-        let note = super::compose_note(None, &[], &[line], true, &task(), &None).expect("a note");
+        let note = super::compose_note(None, &[], &[line], true, &task(), &Vec::new()).expect("a note");
         assert!(
             note.contains("- LIN-7 on `fix/lin-7`: /wt/okena-fix-lin-7, /wt/web-fix-lin-7"),
             "{note}"
@@ -2101,7 +2101,7 @@ pub(super) mod agent_shell_tests {
 
     #[test]
     fn a_coordinators_group_keeps_the_sub_task_wording() {
-        let grouped = super::compose_note(None, &["LIN-7".into()], &[], false, &task(), &None)
+        let grouped = super::compose_note(None, &["LIN-7".into()], &[], false, &task(), &Vec::new())
             .expect("a note");
         assert!(grouped.contains("verified apart"), "{grouped}");
     }
@@ -2360,7 +2360,7 @@ mod agent_override_tests {
     fn an_explicit_command_overrides_the_configured_one() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        match agent_shell(&s, Some("codex"), &task(), "b", &[], None, None, None, &[])
+        match agent_shell(&s, Some("codex"), &task(), "b", &[], None, None, &Vec::new(), &[])
             .expect("override applies")
         {
             ShellType::Custom { path, .. } => assert_eq!(path, "codex"),
@@ -2373,15 +2373,15 @@ mod agent_override_tests {
         // "Worktrees only" must be expressible even when a default is set.
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        assert!(agent_shell(&s, Some(""), &task(), "b", &[], None, None, None, &[]).is_none());
-        assert!(agent_shell(&s, Some("   "), &task(), "b", &[], None, None, None, &[]).is_none());
+        assert!(agent_shell(&s, Some(""), &task(), "b", &[], None, None, &Vec::new(), &[]).is_none());
+        assert!(agent_shell(&s, Some("   "), &task(), "b", &[], None, None, &Vec::new(), &[]).is_none());
     }
 
     #[test]
     fn no_override_falls_back_to_the_setting() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        match agent_shell(&s, None, &task(), "b", &[], None, None, None, &[]).expect("falls back") {
+        match agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[]).expect("falls back") {
             ShellType::Custom { path, .. } => assert_eq!(path, "claude"),
             other => panic!("expected a custom shell, got {other:?}"),
         }
@@ -2480,7 +2480,7 @@ pub(super) fn start_custom_session(
         &context,
         &context_items,
         install.loaded(),
-        briefs::prompt_root(&ws.data.projects, settings),
+        &briefs::prompt_roots(&ws.data.projects, settings),
     );
     if let Some(shell) = custom_agent_shell(settings, agent_command.as_deref(), &brief, &install)
         && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id)
@@ -2591,19 +2591,19 @@ pub(super) fn custom_brief(
     context: &[(String, String)],
     context_items: &[okena_core::context::ContextItem],
     loaded: bool,
-    prompts: PromptRoot,
+    prompts: &PromptRoots,
 ) -> String {
     let mut vars = Vars::new();
     vars.insert("goal", goal.to_string());
     vars.insert(
         "context",
-        briefs::context_block(context_items, loaded, prompts.as_ref()),
+        briefs::context_block(context_items, loaded, prompts),
     );
     vars.insert(
         "projects",
-        briefs::project_block("given-projects", context, prompts.as_ref()),
+        briefs::project_block("given-projects", context, prompts),
     );
-    briefs::build(Flow::AgentSession, prompts.as_ref(), &vars)
+    briefs::build(Flow::AgentSession, prompts, &vars)
         .rendered
         .text
 }
@@ -2618,7 +2618,7 @@ fn task_brief(
     shape: Option<&BriefShape>,
     context_items: &[okena_core::context::ContextItem],
     loaded: bool,
-    prompts: PromptRoot,
+    prompts: &PromptRoots,
 ) -> String {
     let mut vars = Vars::new();
     vars.insert("key", task.display_key.clone());
@@ -2636,12 +2636,12 @@ fn task_brief(
     };
     vars.insert(
         "projects",
-        briefs::project_block(heading, context, prompts.as_ref()),
+        briefs::project_block(heading, context, prompts),
     );
     vars.insert("note", briefs::block(note.unwrap_or_default()));
     vars.insert(
         "context",
-        briefs::context_block(context_items, loaded, prompts.as_ref()),
+        briefs::context_block(context_items, loaded, prompts),
     );
     // A coordinator is briefed to split the work rather than do it, so it gets
     // that flow's template — not the work brief with the split tucked in.
@@ -2659,19 +2659,19 @@ fn task_brief(
         Some(BriefShape::Group { key, tasks }) => {
             vars.insert("key", key.clone());
             vars.insert("tasks", tasks.clone());
-            let verify = briefs::build(Flow::TaskVerify, prompts.as_ref(), &vars);
+            let verify = briefs::build(Flow::TaskVerify, prompts, &vars);
             vars.insert("verify", briefs::block(&verify.rendered.text));
             Flow::TasksStart
         }
         // Only the agent doing the work plans and verifies it; a coordinator
         // hands that on to the agents it starts.
         None => {
-            let verify = briefs::build(Flow::TaskVerify, prompts.as_ref(), &vars);
+            let verify = briefs::build(Flow::TaskVerify, prompts, &vars);
             vars.insert("verify", briefs::block(&verify.rendered.text));
             Flow::TaskStart
         }
     };
-    briefs::build(flow, prompts.as_ref(), &vars).rendered.text
+    briefs::build(flow, prompts, &vars).rendered.text
 }
 
 /// Shell for a custom agent session.
@@ -3607,7 +3607,7 @@ mod custom_session_tests {
             &ctx(&[("okena", "/p/okena")]),
             &[],
             false,
-            None,
+            &Vec::new(),
         );
         assert!(b.starts_with("Do the thing"));
         assert!(b.contains("/p/okena"), "the path is what disambiguates");
@@ -3618,7 +3618,7 @@ mod custom_session_tests {
         // No project list and no context block when none were given — and,
         // like every brief, how to look context up and how to report when it
         // stops to wait.
-        let b = custom_brief("Do the thing", &[], &[], false, None);
+        let b = custom_brief("Do the thing", &[], &[], false, &Vec::new());
         let lookup = okena_knowledge::prompts::defaults::partial_body("context-lookup")
             .expect("context-lookup partial");
         let reporting = okena_knowledge::prompts::defaults::partial_body("reporting")

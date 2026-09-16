@@ -65,6 +65,11 @@ valid.
 `harness.knowledge.prompts` before the built-in, like launch templates. okena
 owns only the manifest schema.
 
+> **Superseded in part (QBL-415).** The skill still resolves before the
+> built-in, but not from one configured store: `harness.knowledge.prompts` is
+> gone, and it resolves across every knowledge root in discovery order. See
+> [knowledge.md](../reference/knowledge.md#resolution).
+
 ## Consequences
 
 - **What okena needs to read:** a project's map needs only its checkout, so a

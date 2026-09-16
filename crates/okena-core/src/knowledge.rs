@@ -195,6 +195,15 @@ pub struct KnowledgeRoot {
     /// Usable as a root. Problems that don't stop reading are warnings in
     /// `status` on a healthy root.
     pub healthy: bool,
+    /// okena's own `okena-defaults` store: the briefs it ships, rewritten to
+    /// match the build on every start.
+    ///
+    /// Read-only, and it says so on the wire rather than leaving each client to
+    /// recognise a store id. Nothing in it can be edited, renamed, deleted or
+    /// written by an agent; a file is changed by copying it into a root of your
+    /// own, which then overrides it (`okena_knowledge::prompts`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub builtin: bool,
     /// Sync state, when the root is the top of a git checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<KnowledgeGitStatus>,
@@ -287,6 +296,7 @@ mod tests {
             description: None,
             remote: None,
             healthy,
+            builtin: false,
             git: None,
             counts: KnowledgeCounts::default(),
             used_by: Vec::new(),

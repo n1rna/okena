@@ -174,12 +174,17 @@ pub enum OverlayRequest {
     CloseWorktree {
         project_id: String,
     },
-    /// Open the settings modal, optionally on a named page.
+    /// Open the settings modal, optionally on a named page and at a named
+    /// section of it.
     ///
-    /// A string rather than the panel's own enum: that type lives in the app
-    /// crate, and this one is shared with crates that cannot see it.
+    /// Strings rather than the panel's own enum: that type lives in the app
+    /// crate, and this one is shared with crates that cannot see it. An
+    /// unknown page or section opens settings anyway — landing somewhere is
+    /// better than not opening.
     Settings {
         page: Option<String>,
+        /// A part of the page to land on, e.g. `add` for a store form.
+        section: Option<String>,
     },
     RemoteConnect,
     RemoteConnectionContextMenu {

@@ -108,6 +108,9 @@ fn inspect_store(store: &RegisteredStore) -> KnowledgeRoot {
         description: None,
         remote: store.remote.clone(),
         healthy: false,
+        // By id, not by path: the defaults live in okena's own config folder,
+        // but what makes a root okena's is that it is registered as okena's.
+        builtin: store.id == crate::prompts::defaults::DEFAULT_STORE_ID,
         git: None,
         counts: Default::default(),
         used_by: Vec::new(),
@@ -240,6 +243,7 @@ fn project_root(source: &ProjectSource, dir: &Path) -> KnowledgeRoot {
         description: None,
         remote: None,
         healthy: true,
+        builtin: false,
         git: None,
         counts: tree::count_entries(dir),
         used_by: Vec::new(),

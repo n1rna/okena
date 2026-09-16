@@ -75,7 +75,8 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // A clone and a push are network-bound and unbounded, a pull fetches
         // first, and setup and commit run the user's commit hooks. The same
         // holds for the store git of both sections.
-        ActionRequest::KnowledgeStoreClone { .. }
+        ActionRequest::SpecStoreClone { .. }
+        | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreFetch { .. }
         | ActionRequest::KnowledgeStorePull { .. }
         | ActionRequest::KnowledgeStoreCommit { .. }

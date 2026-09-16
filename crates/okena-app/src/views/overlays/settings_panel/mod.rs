@@ -159,18 +159,33 @@ impl SettingsPanel {
         Self::new_with_options(workspace, None, None, daemon_endpoint, cx)
     }
 
-    /// Open the panel on a named page.
+    /// The one section slug `new_at` understands: a page's "add a store" form.
+    pub const SECTION_ADD: &'static str = "add";
+
+    /// Open the panel on a named page, landing on `section` of it.
     ///
     /// An unknown slug opens the default page rather than failing — a caller
-    /// asking for a page this build does not have should still get settings.
+    /// asking for a page this build does not have should still get settings —
+    /// and an unknown section is simply not acted on. The only section today
+    /// is `add`, which opens a page's "add a store" form.
     pub fn new_at(
         workspace: Entity<Workspace>,
         page: Option<&str>,
+        section: Option<&str>,
         daemon_endpoint: Option<DaemonEndpoint>,
         cx: &mut Context<Self>,
     ) -> Self {
         let category = page.and_then(SettingsCategory::from_slug);
-        Self::new_with_options(workspace, None, category, daemon_endpoint, cx)
+        let mut panel = Self::new_with_options(workspace, None, category, daemon_endpoint, cx);
+        if section == Some(Self::SECTION_ADD) {
+            // The form sits below the list of stores, and the panel has no
+            // scroll-to-element machinery. Arriving here means the caller sent
+            // you to add something, so the form leads the page rather than
+            // being scrolled to.
+            panel.specs.add_first = true;
+            panel.knowledge.add_first = true;
+        }
+        panel
     }
 
     /// Hand the panel a daemon client. Without one the Tasks page can display
@@ -924,6 +939,7 @@ impl SettingsPanel {
         let specs = render_specs::SpecsPage::new(
             s.harness.specs.data_dir.clone(),
             s.harness.specs.config_dir.clone(),
+            s.harness.specs.clone_dir.clone(),
             cx,
         );
         let knowledge =

@@ -402,7 +402,14 @@ impl HarnessPane {
         self.knowledge_draft.open = false;
         self.knowledge.selected = Some(path.clone());
         self.knowledge.content_error = None;
+        self.knowledge_override.clear();
         cx.notify();
+
+        // Opening one of okena's defaults asks who is already overriding it,
+        // which the preview says and the picker marks.
+        if self.knowledge_open_root().is_some_and(|r| r.builtin) {
+            self.load_knowledge_overrides(path.clone(), cx);
+        }
 
         let root_key = self.knowledge.root_key.clone().unwrap_or_default();
         if self.knowledge.documents.get(&root_key, &path).is_some() {
@@ -444,6 +451,12 @@ impl HarnessPane {
             });
         })
         .detach();
+    }
+
+    /// The root currently being shown, when it is still discovered.
+    pub(super) fn knowledge_open_root(&self) -> Option<&KnowledgeRoot> {
+        let key = self.knowledge.root_key.as_deref()?;
+        self.knowledge.stores.as_ref()?.root(key)
     }
 
     fn toggle_knowledge_fold(&mut self, key: String, cx: &mut Context<Self>) {
@@ -570,6 +583,15 @@ impl HarnessPane {
                     }))
                     .child(root.name.clone()),
             )
+            .when(root.builtin, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child("okena's"),
+                )
+            })
             .when_some(root.git.as_ref().and_then(sync_badge), |d, badge| {
                 d.child(
                     div()
@@ -723,6 +745,7 @@ impl HarnessPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
+        let builtin_root = self.knowledge_open_root().is_some_and(|r| r.builtin);
         let mut col = v_flex()
             .id("knowledge-tree")
             .w(px(TREE_WIDTH))
@@ -770,19 +793,23 @@ impl HarnessPane {
                         .py(px(4.0))
                         .child(SimpleInput::new(&self.knowledge.filter).text_size(ui_text_md(cx))),
                 )
-                .child(self.add_button(
-                    "knowledge-new-entry",
-                    "New entry",
-                    |this, window, cx| {
-                        this.open_new_form(
-                            HarnessSection::Knowledge,
-                            super::file_ops::NewItem::Knowledge(KnowledgeKind::Doc),
-                            window,
-                            cx,
-                        )
-                    },
-                    cx,
-                )),
+                // Not in okena's own store, which is rewritten on every
+                // start: a new entry there would not survive it.
+                .children((!builtin_root).then(|| {
+                    self.add_button(
+                        "knowledge-new-entry",
+                        "New entry",
+                        |this, window, cx| {
+                            this.open_new_form(
+                                HarnessSection::Knowledge,
+                                super::file_ops::NewItem::Knowledge(KnowledgeKind::Doc),
+                                window,
+                                cx,
+                            )
+                        },
+                        cx,
+                    )
+                })),
         );
         col = col.children(self.render_new_form(HarnessSection::Knowledge, cx));
         for d in &tree.status {
@@ -1031,11 +1058,16 @@ impl HarnessPane {
         };
 
         let section = HarnessSection::Knowledge;
+        // okena's own store is rewritten to match the build on every start, so
+        // it opens as a preview with one action: override it from a root of
+        // your own (QBL-415). The daemon refuses the writes too — this only
+        // stops the view offering what would be refused.
+        let read_only = root.is_some_and(|r| r.builtin);
         let buffer = self.open_buffer(section);
         let body: AnyElement = match buffer {
             // The source carries the frontmatter the meta block is drawn from,
             // so editing shows the editor alone.
-            Some(buffer) if buffer.editing() => self
+            Some(buffer) if buffer.editing() && !read_only => self
                 .render_document_editor(section, buffer, cx)
                 .unwrap_or_else(|| self.info_banner("Loading…".into(), cx)),
             _ => {
@@ -1049,6 +1081,9 @@ impl HarnessPane {
                     .w_full()
                     .max_w(okena_markdown::DOC_MAX_WIDTH)
                     .min_w_0();
+                if read_only {
+                    page = page.children(self.render_default_notice(&path, cx));
+                }
                 if let Some(entry) = &entry {
                     page = page.child(self.render_entry_meta(entry, cx));
                 }
@@ -1077,7 +1112,7 @@ impl HarnessPane {
 
         let header = match root {
             Some(root) => format!("{} · {path}", root.name),
-            None => path,
+            None => path.clone(),
         };
         v_flex()
             .flex_1()
@@ -1102,8 +1137,15 @@ impl HarnessPane {
                             .text_color(rgb(t.text_muted))
                             .child(header),
                     )
-                    .children(self.render_document_controls(section, cx))
-                    .children(self.render_file_controls(section, cx))
+                    .children(if read_only {
+                        // No Edit/Preview toggle, Save, Revert, Rename or
+                        // Delete: none of them could survive the next start.
+                        self.render_default_controls(cx)
+                    } else {
+                        let mut controls = self.render_document_controls(section, cx);
+                        controls.extend(self.render_file_controls(section, cx));
+                        controls
+                    })
                     .child(self.small_button(
                         "knowledge-close-entry",
                         "Overview",
@@ -1114,18 +1156,26 @@ impl HarnessPane {
                         cx,
                     )),
             )
-            .children(self.render_file_op_bar(section, cx))
+            .children(if read_only {
+                self.render_override_picker(&path, cx)
+            } else {
+                self.render_file_op_bar(section, cx)
+            })
             .children(save_error)
             .child(body)
-            .children(self.render_document_agent(section, cx).map(|card| {
-                div()
-                    .flex_shrink_0()
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .border_t_1()
-                    .border_color(rgb(t.border))
-                    .child(card)
-            }))
+            // "Refine with agent" would write into the file, so a default is
+            // not offered it either.
+            .children((!read_only).then(|| self.render_document_agent(section, cx)).flatten().map(
+                |card| {
+                    div()
+                        .flex_shrink_0()
+                        .px(px(16.0))
+                        .py(px(10.0))
+                        .border_t_1()
+                        .border_color(rgb(t.border))
+                        .child(card)
+                },
+            ))
             .into_any_element()
     }
 
@@ -1222,8 +1272,10 @@ impl HarnessPane {
                 cx,
             ),
         ];
-        // Only offered where knowledge could be written.
-        if stores.roots.iter().any(|r| r.healthy) {
+        // Only offered where knowledge could be written: okena's own store is
+        // rewritten on every start, so an agent drafting into it would lose
+        // its work.
+        if stores.roots.iter().any(|r| r.healthy && !r.builtin) {
             actions.push(self.primary_button(
                 "knowledge-new",
                 "New",

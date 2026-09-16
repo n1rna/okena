@@ -5,7 +5,7 @@
 //! `project-map` skill resolved the way templates are, and opens the session.
 
 use super::ActionResult;
-use super::briefs::{self, PromptRoot};
+use super::briefs::{self, PromptRoots};
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::ProjectData;
 use okena_knowledge::project_scan::{self, ScanPlan, ScanStart};
@@ -55,7 +55,7 @@ pub(super) fn scan(
         Ok(plan) => plan,
         Err(e) => return ActionResult::Err(e.to_string()),
     };
-    let prompts = briefs::prompt_root(&ws.data.projects, settings);
+    let prompts = briefs::prompt_roots(&ws.data.projects, settings);
     let skill = match skill_file(&prompts, &super::knowledge::defaults_store()) {
         Ok(path) => path,
         Err(e) => return ActionResult::Err(e),
@@ -133,18 +133,18 @@ pub(super) fn scannable(project: &ProjectData) -> Result<(), String> {
     Ok(())
 }
 
-/// The `project-map` SKILL.md the agent is pointed at: the prompt root's copy
-/// when it has one, else okena's own in the defaults store at `defaults_dir`.
+/// The `project-map` SKILL.md the agent is pointed at: the first root that
+/// overrides it, else okena's own in the defaults store at `defaults_dir`.
 ///
 /// A path rather than the text inlined, so the agent reads the skill as the
-/// file it is, and a team can open the exact file its scans follow.
-pub(super) fn skill_file(prompts: &PromptRoot, defaults_dir: &Path) -> Result<PathBuf, String> {
-    let root = prompts
-        .as_ref()
-        .map(|(key, path)| (key.as_str(), path.as_path()));
-    if let Some(Source::Root { path, .. }) =
-        prompts::skill(defaults::PROJECT_MAP_SKILL, root).map(|s| s.source)
-        && let Some((_, dir)) = prompts
+/// file it is, and a team can open the exact file its scans follow. Resolution
+/// names the winning root by key, so the directory is looked up again here —
+/// the layer that answered is not necessarily the first one.
+pub(super) fn skill_file(prompts: &PromptRoots, defaults_dir: &Path) -> Result<PathBuf, String> {
+    let layers = briefs::layers(prompts);
+    if let Some(Source::Root { key, path }) =
+        prompts::skill(defaults::PROJECT_MAP_SKILL, &layers).map(|s| s.source)
+        && let Some((_, dir)) = layers.iter().find(|(k, _)| *k == key)
     {
         return Ok(dir.join(path));
     }
@@ -164,7 +164,7 @@ fn scan_brief(
     path: &str,
     plan: &ScanPlan,
     skill: &Path,
-    prompts: &PromptRoot,
+    prompts: &PromptRoots,
 ) -> String {
     let mut vars = Vars::new();
     vars.insert("project", project.to_string());
@@ -172,14 +172,14 @@ fn scan_brief(
     vars.insert("map_root", plan.map_root.to_string_lossy().into_owned());
     vars.insert("skill", skill.to_string_lossy().into_owned());
     vars.insert("start", start_note(plan, prompts));
-    briefs::build(Flow::ProjectScan, prompts.as_ref(), &vars)
+    briefs::build(Flow::ProjectScan, prompts, &vars)
         .rendered
         .text
 }
 
 /// What the agent starts from. The decision is `plan.start`; the words are
 /// the `scan-*` partial it names.
-fn start_note(plan: &ScanPlan, prompts: &PromptRoot) -> String {
+fn start_note(plan: &ScanPlan, prompts: &PromptRoots) -> String {
     let list = |items: &[String]| {
         items
             .iter()
@@ -200,7 +200,7 @@ fn start_note(plan: &ScanPlan, prompts: &PromptRoot) -> String {
     }
     briefs::block(&briefs::fragment(
         plan.start.partial(),
-        prompts.as_ref(),
+        prompts,
         &vars,
     ))
 }
@@ -244,7 +244,7 @@ mod tests {
             "/p/api",
             &plan(start),
             Path::new("/cfg/knowledge/okena-defaults/skills/project-map/SKILL.md"),
-            &None,
+            &Vec::new(),
         )
     }
 
@@ -345,20 +345,31 @@ mod tests {
     fn the_skill_is_the_prompt_roots_copy_else_okenas() {
         let defaults = tmpdir("defaults");
         let builtin = defaults.join("skills/project-map/SKILL.md");
+        let none = Vec::new();
         assert!(
-            skill_file(&None, &defaults).is_err_and(|e| e.contains("not on disk")),
+            skill_file(&none, &defaults).is_err_and(|e| e.contains("not on disk")),
             "a missing defaults copy is said, not pointed at"
         );
         write(&builtin, "---\nname: project-map\n---\n");
-        assert_eq!(skill_file(&None, &defaults), Ok(builtin.clone()));
+        assert_eq!(skill_file(&none, &defaults), Ok(builtin.clone()));
 
         let store = tmpdir("store");
-        let prompts = Some(("store:acme-eng".to_string(), store.clone()));
+        let project = tmpdir("project");
+        let prompts = vec![
+            ("store:acme-eng".to_string(), store.clone()),
+            ("path:/p/web".to_string(), project.clone()),
+        ];
         assert_eq!(
             skill_file(&prompts, &defaults),
             Ok(builtin),
-            "a store without its own copy falls back"
+            "roots without their own copy fall back"
         );
+        // The second layer answers, so the path must be its copy, not the
+        // first root's — the bug a key-only `Source` would hide.
+        let theirs = project.join("skills/project-map/SKILL.md");
+        write(&theirs, "---\nname: project-map\n---\nTheir way.\n");
+        assert_eq!(skill_file(&prompts, &defaults), Ok(theirs));
+        // The store is listed first, so its copy takes over.
         let ours = store.join("skills/project-map/SKILL.md");
         write(&ours, "---\nname: project-map\n---\nOur way.\n");
         assert_eq!(skill_file(&prompts, &defaults), Ok(ours));

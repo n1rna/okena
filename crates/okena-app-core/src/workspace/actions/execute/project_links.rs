@@ -5,7 +5,7 @@
 //! not show yet.
 
 use super::ActionResult;
-use super::briefs::{self, PromptRoot};
+use super::briefs::{self, PromptRoots};
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::ProjectData;
 use okena_core::project_map::ProjectMapState;
@@ -112,7 +112,7 @@ pub(super) fn scan_links(
             "no folder to run in — set a projects root in Settings → Harness".into(),
         );
     };
-    let prompts = briefs::prompt_root(&ws.data.projects, settings);
+    let prompts = briefs::prompt_roots(&ws.data.projects, settings);
     let skill = match super::project_scan::skill_file(&prompts, &super::knowledge::defaults_store())
     {
         Ok(path) => path,
@@ -175,7 +175,7 @@ pub(super) fn scan_links(
 fn links_brief(
     listed: &[(String, String, ScanPlan)],
     skill: &Path,
-    prompts: &PromptRoot,
+    prompts: &PromptRoots,
 ) -> String {
     let list = listed
         .iter()
@@ -193,12 +193,12 @@ fn links_brief(
         "projects",
         briefs::block(&briefs::fragment(
             "given-projects",
-            prompts.as_ref(),
+            prompts,
             &Vars::from([("list", list)]),
         )),
     );
     vars.insert("skill", skill.to_string_lossy().into_owned());
-    briefs::build(Flow::ProjectsScan, prompts.as_ref(), &vars)
+    briefs::build(Flow::ProjectsScan, prompts, &vars)
         .rendered
         .text
 }
@@ -262,7 +262,7 @@ mod tests {
         let text = links_brief(
             &listed,
             Path::new("/cfg/skills/project-map/SKILL.md"),
-            &None,
+            &Vec::new(),
         );
         for needle in [
             "- api (/p/api), map `/p/api/.okena/knowledge/project-map.yaml`: mapped",

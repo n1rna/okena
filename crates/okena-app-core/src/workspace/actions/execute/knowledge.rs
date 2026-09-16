@@ -9,7 +9,7 @@
 //! [`knowledge_project_sources`].
 
 use super::ActionResult;
-use super::briefs::{self, PromptRoot};
+use super::briefs::{self, PromptRoots};
 use crate::workspace::persistence::{AppSettings, get_config_dir};
 use crate::workspace::state::ProjectData;
 use okena_core::api::ActionRequest;
@@ -133,6 +133,10 @@ fn execute_at(
                 super::document_files::delete(key, dir, tree::resolve_document, path)
             })
         }
+        ActionRequest::KnowledgeOverrides { path } => overrides(registry, projects, path),
+        ActionRequest::KnowledgeOverride { root, path } => {
+            override_into(registry, projects, root, path)
+        }
         ActionRequest::KnowledgeStoreClone { url, path } => match git::clone_store(
             registry,
             url,
@@ -228,6 +232,149 @@ fn stores(registry: &Path, projects: &[ProjectSource]) -> KnowledgeStores {
     stores
 }
 
+// ─── Overriding a default ───────────────────────────────────────────────────
+
+/// The roots that could override `path`, in resolution order, and which one
+/// currently wins.
+///
+/// Answers both halves of the Override flow: the preview asks whether
+/// something already beats the default it is showing, and the picker asks
+/// where a copy could go and whether putting it there would have any effect.
+/// The daemon answers rather than the client, because the order is resolution's
+/// and nothing else should be reimplementing it.
+fn overrides(registry: &Path, projects: &[ProjectSource], path: &str) -> ActionResult {
+    let layers = candidates(registry, projects);
+    let layered = prompts::is_layered(path);
+    let listed: Vec<serde_json::Value> = layers
+        .iter()
+        .map(|root| {
+            serde_json::json!({
+                "key": root.key,
+                "name": root.name,
+                "kind": match root.kind {
+                    KnowledgeRootKind::Store => "store",
+                    KnowledgeRootKind::Project => "project",
+                },
+                "has": layered && prompts::supplies(Path::new(&root.path), path),
+            })
+        })
+        .collect();
+    let winner = listed
+        .iter()
+        .find(|r| r["has"] == serde_json::Value::Bool(true))
+        .map(|r| r["key"].clone());
+    ActionResult::Ok(Some(serde_json::json!({
+        "path": path,
+        "layered": layered,
+        "winner": winner,
+        "roots": listed,
+    })))
+}
+
+/// Every root a copy could go in, in resolution order: healthy, and not
+/// okena's own.
+fn candidates(registry: &Path, projects: &[ProjectSource]) -> Vec<KnowledgeRoot> {
+    discovered(registry, projects)
+        .roots
+        .into_iter()
+        .filter(|r| r.healthy && !r.builtin)
+        .collect()
+}
+
+/// Copy okena's default for `path` into `root`, at the same path.
+///
+/// Reads through the defaults root rather than from the compiled-in constants
+/// so the copy is the exact file the Knowledge view was showing, and so the
+/// path goes through the same checks a read does. An existing file is opened,
+/// never overwritten: a second Override must not discard the edits the first
+/// one was made for.
+fn override_into(
+    registry: &Path,
+    projects: &[ProjectSource],
+    root: &str,
+    path: &str,
+) -> ActionResult {
+    let target = match resolve_writable_root(registry, projects, Some(root)) {
+        Ok(r) => r,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let defaults = match discovered(registry, projects)
+        .roots
+        .into_iter()
+        .find(|r| r.builtin && r.healthy)
+    {
+        Some(r) => r,
+        None => return ActionResult::Err("okena's defaults are not readable on this machine".into()),
+    };
+    let source = match tree::resolve_document(Path::new(&defaults.path), path) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let content = match std::fs::read_to_string(&source) {
+        Ok(c) => c,
+        Err(e) => return ActionResult::Err(format!("could not read okena's {path}: {e}")),
+    };
+
+    // Already there: open it. `create_file` would refuse, but "it exists" is
+    // the ordinary case here, not a failure worth showing.
+    let existing = tree::resolve_document(Path::new(&target.path), path)
+        .ok()
+        .filter(|p| p.is_file());
+    if let Some(p) = existing {
+        return match std::fs::read_to_string(&p) {
+            Ok(content) => ActionResult::Ok(Some(serde_json::json!({
+                "root": target.key,
+                "path": path,
+                "revision": okena_core::fs::content_revision(&content),
+                "created": false,
+            }))),
+            Err(e) => ActionResult::Err(format!("could not read {path} in `{}`: {e}", target.name)),
+        };
+    }
+    match super::document_files::create_file(
+        &target.key,
+        Path::new(&target.path),
+        path,
+        &content,
+        MAX_DOC_BYTES,
+    ) {
+        ActionResult::Ok(Some(mut v)) => {
+            v["created"] = serde_json::Value::Bool(true);
+            ActionResult::Ok(Some(v))
+        }
+        other => other,
+    }
+}
+
+/// Why a root that okena owns refuses to be changed.
+///
+/// Said once, here, because six actions have to say it and because the reply
+/// is the only place a client that has not been updated will learn the rule.
+fn read_only(root: &KnowledgeRoot) -> String {
+    format!(
+        "`{}` holds okena's own briefs and is rewritten on every start, so a change here would be lost — copy the file into a root of your own with Override instead",
+        root.name
+    )
+}
+
+/// A usable root the client named, and not okena's own.
+///
+/// Every action that writes goes through this rather than [`resolve_root`]:
+/// the Knowledge view hides the controls, but the same actions are reachable
+/// from any paired client and from agents over okena's MCP server, so the
+/// refusal has to live at the daemon.
+pub(super) fn resolve_writable_root(
+    registry: &Path,
+    projects: &[ProjectSource],
+    key: Option<&str>,
+) -> Result<KnowledgeRoot, String> {
+    let root = resolve_root(registry, projects, key)?;
+    if root.builtin {
+        return Err(read_only(&root));
+    }
+    Ok(root)
+}
+
 /// A usable root the client named, checked against what discovery found —
 /// never a path taken on trust.
 pub(super) fn resolve_root(
@@ -317,7 +464,7 @@ fn write(
     content: &str,
     revision: &str,
 ) -> ActionResult {
-    let root = match resolve_root(registry, projects, key) {
+    let root = match resolve_writable_root(registry, projects, key) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -354,7 +501,7 @@ fn in_root(
     key: Option<&str>,
     op: impl FnOnce(&str, &Path) -> ActionResult,
 ) -> ActionResult {
-    match resolve_root(registry, projects, key) {
+    match resolve_writable_root(registry, projects, key) {
         Ok(root) => op(&root.key, Path::new(&root.path)),
         Err(e) => ActionResult::Err(e),
     }
@@ -408,12 +555,12 @@ fn draft_brief(
     root: &KnowledgeRoot,
     context_items: &[okena_core::context::ContextItem],
     loaded: bool,
-    prompts: PromptRoot,
+    prompts: &PromptRoots,
 ) -> String {
     let mut vars = Vars::new();
     vars.insert(
         "context",
-        briefs::context_block(context_items, loaded, prompts.as_ref()),
+        briefs::context_block(context_items, loaded, prompts),
     );
     vars.insert("request", request.to_string());
     vars.insert("path", root.path.clone());
@@ -426,19 +573,19 @@ fn draft_brief(
         .to_string(),
     );
     vars.insert("commit_note", commit_note(root.kind, &prompts));
-    briefs::build(Flow::KnowledgeDraft, prompts.as_ref(), &vars)
+    briefs::build(Flow::KnowledgeDraft, prompts, &vars)
         .rendered
         .text
 }
 
 /// Who commits, which depends on whose repository this is. The decision is
 /// here; the words are the `knowledge-commit-*` partials.
-fn commit_note(kind: KnowledgeRootKind, prompts: &PromptRoot) -> String {
+fn commit_note(kind: KnowledgeRootKind, prompts: &PromptRoots) -> String {
     let name = match kind {
         KnowledgeRootKind::Store => "knowledge-commit-store",
         KnowledgeRootKind::Project => "knowledge-commit-project",
     };
-    briefs::block(&briefs::fragment(name, prompts.as_ref(), &Vars::new()))
+    briefs::block(&briefs::fragment(name, prompts, &Vars::new()))
 }
 
 /// The agent a draft session runs. Unlike a spec draft there is nothing to
@@ -479,7 +626,9 @@ pub(super) fn draft(
         super::context::resolve_for_launch(&ws.data.projects, settings, &context_refs);
     let projects = knowledge_project_sources(&ws.data.projects, settings);
     let registry = registry::registry_path(&get_config_dir());
-    let root = match resolve_root(&registry, &projects, root.as_deref()) {
+    // A draft session exists to write into the root, so okena's own is refused
+    // here for the same reason a save is.
+    let root = match resolve_writable_root(&registry, &projects, root.as_deref()) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -493,7 +642,7 @@ pub(super) fn draft(
             &root,
             &context_items,
             install.loaded(),
-            briefs::prompt_root(&ws.data.projects, settings),
+            &briefs::prompt_roots(&ws.data.projects, settings),
         ),
         &install,
     ) {
@@ -566,6 +715,7 @@ mod draft_tests {
             description: None,
             remote: None,
             healthy: true,
+            builtin: false,
             git: None,
             counts: Default::default(),
             used_by: Vec::new(),
@@ -580,7 +730,7 @@ mod draft_tests {
             &root(KnowledgeRootKind::Store),
             &[],
             false,
-            None,
+            &Vec::new(),
         );
         for needle in [
             "document how CI caches work",
@@ -600,7 +750,7 @@ mod draft_tests {
             );
         }
 
-        let project = draft_brief("x", &root(KnowledgeRootKind::Project), &[], false, None);
+        let project = draft_brief("x", &root(KnowledgeRootKind::Project), &[], false, &Vec::new());
         assert!(!project.contains("knowledge/<short-topic>"));
         assert!(project.contains("Leave committing to me"));
     }
@@ -619,7 +769,7 @@ mod draft_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionResult, execute_at, knowledge_project_sources};
+    use super::{ActionResult, discovered, execute_at, knowledge_project_sources};
     use crate::workspace::persistence::AppSettings;
     use crate::workspace::state::ProjectData;
     use okena_core::api::ActionRequest;
@@ -984,6 +1134,323 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(sandbox.join("outside.md")).unwrap(),
             "SECRET"
+        );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    /// A sandbox holding okena's real defaults store plus `id`, a store of
+    /// the user's own. Returns the sandbox and the defaults root's path.
+    ///
+    /// Built through `ensure_store` rather than by hand, so these tests break
+    /// if the defaults stop being materialized the way the daemon does it.
+    fn with_defaults(tag: &str, id: &str) -> (PathBuf, PathBuf) {
+        let sandbox = tmpdir(tag);
+        let defaults = sandbox.join("okena-defaults");
+        okena_knowledge::prompts::defaults::ensure_store(&defaults).unwrap();
+        okena_knowledge::registry::register(
+            &registry(&sandbox),
+            &defaults.to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        store(&sandbox.join(id), id);
+        okena_knowledge::registry::register(
+            &registry(&sandbox),
+            &sandbox.join(id).to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        (sandbox, defaults)
+    }
+
+    const DEFAULTS_KEY: &str = "store:okena-defaults";
+    const TEMPLATE: &str = "templates/spec-draft.md";
+
+    #[test]
+    fn okenas_defaults_are_listed_as_builtin_and_every_write_to_them_is_refused() {
+        let (sandbox, defaults) = with_defaults("readonly", "acme");
+
+        // The flag the clients render read-only from.
+        let stores: KnowledgeStores = ok!(run(&sandbox, &[], ActionRequest::KnowledgeStores));
+        let root = stores.root(DEFAULTS_KEY).expect("listed");
+        assert!(root.builtin && root.healthy);
+        assert!(!stores.root("store:acme").expect("listed").builtin);
+
+        // Reading is fine — that is the whole point of the store existing.
+        let doc: KnowledgeDocument = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeRead {
+                root: Some(DEFAULTS_KEY.into()),
+                path: TEMPLATE.into(),
+            },
+        ));
+        assert!(doc.content.contains("for: spec-draft"), "{}", doc.content);
+
+        // Every way of changing it is refused, and says what to do instead.
+        let refused = [
+            ActionRequest::KnowledgeWrite {
+                root: Some(DEFAULTS_KEY.into()),
+                path: TEMPLATE.into(),
+                content: "ours".into(),
+                revision: doc.revision.clone(),
+            },
+            ActionRequest::KnowledgeFileCreate {
+                root: Some(DEFAULTS_KEY.into()),
+                path: "templates/partials/mine.md".into(),
+                content: "x".into(),
+            },
+            ActionRequest::KnowledgeFolderCreate {
+                root: Some(DEFAULTS_KEY.into()),
+                path: "templates/mine".into(),
+            },
+            ActionRequest::KnowledgeFileRename {
+                root: Some(DEFAULTS_KEY.into()),
+                from: TEMPLATE.into(),
+                to: "templates/moved.md".into(),
+            },
+            ActionRequest::KnowledgeFileDelete {
+                root: Some(DEFAULTS_KEY.into()),
+                path: TEMPLATE.into(),
+            },
+        ];
+        for action in refused {
+            let e = err(run(&sandbox, &[], action));
+            assert!(e.contains("Override"), "unhelpful refusal: {e}");
+        }
+        // And nothing on disk moved.
+        assert_eq!(
+            std::fs::read_to_string(defaults.join(TEMPLATE)).unwrap(),
+            okena_knowledge::prompts::defaults::file(
+                okena_knowledge::prompts::Flow::SpecDraft
+            )
+        );
+        assert!(!defaults.join("templates/partials/mine.md").exists());
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn overrides_lists_the_roots_a_copy_could_go_in_and_who_wins() {
+        let (sandbox, _) = with_defaults("overrides", "acme");
+        let repo = sandbox.join("web");
+        write(&repo.join(".okena/knowledge/docs/a.md"), "# A\n");
+        let projects = [ProjectSource {
+            name: "web".into(),
+            path: repo.clone(),
+        }];
+        let ask = |path: &str| -> serde_json::Value {
+            ok!(run(
+                &sandbox,
+                &projects,
+                ActionRequest::KnowledgeOverrides { path: path.into() },
+            ))
+        };
+
+        // Resolution order, and okena's own store is never a candidate.
+        let out = ask(TEMPLATE);
+        let keys: Vec<&str> = out["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys.len(), 2, "{out}");
+        assert_eq!(keys[0], "store:acme", "stores come before projects");
+        assert!(keys[1].starts_with("path:"), "{out}");
+        assert!(!keys.contains(&DEFAULTS_KEY));
+        // Nobody overrides it yet.
+        assert!(out["winner"].is_null(), "{out}");
+        assert_eq!(out["layered"], true);
+
+        // The project root overrides it, so it wins.
+        write(
+            &repo.join(".okena/knowledge").join(TEMPLATE),
+            "Draft it our way",
+        );
+        let out = ask(TEMPLATE);
+        assert_eq!(out["winner"], out["roots"][1]["key"], "{out}");
+        assert_eq!(out["roots"][0]["has"], false);
+        assert_eq!(out["roots"][1]["has"], true);
+
+        // The store overrides it too, and being earlier it takes over.
+        write(&sandbox.join("acme").join(TEMPLATE), "Draft it the acme way");
+        let out = ask(TEMPLATE);
+        assert_eq!(out["winner"], "store:acme", "{out}");
+
+        // An empty file is not an override, here as at launch.
+        write(&sandbox.join("acme").join(TEMPLATE), "---\nfor: x\n---\n");
+        assert_eq!(ask(TEMPLATE)["winner"], out["roots"][1]["key"]);
+
+        // A file nothing layers is not an override question at all.
+        let readme = ask("README.md");
+        assert_eq!(readme["layered"], false);
+        assert!(readme["winner"].is_null(), "{readme}");
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn an_override_copies_the_default_once_and_never_over_an_existing_file() {
+        let (sandbox, defaults) = with_defaults("override", "acme");
+        let copy = sandbox.join("acme").join(TEMPLATE);
+        let take = |root: &str| {
+            run(
+                &sandbox,
+                &[],
+                ActionRequest::KnowledgeOverride {
+                    root: root.into(),
+                    path: TEMPLATE.into(),
+                },
+            )
+        };
+
+        // The copy is the default's exact bytes, at the same path.
+        let out: serde_json::Value = ok!(take("store:acme"));
+        assert_eq!(out["created"], true);
+        assert_eq!(out["root"], "store:acme");
+        assert_eq!(out["path"], TEMPLATE);
+        assert_eq!(
+            std::fs::read_to_string(&copy).unwrap(),
+            std::fs::read_to_string(defaults.join(TEMPLATE)).unwrap()
+        );
+        // And it now wins, which is the whole point.
+        let listed: serde_json::Value = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeOverrides {
+                path: TEMPLATE.into(),
+            },
+        ));
+        assert_eq!(listed["winner"], "store:acme");
+
+        // Overriding again opens the edited copy rather than discarding it.
+        write(&copy, "our own words");
+        let out: serde_json::Value = ok!(take("store:acme"));
+        assert_eq!(out["created"], false);
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "our own words");
+
+        // okena's own store is not somewhere a copy can go.
+        assert!(err(take(DEFAULTS_KEY)).contains("Override"));
+        // Nor is a root nobody discovered, or a path outside the store.
+        assert!(err(take("store:nope")).contains("unknown knowledge root"));
+        assert!(!err(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeOverride {
+                root: "store:acme".into(),
+                path: "../../escaped.md".into(),
+            },
+        ))
+        .is_empty());
+        assert!(!sandbox.join("escaped.md").exists());
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn overriding_a_default_changes_the_next_brief_and_deleting_it_restores_okenas() {
+        // QBL-415's acceptance walk, end to end over the real actions and the
+        // real renderer: override a default, edit the copy, see the next brief
+        // change, delete the copy, see okena's come back — and see a store
+        // beat a project root while both have it.
+        use okena_knowledge::prompts::{self, Flow};
+
+        let (sandbox, _) = with_defaults("acceptance", "acme");
+        let repo = sandbox.join("web");
+        write(&repo.join(".okena/knowledge/docs/a.md"), "# A\n");
+        let projects = [ProjectSource {
+            name: "web".into(),
+            path: repo.clone(),
+        }];
+        // The layers a launch would resolve through, in the daemon's order.
+        let layers = || -> Vec<(String, std::path::PathBuf)> {
+            discovered(&registry(&sandbox), &projects)
+                .roots
+                .into_iter()
+                .filter(|r| r.healthy && !r.builtin)
+                .map(|r| (r.key.clone(), std::path::PathBuf::from(&r.path)))
+                .collect()
+        };
+        let brief = |roots: &[(String, std::path::PathBuf)]| {
+            let borrowed: Vec<prompts::Root<'_>> = roots
+                .iter()
+                .map(|(k, p)| (k.as_str(), p.as_path()))
+                .collect();
+            prompts::brief(Flow::SpecDraft, &borrowed, &prompts::Vars::new())
+        };
+
+        // Before any override, the brief is okena's own.
+        assert_eq!(brief(&layers()).source, prompts::Source::Builtin);
+
+        // Override into the store, then edit the copy as the editor would.
+        let out: serde_json::Value = ok!(run(
+            &sandbox,
+            &projects,
+            ActionRequest::KnowledgeOverride {
+                root: "store:acme".into(),
+                path: TEMPLATE.into(),
+            },
+        ));
+        assert_eq!(out["created"], true);
+        let copy = sandbox.join("acme").join(TEMPLATE);
+        let doc: KnowledgeDocument = ok!(run(
+            &sandbox,
+            &projects,
+            ActionRequest::KnowledgeRead {
+                root: Some("store:acme".into()),
+                path: TEMPLATE.into(),
+            },
+        ));
+        let _: serde_json::Value = ok!(run(
+            &sandbox,
+            &projects,
+            ActionRequest::KnowledgeWrite {
+                root: Some("store:acme".into()),
+                path: TEMPLATE.into(),
+                content: "Draft it the acme way.".into(),
+                revision: doc.revision,
+            },
+        ));
+
+        // The next launch uses the edited copy.
+        let b = brief(&layers());
+        assert_eq!(b.text(), "Draft it the acme way.");
+        assert_eq!(
+            b.source,
+            prompts::Source::Root {
+                key: "store:acme".into(),
+                path: TEMPLATE.into()
+            }
+        );
+
+        // A project root with the same file loses to the store above it.
+        write(
+            &repo.join(".okena/knowledge").join(TEMPLATE),
+            "Draft it the web way.",
+        );
+        assert_eq!(brief(&layers()).text(), "Draft it the acme way.");
+
+        // Remove it from the store and the project root's copy wins.
+        let _: serde_json::Value = ok!(run(
+            &sandbox,
+            &projects,
+            ActionRequest::KnowledgeFileDelete {
+                root: Some("store:acme".into()),
+                path: TEMPLATE.into(),
+            },
+        ));
+        assert!(!copy.exists());
+        assert_eq!(brief(&layers()).text(), "Draft it the web way.");
+
+        // Delete that one too and okena's built-in is back.
+        std::fs::remove_file(repo.join(".okena/knowledge").join(TEMPLATE)).unwrap();
+        assert_eq!(brief(&layers()).source, prompts::Source::Builtin);
+
+        // And a default edited on disk is restored the way a restart does it.
+        let defaults = sandbox.join("okena-defaults");
+        std::fs::write(defaults.join(TEMPLATE), "tampered").unwrap();
+        prompts::defaults::ensure_store(&defaults).expect("restart");
+        assert_eq!(
+            std::fs::read_to_string(defaults.join(TEMPLATE)).unwrap(),
+            prompts::defaults::file(Flow::SpecDraft)
         );
         std::fs::remove_dir_all(&sandbox).ok();
     }

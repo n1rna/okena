@@ -232,10 +232,24 @@ impl HarnessPane {
 
     /// Open the settings modal on `page`.
     pub(super) fn open_settings(&self, page: &'static str, cx: &mut App) {
+        self.open_settings_at(page, None, cx);
+    }
+
+    /// Open the settings modal on `page`, landing on `section` of it.
+    ///
+    /// For buttons that send you to settings to do one specific thing — "Add a
+    /// new root…" means the add form, not the top of the Knowledge page.
+    pub(super) fn open_settings_at(
+        &self,
+        page: &'static str,
+        section: Option<&'static str>,
+        cx: &mut App,
+    ) {
         self.request_broker.update(cx, |broker, cx| {
             broker.push_overlay_request(
                 okena_workspace::requests::OverlayRequest::Settings {
                     page: Some(page.to_string()),
+                    section: section.map(str::to_string),
                 },
                 cx,
             );
