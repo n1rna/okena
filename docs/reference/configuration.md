@@ -252,6 +252,7 @@ the same stores. The CLI does not need to be installed.
 | `harness.specs.folders` | string[] | `[]` | Extra folders to show as roots without registering them |
 | `harness.specs.data_dir` | string | — | OpenSpec data directory. Unset resolves like the CLI: `$XDG_DATA_HOME/openspec`, else `~/.local/share/openspec` (`%LOCALAPPDATA%\openspec` on Windows) |
 | `harness.specs.config_dir` | string | — | OpenSpec config directory holding `config.json`. Unset resolves `$XDG_CONFIG_HOME/openspec`, else `~/.config/openspec` (`%APPDATA%\openspec` on Windows) |
+| `harness.specs.clone_dir` | string | `~/openspec` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
 | `harness.spec_repo` | string | — | Legacy single spec repository. Still shown as a folder; cleared once the folder list is edited |
 
 The Specs view opens OpenSpec's `defaultStore` when it is set and healthy, else
@@ -278,6 +279,11 @@ paths are machine state. Settings only shape discovery and cloning.
 |-----|------|---------|-------------|
 | `harness.knowledge.projects` | bool | `true` | Find knowledge in okena projects: the stores a repository follows in `.okena/knowledge.yaml`, and its own `.okena/knowledge/` (or `root:`) folders. Worktrees and agent sessions are skipped |
 | `harness.knowledge.clone_dir` | string | `~/knowledge` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
+
+There is no key naming one root as the source of launch briefs. Templates,
+partials and skills resolve across every root okena can see, in discovery order
+([resolution](knowledge.md#resolution)); a `harness.knowledge.prompts` left in
+an older `settings.json` is ignored and dropped on the next save.
 
 #### Agent options
 
