@@ -541,8 +541,8 @@ fn brief(
     vars.insert("change", change.to_string());
     vars.insert("change_dir", change_dir.to_string());
     vars.insert("root_path", root.path.clone());
-    vars.insert("store_note", store_note(change, root, &prompts));
-    vars.insert("references", reference_note(root, &prompts));
+    vars.insert("store_note", store_note(change, root, prompts));
+    vars.insert("references", reference_note(root, prompts));
     vars.insert(
         "context",
         briefs::context_block(context_items, loaded, prompts),

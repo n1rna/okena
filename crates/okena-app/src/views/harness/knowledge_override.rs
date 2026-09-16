@@ -342,13 +342,13 @@ impl HarnessPane {
         // Three things a root can be, in the order they matter to the choice.
         let note = if root.has {
             Some(("Already has this file — opens it".to_string(), t.text_muted))
-        } else if let Some(winner) = state.and_then(|s| s.loses_to(root)) {
-            Some((
-                format!("`{}` comes first, so a copy here is not used", winner.name),
-                t.warning,
-            ))
         } else {
-            None
+            state.and_then(|s| s.loses_to(root)).map(|winner| {
+                (
+                    format!("`{}` comes first, so a copy here is not used", winner.name),
+                    t.warning,
+                )
+            })
         };
         let busy = self.knowledge_override.busy;
         let key = root.key.clone();

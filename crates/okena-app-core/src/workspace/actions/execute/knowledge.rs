@@ -572,7 +572,7 @@ fn draft_brief(
         }
         .to_string(),
     );
-    vars.insert("commit_note", commit_note(root.kind, &prompts));
+    vars.insert("commit_note", commit_note(root.kind, prompts));
     briefs::build(Flow::KnowledgeDraft, prompts, &vars)
         .rendered
         .text
