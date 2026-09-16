@@ -6,7 +6,6 @@
 //! have been sent, rather than a documented approximation of it that drifts.
 
 use super::{Flow, body_of};
-use std::collections::BTreeMap;
 use std::path::Path;
 
 /// The raw file for `flow`, frontmatter and all.
@@ -192,12 +191,20 @@ pub fn body(flow: Flow) -> &'static str {
 }
 
 /// Every file okena manages in its defaults store: path and contents.
+///
+/// The identity and the README are in here with the templates because the
+/// whole folder is okena's: a stale README describing behaviour okena no
+/// longer has is exactly the kind of drift this store exists to prevent.
 fn managed_files() -> Vec<(String, &'static str)> {
     Flow::all()
         .iter()
         .map(|f| (f.template_path(), file(*f)))
         .chain(PARTIALS.iter().map(|(n, f)| (partial_path(n), *f)))
         .chain(SKILLS.iter().map(|(n, f)| (skill_path(n), *f)))
+        .chain([
+            (IDENTITY_PATH.to_string(), IDENTITY),
+            ("README.md".to_string(), README),
+        ])
         .collect()
 }
 
@@ -206,12 +213,9 @@ fn managed_files() -> Vec<(String, &'static str)> {
 pub struct Materialized {
     /// Files that did not exist and now do.
     pub written: Vec<String>,
-    /// Files okena had written, you had not touched, and okena has since
-    /// changed — brought up to date.
+    /// Files that were on disk saying something else, and now say what the
+    /// built-in says.
     pub updated: Vec<String>,
-    /// Files that differ from the default because you changed them. Left as
-    /// they are.
-    pub customized: Vec<String>,
 }
 
 impl Materialized {
@@ -220,48 +224,44 @@ impl Materialized {
     }
 }
 
-/// Where okena records what it last wrote, relative to the root.
-const RECORD_PATH: &str = ".okena-knowledge/defaults.lock";
+/// Where okena used to record what it had written, relative to the root.
+///
+/// Nothing reads it now — okena rewrites every file regardless — so a run
+/// deletes it rather than leaving a stale file that claims to mean something.
+const STALE_RECORD_PATH: &str = ".okena-knowledge/defaults.lock";
 
-/// Write okena's templates and partials into `root`, keeping them current.
+/// Write okena's templates, partials and skills into `root`, overwriting
+/// whatever is there.
 ///
-/// The rule that makes this safe to run on every start: okena only ever
-/// replaces a file it can prove it wrote and you have not edited since. It
-/// records a hash of each file as it writes it; a file whose contents still
-/// match that hash is okena's to update when the default changes, and a file
-/// that no longer matches is yours and is left alone.
+/// This folder is okena's, not yours (QBL-415). Every file is restored to the
+/// built-in on every run, so what the Knowledge view shows under
+/// `okena-defaults` is always the text a launch would actually use — a
+/// guarantee that is worth more than the ability to edit a copy in place, and
+/// that the old edit-detecting behaviour quietly broke: an edited default kept
+/// its edit *and* stopped receiving okena's updates, so the file on screen was
+/// neither yours nor okena's.
 ///
-/// A file with no record — a store from before the record existed — is
-/// adopted if it already matches the default and otherwise treated as edited,
-/// because okena cannot tell an old default from your change.
+/// Changing a default means overriding it from a root of your own, which the
+/// layered resolution in [`super`] then prefers.
 pub fn materialize(root: &Path) -> std::io::Result<Materialized> {
-    let mut record = read_record(root);
     let mut report = Materialized::default();
-
     for (rel, contents) in managed_files() {
         let path = root.join(&rel);
-        let current = std::fs::read_to_string(&path).ok();
-        match current {
-            None => {
+        match std::fs::read_to_string(&path) {
+            Ok(on_disk) if on_disk == contents => {}
+            Ok(_) => {
                 write_file(&path, contents)?;
-                record.insert(rel.clone(), fingerprint(contents));
+                report.updated.push(rel);
+            }
+            Err(_) => {
+                write_file(&path, contents)?;
                 report.written.push(rel);
             }
-            Some(on_disk) if on_disk == contents => {
-                record.insert(rel, fingerprint(contents));
-            }
-            Some(on_disk) => match record.get(&rel) {
-                // Unedited since okena wrote it, and the default has moved on.
-                Some(hash) if *hash == fingerprint(&on_disk) => {
-                    write_file(&path, contents)?;
-                    record.insert(rel.clone(), fingerprint(contents));
-                    report.updated.push(rel);
-                }
-                _ => report.customized.push(rel),
-            },
         }
     }
-    write_record(root, &record)?;
+    // Best-effort: a record okena cannot remove is only clutter, and failing
+    // the whole run over it would cost the user their defaults.
+    let _ = std::fs::remove_file(root.join(STALE_RECORD_PATH));
     Ok(report)
 }
 
@@ -272,39 +272,6 @@ fn write_file(path: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::write(path, contents)
 }
 
-/// FNV-1a, 64-bit. Not a security boundary — it only has to notice that a
-/// file changed, and it keeps this crate free of a hashing dependency.
-fn fingerprint(contents: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in contents.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    format!("{hash:016x}")
-}
-
-fn read_record(root: &Path) -> BTreeMap<String, String> {
-    std::fs::read_to_string(root.join(RECORD_PATH))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let (hash, path) = line.split_once(' ')?;
-            Some((path.to_string(), hash.to_string()))
-        })
-        .collect()
-}
-
-fn write_record(root: &Path, record: &BTreeMap<String, String>) -> std::io::Result<()> {
-    let mut out = String::from(
-        "# Written by okena. Which default files it wrote, and what they held,\n\
-         # so it can update the ones you have not edited. Safe to delete.\n",
-    );
-    for (path, hash) in record {
-        out.push_str(&format!("{hash} {path}\n"));
-    }
-    write_file(&root.join(RECORD_PATH), &out)
-}
-
 // ─── The built-in store ──────────────────────────────────────────────────────
 
 /// The store id okena's own defaults are registered under.
@@ -313,49 +280,46 @@ pub const DEFAULT_STORE_ID: &str = "okena-defaults";
 /// Folder name the defaults are materialized into, under the knowledge folder.
 pub const DEFAULT_STORE_DIR: &str = "okena-defaults";
 
+/// Where a store keeps its identity, relative to its root.
+const IDENTITY_PATH: &str = ".okena-knowledge/store.yaml";
+
+/// The defaults store's identity.
+const IDENTITY: &str = "version: 1\n\
+     id: okena-defaults\n\
+     name: okena defaults\n\
+     description: The briefs okena launches agents with. Read-only — override one from a root of your own.\n";
+
 /// Make sure okena's defaults exist on disk at `dir`, as a knowledge root.
 ///
-/// Writes an identity, the templates and partials, and keeps unedited ones
-/// current (see [`materialize`]). Not a git repository: it is a knowledge
+/// Writes the identity, the templates, partials and skills, and restores any
+/// that differ (see [`materialize`]). Not a git repository: it is a knowledge
 /// root, which is enough to be listed, read and used.
 pub fn ensure_store(dir: &Path) -> std::io::Result<Materialized> {
     std::fs::create_dir_all(dir)?;
-    let identity = dir.join(".okena-knowledge/store.yaml");
-    if !identity.exists() {
-        write_file(
-            &identity,
-            &format!(
-                "version: 1\nid: {DEFAULT_STORE_ID}\nname: okena defaults\n\
-                 description: The briefs okena launches agents with. Copy one into your own store to override it.\n"
-            ),
-        )?;
-    }
-    let mut report = materialize(dir)?;
-    let readme = dir.join("README.md");
-    if !readme.exists() {
-        std::fs::write(&readme, README)?;
-        report.written.push("README.md".to_string());
-    }
-    Ok(report)
+    materialize(dir)
 }
 
 /// What somebody finds when they open the folder.
 const README: &str = "\
 # okena defaults
 
-These are the briefs okena launches agents with. Read them here; to change one
-for your organisation, copy it into your own knowledge store under the same path
-and point Settings → Knowledge at that store. A file you do not override falls
-back to the built-in, so you can change one brief without supplying the rest.
+These are the briefs okena launches agents with, and this folder is okena's:
+every file here is rewritten to match the build each time okena starts, so what
+you read is always what a launch would actually send. Editing a file here does
+nothing — your change is gone by the next start.
+
+To change one, override it. Open it in Harness → Knowledge and press
+**Override**, pick one of your own knowledge roots, and edit the copy there.
+okena looks for each file in every root it can see — registered stores first,
+then your projects' own knowledge folders — and uses the first one that has it,
+falling back to the built-in. So you can override one brief without supplying
+the rest, and deleting your copy restores okena's.
 
 - `templates/<flow>.md` — the brief for one launch flow; frontmatter says which.
 - `templates/partials/<name>.md` — text shared between briefs, included with
   `{>name}`, or used as `{value|name}` when a value is empty.
 - `skills/<name>/SKILL.md` — skills okena hands an agent whole, such as
   `project-map`. Overriding one replaces the whole file.
-
-okena keeps the files here current: it updates any it wrote that you have not
-changed, and leaves the ones you have edited alone.
 ";
 
 #[cfg(test)]
@@ -449,92 +413,77 @@ mod tests {
     }
 
     #[test]
-    fn materialize_never_reverts_an_edit() {
+    fn materialize_restores_an_edited_default() {
+        // The rule QBL-415 replaced the record with: this folder is okena's,
+        // so an edit to it does not survive the next start.
         let dir = tempfile::tempdir().expect("tempdir");
         materialize(dir.path()).expect("write");
-        let path = dir.path().join(Flow::SpecDraft.template_path());
+        let rel = Flow::SpecDraft.template_path();
+        let path = dir.path().join(&rel);
         std::fs::write(&path, "our own words").expect("edit");
+
         let again = materialize(dir.path()).expect("write again");
         assert_eq!(
             std::fs::read_to_string(&path).expect("read"),
-            "our own words"
+            file(Flow::SpecDraft),
+            "an edited default was left as the user wrote it"
         );
-        assert_eq!(again.customized, [Flow::SpecDraft.template_path()]);
+        assert_eq!(again.updated, std::slice::from_ref(&rel));
+        assert!(again.written.is_empty(), "{again:?}");
     }
 
     #[test]
-    fn an_untouched_default_is_brought_up_to_date() {
-        // What an upgrade looks like: okena wrote an older default, nobody
-        // edited it, and the built-in has since changed.
+    fn every_managed_file_is_restored_whatever_state_it_was_left_in() {
+        // Deleted, emptied, edited, or a file from a build that predates the
+        // record: each one comes back, and nothing else is touched.
         let dir = tempfile::tempdir().expect("tempdir");
         materialize(dir.path()).expect("write");
-        let rel = Flow::TaskStart.template_path();
-        let old = "an older default";
-        std::fs::write(dir.path().join(&rel), old).expect("simulate old");
-        // Record it as okena's own writing, the way that older run would have.
-        let record_path = dir.path().join(super::RECORD_PATH);
-        let record = std::fs::read_to_string(&record_path).expect("record");
-        let rewritten: String = record
-            .lines()
-            .map(|line| {
-                if line.ends_with(&format!(" {rel}")) {
-                    format!("{} {rel}\n", super::fingerprint(old))
-                } else {
-                    format!("{line}\n")
-                }
-            })
-            .collect();
-        std::fs::write(&record_path, rewritten).expect("record old");
+        let deleted = Flow::TaskVerify.template_path();
+        let emptied = partial_path("reporting");
+        let edited = super::skill_path(super::PROJECT_MAP_SKILL);
+        std::fs::remove_file(dir.path().join(&deleted)).expect("rm");
+        std::fs::write(dir.path().join(&emptied), "").expect("empty");
+        std::fs::write(dir.path().join(&edited), "ours").expect("edit");
+        // A lock file from before QBL-415, which nothing reads now.
+        let stale = dir.path().join(super::STALE_RECORD_PATH);
+        std::fs::write(&stale, "deadbeef templates/task-start.md\n").expect("stale record");
 
-        let report = materialize(dir.path()).expect("upgrade");
-        assert_eq!(report.updated, std::slice::from_ref(&rel));
+        let report = materialize(dir.path()).expect("restore");
+        assert_eq!(report.written, std::slice::from_ref(&deleted));
+        assert_eq!(report.updated, [emptied.clone(), edited.clone()]);
         assert_eq!(
-            std::fs::read_to_string(dir.path().join(&rel)).expect("read"),
-            file(Flow::TaskStart)
+            std::fs::read_to_string(dir.path().join(&deleted)).expect("read"),
+            file(Flow::TaskVerify)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(&edited)).expect("read"),
+            super::skill_file(super::PROJECT_MAP_SKILL).expect("skill")
+        );
+        assert!(!stale.exists(), "the dead record was left behind");
+
+        // And a second run has nothing left to do.
+        assert!(
+            !materialize(dir.path()).expect("again").changed_anything(),
+            "restoring is not idempotent"
         );
     }
 
     #[test]
-    fn a_flow_added_later_appears_without_touching_the_rest() {
-        // What an upgrade that adds a flow looks like: a defaults folder from
-        // before `task-verify` existed, with one of its files edited since.
+    fn the_identity_and_readme_are_okenas_too() {
         let dir = tempfile::tempdir().expect("tempdir");
-        materialize(dir.path()).expect("write");
-        let added = Flow::TaskVerify.template_path();
-        std::fs::remove_file(dir.path().join(&added)).expect("predate the flow");
-        let record_path = dir.path().join(super::RECORD_PATH);
-        let record = std::fs::read_to_string(&record_path).expect("record");
-        let older: String = record
-            .lines()
-            .filter(|line| !line.ends_with(&format!(" {added}")))
-            .map(|line| format!("{line}\n"))
-            .collect();
-        std::fs::write(&record_path, older).expect("record without it");
-        let edited = dir.path().join(Flow::SpecDraft.template_path());
-        std::fs::write(&edited, "our own words").expect("edit");
+        ensure_store(dir.path()).expect("create");
+        let identity = dir.path().join(super::IDENTITY_PATH);
+        std::fs::write(&identity, "version: 1\nid: not-okenas\n").expect("edit");
+        std::fs::write(dir.path().join("README.md"), "mine").expect("edit");
 
-        let report = materialize(dir.path()).expect("upgrade");
-        assert_eq!(report.written, std::slice::from_ref(&added));
-        assert!(report.updated.is_empty(), "{report:?}");
-        assert_eq!(report.customized, [Flow::SpecDraft.template_path()]);
-        assert_eq!(
-            std::fs::read_to_string(&edited).expect("read"),
-            "our own words"
-        );
-    }
-
-    #[test]
-    fn a_file_from_before_the_record_existed_is_not_overwritten() {
-        // okena cannot tell an old default from an edit, so it assumes an edit.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let rel = Flow::TaskStart.template_path();
-        std::fs::create_dir_all(dir.path().join("templates")).expect("mkdir");
-        std::fs::write(dir.path().join(&rel), "unknown provenance").expect("write");
-        let report = materialize(dir.path()).expect("write");
-        assert_eq!(report.customized, std::slice::from_ref(&rel));
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join(&rel)).expect("read"),
-            "unknown provenance"
+        ensure_store(dir.path()).expect("restore");
+        let restored = std::fs::read_to_string(&identity).expect("identity");
+        assert!(restored.contains(super::DEFAULT_STORE_ID), "{restored}");
+        assert!(
+            std::fs::read_to_string(dir.path().join("README.md"))
+                .expect("readme")
+                .contains("**Override**"),
+            "the README still described editing in place"
         );
     }
 

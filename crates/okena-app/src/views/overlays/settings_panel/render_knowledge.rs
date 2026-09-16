@@ -7,12 +7,13 @@
 //! discovery switch and the clone folder are ordinary settings.
 
 use super::SettingsPanel;
-use super::components::{hook_input_row, section_container, section_header, settings_input_row};
+use super::components::{hook_input_row, section_container, section_header};
+use super::components::{AddMode, init_git_toggle, mode_chip};
 use super::render_specs::{
     badge, banner, diagnostic, labeled_input, muted, muted_row, path_line, text_input,
 };
 use crate::settings::settings_entity;
-use crate::theme::{ThemeColors, theme, with_alpha};
+use crate::theme::{ThemeColors, theme};
 use crate::ui::tokens::{ui_text, ui_text_ms};
 use crate::views::components::simple_input::{InputChangedEvent, SimpleInputState};
 use gpui::prelude::*;
@@ -24,16 +25,13 @@ use okena_core::knowledge::{
     Severity,
 };
 
-/// Which "add a store" form is showing.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AddMode {
-    Clone,
-    Register,
-    Create,
-}
-
 /// State of the Knowledge page.
 pub(super) struct KnowledgePage {
+    /// Show the "add a store" form at the top of the page.
+    ///
+    /// Set when something sent you here to add a root, so the form is the
+    /// first thing on screen instead of something to scroll for.
+    pub(super) add_first: bool,
     stores: Option<KnowledgeStores>,
     loading: bool,
     /// The discovery settings the current snapshot was read with; a change
@@ -69,6 +67,7 @@ impl KnowledgePage {
 
         Self {
             stores: None,
+            add_first: false,
             loading: false,
             fetched_for: None,
             refresh_pending: false,
@@ -487,39 +486,20 @@ impl SettingsPanel {
             .into_any_element()
     }
 
-    fn render_knowledge_mode_chip(
-        &self,
-        mode: AddMode,
-        label: &str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_knowledge_mode_chip(&self, mode: AddMode, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let selected = self.knowledge.mode == mode;
-        div()
-            .id(SharedString::from(format!("knowledge-mode-{label}")))
-            .cursor_pointer()
-            .px(px(10.0))
-            .py(px(3.0))
-            .rounded(px(4.0))
-            .border_1()
-            .border_color(rgb(if selected { t.border_active } else { t.border }))
-            .when(selected, |d| d.bg(with_alpha(t.button_primary_bg, 0.15)))
-            .text_size(ui_text_ms(cx))
-            .text_color(rgb(if selected {
-                t.text_primary
-            } else {
-                t.text_secondary
-            }))
-            .child(label.to_string())
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.knowledge.mode = mode;
-                    this.knowledge.error = None;
-                    cx.notify();
-                }),
-            )
-            .into_any_element()
+        mode_chip(
+            format!("knowledge-mode-{mode:?}"),
+            mode.label(),
+            self.knowledge.mode == mode,
+            &t,
+            cx,
+            cx.listener(move |this, _, _window, cx| {
+                this.knowledge.mode = mode;
+                this.knowledge.error = None;
+                cx.notify();
+            }),
+        )
     }
 
     fn render_add_knowledge_store(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -528,23 +508,21 @@ impl SettingsPanel {
         let tabs = h_flex()
             .gap(px(6.0))
             .flex_wrap()
-            .child(self.render_knowledge_mode_chip(AddMode::Clone, "Clone a repository", cx))
-            .child(self.render_knowledge_mode_chip(AddMode::Register, "Add an existing folder", cx))
-            .child(self.render_knowledge_mode_chip(AddMode::Create, "Create a new store", cx));
+            .children(AddMode::ALL.map(|m| self.render_knowledge_mode_chip(m, cx)));
 
         let form = match self.knowledge.mode {
             AddMode::Clone => v_flex()
                 .gap(px(10.0))
                 .child(labeled_input(
                     "Repository URL",
-                    "Your team's knowledge repository. Git runs without prompts, so credentials must come from an SSH agent or a credential helper.",
+                    "Git runs without prompts, so credentials come from an SSH agent or credential helper.",
                     &self.knowledge.clone_url_input,
                     &t,
                     cx,
                 ))
                 .child(labeled_input(
                     "Destination (optional)",
-                    "Where to put the checkout. Blank clones into the clone folder, named the way git clone names it.",
+                    "",
                     &self.knowledge.clone_path_input,
                     &t,
                     cx,
@@ -559,8 +537,8 @@ impl SettingsPanel {
             AddMode::Register => v_flex()
                 .gap(px(10.0))
                 .child(labeled_input(
-                    "Checkout folder",
-                    "The top of a knowledge repository you already have: one with .okena-knowledge/store.yaml, or docs/, skills/, agents/ or templates/ folders.",
+                    "Folder",
+                    "The top of the checkout, with docs/, skills/, agents/ or templates/ in it.",
                     &self.knowledge.register_path_input,
                     &t,
                     cx,
@@ -578,59 +556,42 @@ impl SettingsPanel {
                     .gap(px(10.0))
                     .child(labeled_input(
                         "Store id",
-                        "Kebab-case, e.g. acme-eng. Project repos follow it with `stores: [acme-eng]` in .okena/knowledge.yaml.",
+                        "Kebab-case. Projects follow it with `stores: [acme-eng]` in .okena/knowledge.yaml.",
                         &self.knowledge.setup_id_input,
                         &t,
                         cx,
                     ))
                     .child(labeled_input(
                         "Name (optional)",
-                        "How the store is shown; the id when blank.",
+                        "",
                         &self.knowledge.setup_name_input,
                         &t,
                         cx,
                     ))
                     .child(labeled_input(
                         "Folder",
-                        "An empty folder outside any other git repository, e.g. ~/knowledge/acme-eng.",
+                        "An empty folder outside any other git repository.",
                         &self.knowledge.setup_path_input,
                         &t,
                         cx,
                     ))
                     .child(labeled_input(
                         "Remote (optional)",
-                        "The clone URL, recorded in the store's identity.",
+                        "",
                         &self.knowledge.setup_remote_input,
                         &t,
                         cx,
                     ))
-                    .child(
-                        h_flex().child(
-                            div()
-                                .id("knowledge-init-git")
-                                .cursor_pointer()
-                                .px(px(10.0))
-                                .py(px(3.0))
-                                .rounded(px(4.0))
-                                .border_1()
-                                .border_color(rgb(if init_git { t.border_active } else { t.border }))
-                                .when(init_git, |d| d.bg(with_alpha(t.button_primary_bg, 0.15)))
-                                .text_size(ui_text_ms(cx))
-                                .text_color(rgb(t.text_primary))
-                                .child(if init_git {
-                                    "✓ Initialize Git with an initial commit"
-                                } else {
-                                    "Initialize Git with an initial commit"
-                                })
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _window, cx| {
-                                        this.knowledge.init_git = !this.knowledge.init_git;
-                                        cx.notify();
-                                    }),
-                                ),
-                        ),
-                    )
+                    .child(h_flex().child(init_git_toggle(
+                        "knowledge-init-git",
+                        init_git,
+                        &t,
+                        cx,
+                        cx.listener(|this, _, _window, cx| {
+                            this.knowledge.init_git = !this.knowledge.init_git;
+                            cx.notify();
+                        }),
+                    )))
                     .child(h_flex().child(self.knowledge_button(
                         "knowledge-create-submit".into(),
                         if busy { "Creating…" } else { "Create store" },
@@ -683,6 +644,14 @@ impl SettingsPanel {
 
         let mut page = v_flex();
 
+        // Sent here to add a root: the form leads, so it is on screen without
+        // scrolling past the stores you already have.
+        if self.knowledge.add_first {
+            page = page
+                .child(section_header("Add a store", &t, cx))
+                .child(self.render_add_knowledge_store(cx));
+        }
+
         // ── Overview ───────────────────────────────────────────────────────
         let mut facts = v_flex()
             .flex_1()
@@ -699,17 +668,6 @@ impl SettingsPanel {
         }
         page = page.child(section_header("Knowledge", &t, cx)).child(
             section_container(&t)
-                .child(settings_input_row(
-                    "knowledge-intro",
-                    "Knowledge stores",
-                    "A knowledge store is a git repository of your team's engineering docs, \
-                     skills, agents and prompt templates, in docs/, skills/, agents/ and \
-                     templates/ folders. okena lists the stores you add here, plus what your \
-                     projects keep under .okena/knowledge/, in the harness Knowledge view.",
-                    &t,
-                    cx,
-                    false,
-                ))
                 .child(
                     h_flex()
                         .items_end()
@@ -769,10 +727,14 @@ impl SettingsPanel {
         for (i, root) in store_roots.iter().enumerate() {
             container = container.child(self.render_knowledge_root_row(root, i > 0, cx));
         }
-        page = page
-            .child(container)
-            .child(section_header("Add a store", &t, cx))
-            .child(self.render_add_knowledge_store(cx));
+        if !self.knowledge.add_first {
+            page = page
+                .child(container)
+                .child(section_header("Add a store", &t, cx))
+                .child(self.render_add_knowledge_store(cx));
+        } else {
+            page = page.child(container);
+        }
 
         // ── Discovery ──────────────────────────────────────────────────────
         page = page.child(section_header("Discovery", &t, cx)).child(

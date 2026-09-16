@@ -2989,13 +2989,15 @@ pub async fn daemon_command_loop(
                 continue;
             }
             // ── OpenSpec store changes: off the queue and the workspace lock ──
-            // Store setup runs `git init` and a commit (the user's hooks may
-            // run), and every registry change may wait up to 5 s on the lock an
-            // `openspec` command holds. None of them touch the workspace, so they
+            // A clone is network-bound and unbounded, store setup runs
+            // `git init` and a commit (the user's hooks may run), and every
+            // registry change may wait up to 5 s on the lock an `openspec`
+            // command holds. None of them touch the workspace, so they
             // run on the blocking pool with a settings snapshot and reply when
             // done instead of stalling every other action behind them.
             RemoteCommand::Action(
-                action @ (ActionRequest::SpecStoreRegister { .. }
+                action @ (ActionRequest::SpecStoreClone { .. }
+                | ActionRequest::SpecStoreRegister { .. }
                 | ActionRequest::SpecStoreUnregister { .. }
                 | ActionRequest::SpecStoreSetup { .. }
                 | ActionRequest::SpecSetDefaultStore { .. }),
@@ -3080,6 +3082,8 @@ pub async fn daemon_command_loop(
                 | ActionRequest::KnowledgeFolderCreate { .. }
                 | ActionRequest::KnowledgeFileRename { .. }
                 | ActionRequest::KnowledgeFileDelete { .. }
+                | ActionRequest::KnowledgeOverrides { .. }
+                | ActionRequest::KnowledgeOverride { .. }
                 | ActionRequest::KnowledgeStoreClone { .. }
                 | ActionRequest::KnowledgeStoreRegister { .. }
                 | ActionRequest::KnowledgeStoreUnregister { .. }

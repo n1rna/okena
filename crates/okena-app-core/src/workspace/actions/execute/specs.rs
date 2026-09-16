@@ -12,7 +12,7 @@
 //! server, so they must not become a way to read arbitrary files.
 
 use super::ActionResult;
-use super::briefs::{self, PromptRoot};
+use super::briefs::{self, PromptRoots};
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{ProjectData, WindowId, Workspace};
 use okena_core::specs::{SpecRoot, SpecRootKind, SpecStores, change_slug};
@@ -366,6 +366,72 @@ fn in_root(
 
 // ─── Store management ────────────────────────────────────────────────────────
 
+/// Clone an OpenSpec store repository and register the checkout.
+///
+/// Here rather than in `okena-openspec` for the same reason fetch, pull and
+/// push are: that crate deliberately carries no git beyond `init` and the
+/// first commit, and the clone okena needs is `okena_git`'s — including its URL
+/// validation, which must not be reimplemented where it could drift.
+///
+/// A repository that turns out not to be an OpenSpec root is left on disk: the
+/// clone is the user's to keep or remove, and the error says where it is.
+pub(super) fn clone_store(
+    settings: &AppSettings,
+    url: &str,
+    dest: Option<&str>,
+) -> ActionResult {
+    use okena_git::repository as git;
+
+    let Ok(url) = git::validate_clone_url(url) else {
+        return ActionResult::Err(
+            "Enter a repository URL to clone, for example git@github.com:acme/team-plans.git."
+                .into(),
+        );
+    };
+    let target = match dest.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(dest) => okena_core::fs::expand_home(dest),
+        None => match git::clone_dir_name(url) {
+            Some(name) => settings.harness.specs.clone_dir().join(name),
+            None => {
+                return ActionResult::Err(format!(
+                    "No folder name can be derived from {url} — choose a destination folder."
+                ));
+            }
+        },
+    };
+
+    let existed = target.exists();
+    if let Err(e) = git::clone_repository(url, &target) {
+        // Only clean up what this call created; a folder that was already
+        // there is the user's.
+        if !existed {
+            let _ = std::fs::remove_dir_all(&target);
+        }
+        return ActionResult::Err(match e {
+            okena_git::GitError::CloneTargetExists { .. } => format!(
+                "{} already exists and is not empty — choose another destination, or add that folder as an existing store.",
+                target.display()
+            ),
+            e => format!(
+                "Could not clone {url}: {} — check the URL, and that git can reach it from a terminal.",
+                e.user_detail()
+            ),
+        });
+    }
+    match registry::register(&dirs(settings), &target.to_string_lossy(), None) {
+        Ok(r) => ActionResult::Ok(Some(serde_json::json!({
+            "id": r.id,
+            "root": r.root.to_string_lossy(),
+            "metadata_created": r.metadata_created,
+            "already_registered": r.already_registered,
+        }))),
+        Err(e) => ActionResult::Err(format!(
+            "Cloned into {}, but it can't be added: {e}",
+            target.display()
+        )),
+    }
+}
+
 pub(super) fn register_store(
     settings: &AppSettings,
     path: String,
@@ -468,7 +534,7 @@ fn brief(
     root: &SpecRoot,
     context_items: &[okena_core::context::ContextItem],
     loaded: bool,
-    prompts: PromptRoot,
+    prompts: &PromptRoots,
 ) -> String {
     let mut vars = Vars::new();
     vars.insert("idea", idea.to_string());
@@ -479,9 +545,9 @@ fn brief(
     vars.insert("references", reference_note(root, &prompts));
     vars.insert(
         "context",
-        briefs::context_block(context_items, loaded, prompts.as_ref()),
+        briefs::context_block(context_items, loaded, prompts),
     );
-    briefs::build(Flow::SpecDraft, prompts.as_ref(), &vars)
+    briefs::build(Flow::SpecDraft, prompts, &vars)
         .rendered
         .text
 }
@@ -489,7 +555,7 @@ fn brief(
 /// What to say about the `openspec` CLI, which depends on whether this root is
 /// a store the CLI can be pointed at by id. The decision is here; the words
 /// are the `spec-store-note` and `spec-folder-note` partials.
-fn store_note(change: &str, root: &SpecRoot, prompts: &PromptRoot) -> String {
+fn store_note(change: &str, root: &SpecRoot, prompts: &PromptRoots) -> String {
     let (name, vars) = match (root.kind, root.store_id.as_deref()) {
         (SpecRootKind::Store, Some(id)) => (
             "spec-store-note",
@@ -497,11 +563,11 @@ fn store_note(change: &str, root: &SpecRoot, prompts: &PromptRoot) -> String {
         ),
         _ => ("spec-folder-note", Vars::new()),
     };
-    briefs::block(&briefs::fragment(name, prompts.as_ref(), &vars))
+    briefs::block(&briefs::fragment(name, prompts, &vars))
 }
 
 /// The referenced stores, as read-only upstream context — or nothing.
-fn reference_note(root: &SpecRoot, prompts: &PromptRoot) -> String {
+fn reference_note(root: &SpecRoot, prompts: &PromptRoots) -> String {
     let lines: Vec<String> = root
         .references
         .iter()
@@ -509,7 +575,7 @@ fn reference_note(root: &SpecRoot, prompts: &PromptRoot) -> String {
         .map(|(id, path)| {
             briefs::fragment(
                 "spec-reference",
-                prompts.as_ref(),
+                prompts,
                 &Vars::from([("store_id", id.to_string()), ("path", path.to_string())]),
             )
         })
@@ -519,7 +585,7 @@ fn reference_note(root: &SpecRoot, prompts: &PromptRoot) -> String {
     }
     briefs::block(&briefs::fragment(
         "spec-references",
-        prompts.as_ref(),
+        prompts,
         &Vars::from([("list", lines.join("\n"))]),
     ))
 }
@@ -698,7 +764,7 @@ pub(super) fn draft_change(
                     &root,
                     &context_items,
                     install.loaded(),
-                    briefs::prompt_root(&ws.data.projects, settings),
+                    &briefs::prompt_roots(&ws.data.projects, settings),
                 ),
                 &install,
             ) && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id)
@@ -742,6 +808,7 @@ mod tests {
         ActionResult, brief, date_string, prompt_args, proposal_stub, read_for, resolve_root,
         scaffold_change, tree_for, write_for,
     };
+    use super::{clone_store, dirs};
     use crate::workspace::persistence::AppSettings;
     use okena_core::specs::{SpecRootKind, SpecTree};
     use std::path::{Path, PathBuf};
@@ -789,6 +856,68 @@ mod tests {
             panic!("expected a spec tree");
         };
         serde_json::from_value(v).unwrap()
+    }
+
+    /// Run `git` in `dir`, failing loudly: a silent git failure would make the
+    /// clone test pass for the wrong reason.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "okena")
+            .env("GIT_AUTHOR_EMAIL", "okena@example.com")
+            .env("GIT_COMMITTER_NAME", "okena")
+            .env("GIT_COMMITTER_EMAIL", "okena@example.com")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn a_spec_store_can_be_cloned_and_lands_registered_in_the_clone_folder() {
+        // QBL-415: Specs gained clone so it offers the same three ways to add
+        // a root as Knowledge. Served over file:// so the test needs no network.
+        let sandbox = tmpdir("clone");
+        let seed = sandbox.join("seed");
+        populated_root(&seed);
+        git(&sandbox, &["init", "-q", "-b", "main", "seed"]);
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "seed"]);
+        git(&sandbox, &["clone", "-q", "--bare", "seed", "remote.git"]);
+
+        let mut settings = sandboxed(&sandbox);
+        let clone_dir = sandbox.join("openspec");
+        settings.harness.specs.clone_dir = Some(clone_dir.to_string_lossy().into_owned());
+        let url = format!("file://{}", sandbox.join("remote.git").display());
+
+        let ActionResult::Ok(Some(v)) = clone_store(&settings, &url, None) else {
+            panic!("expected the clone to succeed");
+        };
+        // Named the way `git clone` would, under the configured clone folder.
+        let root = clone_dir.join("remote");
+        assert!(root.join("openspec/config.yaml").is_file(), "{v}");
+        assert_eq!(
+            okena_openspec::registry::list(&dirs(&settings)).unwrap().len(),
+            1,
+            "the checkout was not registered"
+        );
+
+        // A second clone into the same place is refused, and says why.
+        let ActionResult::Err(e) = clone_store(&settings, &url, None) else {
+            panic!("expected a refusal");
+        };
+        assert!(e.contains("already exists"), "{e}");
+
+        // A URL git would treat as an option is refused before anything runs.
+        let ActionResult::Err(e) = clone_store(&settings, " --upload-pack=touch ", None) else {
+            panic!("expected a refusal");
+        };
+        assert!(e.contains("repository URL"), "{e}");
+        std::fs::remove_dir_all(&sandbox).ok();
     }
 
     #[test]
@@ -1198,7 +1327,7 @@ mod tests {
             &root_of(SpecRootKind::Folder, None),
             &[],
             false,
-            None,
+            &Vec::new(),
         );
         assert!(b.contains("openspec/changes/add-login"));
         for f in okena_core::specs::CHANGE_ARTIFACTS {
@@ -1219,7 +1348,7 @@ mod tests {
             &root_of(SpecRootKind::Store, Some("team-plans")),
             &[],
             false,
-            None,
+            &Vec::new(),
         );
         assert!(b.contains("--change add-login --store team-plans"));
         assert!(b.contains("`design-system` at `/stores/design-system`"));
@@ -1237,7 +1366,7 @@ mod tests {
             &root_of(SpecRootKind::Folder, None),
             &[],
             false,
-            None,
+            &Vec::new(),
         );
         assert_eq!(
             b,

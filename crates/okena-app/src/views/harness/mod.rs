@@ -10,6 +10,7 @@ mod doc_agents;
 mod editor;
 mod file_ops;
 mod knowledge_draft;
+mod knowledge_override;
 mod knowledge_view;
 mod markdown;
 mod new_task_form;
@@ -335,6 +336,8 @@ pub struct HarnessPane {
     pub(crate) knowledge: knowledge_view::KnowledgeState,
     /// The Knowledge view's "New" form.
     pub(crate) knowledge_draft: knowledge_draft::DraftForm,
+    /// Overriding one of okena's read-only defaults from the open file.
+    pub(crate) knowledge_override: knowledge_override::OverrideState,
     /// The agent card under an open spec document.
     pub(crate) spec_refine: doc_agents::DocRefine,
     /// The agent card under an open knowledge file.
@@ -413,6 +416,7 @@ impl HarnessPane {
         // Their projects-and-context pickers are made when their dialog first
         // opens: most panes never open one.
         let knowledge_draft = knowledge_draft::DraftForm::new();
+        let knowledge_override = knowledge_override::OverrideState::default();
         let spec_refine = doc_agents::DocRefine::new();
         let knowledge_refine = doc_agents::DocRefine::new();
         let spec_files = file_ops::FileOps::new(cx);
@@ -493,6 +497,7 @@ impl HarnessPane {
             },
             knowledge,
             knowledge_draft,
+            knowledge_override,
             spec_refine,
             knowledge_refine,
             spec_files,

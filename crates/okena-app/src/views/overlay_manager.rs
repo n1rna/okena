@@ -687,12 +687,19 @@ impl OverlayManager {
         &mut self,
         workspace: Entity<Workspace>,
         page: Option<String>,
+        section: Option<String>,
         daemon_endpoint: Option<okena_remote_server::local::DaemonEndpoint>,
         client: Option<okena_transport::remote_action::RemoteActionClient>,
         cx: &mut Context<Self>,
     ) {
         let entity = cx.new(|cx| {
-            let mut panel = SettingsPanel::new_at(workspace, page.as_deref(), daemon_endpoint, cx);
+            let mut panel = SettingsPanel::new_at(
+                workspace,
+                page.as_deref(),
+                section.as_deref(),
+                daemon_endpoint,
+                cx,
+            );
             if let Some(client) = client {
                 panel.set_action_client(client, cx);
             }

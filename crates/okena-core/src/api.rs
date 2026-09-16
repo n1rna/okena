@@ -1773,6 +1773,17 @@ pub enum ActionRequest {
     /// `openspec store register <path> [--id <id>] --yes`. A root without
     /// `.openspec-store/store.yaml` becomes a store named `id`, else its
     /// folder name.
+    /// Clone an OpenSpec store repository and register the checkout.
+    ///
+    /// The Knowledge counterpart is `KnowledgeStoreClone`; both sections offer
+    /// the same three ways to add a root (QBL-415).
+    SpecStoreClone {
+        url: String,
+        /// Destination folder. `None` clones into `harness.specs.clone_dir`,
+        /// named the way `git clone` would.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
     SpecStoreRegister {
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1950,6 +1961,31 @@ pub enum ActionRequest {
     KnowledgeFileDelete {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
+        path: String,
+    },
+    /// Which roots hold `path`, and which one a launch would actually use.
+    ///
+    /// Asked about a file in okena's read-only `okena-defaults` store, to show
+    /// whether something already overrides it and to offer somewhere to put a
+    /// copy. Replies with `{ path, layered, winner, roots: [{ key, name, kind,
+    /// has }] }` in resolution order — every healthy root except okena's own.
+    /// `layered` is false for a path nothing overrides (a doc, an agent, the
+    /// README), where the question does not apply.
+    KnowledgeOverrides {
+        path: String,
+    },
+    /// Copy a file from okena's defaults into `root`, at the same path.
+    ///
+    /// How a default is changed: the copy is yours to edit, and resolution
+    /// prefers it. An existing file is never overwritten — it is opened
+    /// instead, and the reply says which happened with `created`. Replies with
+    /// `{ root, path, revision, created }`.
+    KnowledgeOverride {
+        /// Root to put the copy in, a key from `KnowledgeStores`. Never
+        /// okena's own store.
+        root: String,
+        /// File path relative to the defaults store, as `KnowledgeTree` gives
+        /// it. The copy goes at the same path in `root`.
         path: String,
     },
     /// Clone a store and register the checkout.

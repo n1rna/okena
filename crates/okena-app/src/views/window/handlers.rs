@@ -1486,12 +1486,12 @@ impl WindowView {
                         });
                     }
                 },
-                OverlayRequest::Settings { page } => {
+                OverlayRequest::Settings { page, section } => {
                     let endpoint = self.local_daemon_endpoint(cx);
                     let client = self.local_daemon_action_client(cx).ok();
                     let workspace = self.workspace.clone();
                     self.overlay_manager.update(cx, |om, cx| {
-                        om.open_settings_panel_at(workspace, page, endpoint, client, cx);
+                        om.open_settings_panel_at(workspace, page, section, endpoint, client, cx);
                     });
                 }
                 OverlayRequest::NewAgentDialog(prefill) => {

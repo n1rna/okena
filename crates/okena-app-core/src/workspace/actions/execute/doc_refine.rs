@@ -8,7 +8,7 @@
 //! become a way to point an agent at an arbitrary file.
 
 use super::ActionResult;
-use super::briefs::{self, PromptRoot};
+use super::briefs::{self, PromptRoots};
 use crate::workspace::persistence::{AppSettings, get_config_dir};
 use crate::workspace::state::{WindowId, Workspace};
 use okena_core::harness::AgentPurpose;
@@ -100,7 +100,9 @@ pub(super) fn refine_knowledge_document(
 ) -> ActionResult {
     let projects = super::knowledge::knowledge_project_sources(&ws.data.projects, settings);
     let registry = okena_knowledge::registry::registry_path(&get_config_dir());
-    let root = match super::knowledge::resolve_root(&registry, &projects, Some(&root)) {
+    // Refining rewrites the file, so okena's own store is refused here for the
+    // same reason a save is: the next start would undo whatever the agent did.
+    let root = match super::knowledge::resolve_writable_root(&registry, &projects, Some(&root)) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -165,19 +167,19 @@ fn document_brief(
     target: &Target,
     context: &[okena_core::context::ContextItem],
     loaded: bool,
-    prompts: PromptRoot,
+    prompts: &PromptRoots,
 ) -> String {
     let mut vars = Vars::new();
     vars.insert(
         "context",
-        briefs::context_block(context, loaded, prompts.as_ref()),
+        briefs::context_block(context, loaded, prompts),
     );
     vars.insert("request", request.to_string());
     vars.insert("file", target.path.clone());
     vars.insert("path", target.file.display().to_string());
     vars.insert("root_path", target.root_path.clone());
     vars.insert("what", target.what.clone());
-    briefs::build(Flow::DocumentRefine, prompts.as_ref(), &vars)
+    briefs::build(Flow::DocumentRefine, prompts, &vars)
         .rendered
         .text
 }
@@ -208,7 +210,7 @@ fn start(
         &target,
         &context_items,
         install.loaded(),
-        briefs::prompt_root(&ws.data.projects, settings),
+        &briefs::prompt_roots(&ws.data.projects, settings),
     );
     // Nothing is scaffolded, so a session without an agent would do nothing.
     let Some(shell) =
@@ -299,7 +301,7 @@ mod tests {
             },
             knowledge_root: Some("store:eng".into()),
         };
-        let brief = document_brief("explain cache busting", &target, &[], false, None);
+        let brief = document_brief("explain cache busting", &target, &[], false, &Vec::new());
         for needle in [
             "explain cache busting",
             "`docs/ci.md`",

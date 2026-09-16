@@ -104,6 +104,9 @@ pub fn execute_spec_store_action(
     settings: &AppSettings,
 ) -> Option<ActionResult> {
     Some(match action {
+        ActionRequest::SpecStoreClone { url, path } => {
+            specs::clone_store(settings, url, path.as_deref())
+        }
         ActionRequest::SpecStoreRegister { path, id } => {
             specs::register_store(settings, path.clone(), id.clone())
         }
@@ -924,6 +927,9 @@ pub fn execute_action(
         ActionRequest::SpecFileDelete { root, path } => {
             specs::delete_file(ws, settings, root, path)
         }
+        ActionRequest::SpecStoreClone { url, path } => {
+            specs::clone_store(settings, &url, path.as_deref())
+        }
         ActionRequest::SpecStoreRegister { path, id } => specs::register_store(settings, path, id),
         ActionRequest::SpecStoreUnregister { id } => specs::unregister_store(settings, id),
         ActionRequest::SpecStoreSetup {
@@ -982,6 +988,8 @@ pub fn execute_action(
         | ActionRequest::KnowledgeFolderCreate { .. }
         | ActionRequest::KnowledgeFileRename { .. }
         | ActionRequest::KnowledgeFileDelete { .. }
+        | ActionRequest::KnowledgeOverrides { .. }
+        | ActionRequest::KnowledgeOverride { .. }
         | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreRegister { .. }
         | ActionRequest::KnowledgeStoreUnregister { .. }

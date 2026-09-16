@@ -5,8 +5,9 @@
 //! what they tell an agent or in where they let an organisation override it.
 //!
 //! The prose lives in templates (`okena_knowledge::prompts`); this module's
-//! job is the part that cannot: reading the configured knowledge root off
-//! settings, and composing the variables whose value is a *decision* rather
+//! job is the part that cannot: putting the knowledge roots in the order
+//! resolution reads them, and composing the variables whose value is a
+//! *decision* rather
 //! than a field — whether a spec root is a store, whether a task has a
 //! description worth including. A renderer with no conditionals pushes those
 //! here on purpose, where they are testable.
@@ -16,42 +17,60 @@ use okena_knowledge::discover::{self, Sources};
 use okena_knowledge::prompts::{self, Brief, Flow, Vars};
 use std::path::PathBuf;
 
-/// The knowledge root briefs are read from: its key and its checkout.
+/// The knowledge roots briefs are read from, in order: each one's key and its
+/// checkout, most authoritative first.
 ///
-/// `None` is the ordinary case — no store configured — and means the
-/// built-ins. Named because it is threaded through every launch route, and
-/// `Option<(String, PathBuf)>` in six signatures says nothing.
-pub(super) type PromptRoot = Option<(String, PathBuf)>;
+/// Empty means the built-ins alone. Named because it is threaded through every
+/// launch route, and `Vec<(String, PathBuf)>` in six signatures says nothing.
+pub(super) type PromptRoots = Vec<(String, PathBuf)>;
 
-/// Where the configured prompt root lives on disk, if there is one.
+/// Every root a brief may be read from, in resolution order.
 ///
-/// Resolved through discovery rather than trusting a path from settings: the
-/// key names a store okena knows about, and a store that has since been
-/// unregistered or moved should fall back to the built-ins rather than read
-/// whatever is at a stale path now.
-pub(super) fn prompt_root(
+/// Resolved through discovery rather than from settings: nobody picks a root
+/// for this any more (QBL-415). Discovery already orders them the way
+/// resolution wants — registered stores, then project folders — so the order
+/// here is simply the order it found them in.
+///
+/// Two are left out. An unhealthy root is one discovery has already said it
+/// cannot read, and launching from it would fail per-template anyway, less
+/// legibly. okena's own `okena-defaults` store is left out because it holds a
+/// copy of the built-ins: including it would put okena's answer *before* the
+/// layers that are meant to override it, and the compiled-in fallback already
+/// gives the same text with no way to lose it.
+pub(super) fn prompt_roots(
     projects: &[okena_workspace::state::ProjectData],
     settings: &AppSettings,
-) -> PromptRoot {
-    let key = settings.harness.knowledge.prompt_root()?;
-    let stores = discover::discover(&Sources {
+) -> PromptRoots {
+    layers_of(&discover::discover(&Sources {
         registry_path: okena_knowledge::registry::registry_path(&get_config_dir()),
         projects: super::knowledge::knowledge_project_sources(projects, settings),
-    });
-    let root = stores.root(key)?;
-    // An unhealthy root is one discovery has already said it cannot read.
-    // Launching from it would fail per-template anyway, less legibly.
-    root.healthy
-        .then(|| (root.key.clone(), PathBuf::from(&root.path)))
+    }))
 }
 
-/// Render `flow` against the configured root, falling back to the built-in.
-pub(super) fn build(flow: Flow, root: Option<&(String, PathBuf)>, vars: &Vars<'_>) -> Brief {
-    prompts::brief(
-        flow,
-        root.map(|(key, path)| (key.as_str(), path.as_path())),
-        vars,
-    )
+/// The roots of `stores` a brief resolves through, in discovery order.
+///
+/// Split from [`prompt_roots`] so the choice can be tested without a profile
+/// on disk; the rule it encodes is the one the doc above describes.
+fn layers_of(stores: &okena_core::knowledge::KnowledgeStores) -> PromptRoots {
+    stores
+        .roots
+        .iter()
+        .filter(|r| r.healthy && !r.builtin)
+        .map(|r| (r.key.clone(), PathBuf::from(&r.path)))
+        .collect()
+}
+
+/// Borrow `roots` in the shape resolution takes.
+pub(super) fn layers(roots: &PromptRoots) -> Vec<prompts::Root<'_>> {
+    roots
+        .iter()
+        .map(|(key, path)| (key.as_str(), path.as_path()))
+        .collect()
+}
+
+/// Render `flow` against the roots, falling back to the built-in.
+pub(super) fn build(flow: Flow, roots: &PromptRoots, vars: &Vars<'_>) -> Brief {
+    prompts::brief(flow, &layers(roots), vars)
 }
 
 /// A block that is either absent or set off by a blank line.
@@ -73,7 +92,7 @@ pub(super) fn block(body: &str) -> String {
 pub(super) fn project_block(
     heading: &str,
     projects: &[(String, String)],
-    root: Option<&(String, PathBuf)>,
+    roots: &PromptRoots,
 ) -> String {
     if projects.is_empty() {
         return String::new();
@@ -83,7 +102,7 @@ pub(super) fn project_block(
         .map(|(name, path)| format!("- {name} ({path})"))
         .collect::<Vec<_>>()
         .join("\n");
-    block(&fragment(heading, root, &Vars::from([("list", list)])))
+    block(&fragment(heading, roots, &Vars::from([("list", list)])))
 }
 
 /// Most bytes the listed context lines of a brief may take.
@@ -106,7 +125,7 @@ pub(super) const CONTEXT_BUDGET_BYTES: usize = 4 * 1024;
 pub(super) fn context_block(
     items: &[okena_core::context::ContextItem],
     loaded: bool,
-    root: Option<&(String, PathBuf)>,
+    roots: &PromptRoots,
 ) -> String {
     let mut owners: Vec<(&str, Vec<&okena_core::context::ContextItem>)> = Vec::new();
     let mut named: Vec<String> = Vec::new();
@@ -149,21 +168,21 @@ pub(super) fn context_block(
     if !list.is_empty() {
         parts.push(fragment(
             "context",
-            root,
+            roots,
             &Vars::from([("list", list.join("\n"))]),
         ));
     }
     if !more.is_empty() {
         parts.push(fragment(
             "context-more",
-            root,
+            roots,
             &Vars::from([("list", more.join(", "))]),
         ));
     }
     if !named.is_empty() {
         parts.push(fragment(
             "context-installed",
-            root,
+            roots,
             &Vars::from([("list", named.join(", "))]),
         ));
     }
@@ -249,13 +268,8 @@ pub(super) mod test_briefs_dir {
 /// Where code has to choose between wordings — a store or a folder, who
 /// commits, a fan-out or a group — it picks the partial by name here, and the
 /// sentence itself stays editable in knowledge.
-pub(super) fn fragment(name: &str, root: Option<&(String, PathBuf)>, vars: &Vars<'_>) -> String {
-    prompts::fragment(
-        name,
-        root.map(|(key, path)| (key.as_str(), path.as_path())),
-        vars,
-    )
-    .text
+pub(super) fn fragment(name: &str, roots: &PromptRoots, vars: &Vars<'_>) -> String {
+    prompts::fragment(name, &layers(roots), vars).text
 }
 
 /// Handle [`ActionRequest::PromptRender`].
@@ -280,7 +294,7 @@ pub(super) fn render_action(
         ));
     };
     let owned: Vars = vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
-    let brief = build(flow, prompt_root(projects, settings).as_ref(), &owned);
+    let brief = build(flow, &prompt_roots(projects, settings), &owned);
     let source = match &brief.source {
         prompts::Source::Root { key, path } => serde_json::json!({ "root": key, "path": path }),
         prompts::Source::Builtin => serde_json::json!({ "builtin": true }),
@@ -295,8 +309,51 @@ pub(super) fn render_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{CONTEXT_BUDGET_BYTES, block, context_block, project_block};
+    use super::{CONTEXT_BUDGET_BYTES, block, context_block, layers_of, project_block};
     use okena_core::context::{ContextItem, ContextKind, ContextOwner, ContextRef};
+    use okena_core::knowledge::{KnowledgeRoot, KnowledgeRootKind, KnowledgeStores};
+
+    fn root(key: &str, kind: KnowledgeRootKind, healthy: bool, builtin: bool) -> KnowledgeRoot {
+        KnowledgeRoot {
+            key: key.into(),
+            kind,
+            name: key.into(),
+            path: format!("/k/{key}"),
+            store_id: None,
+            description: None,
+            remote: None,
+            healthy,
+            builtin,
+            git: None,
+            counts: Default::default(),
+            used_by: Vec::new(),
+            status: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn briefs_resolve_through_every_healthy_root_but_never_okenas_own() {
+        use KnowledgeRootKind::{Project, Store};
+        // Discovery's order is resolution's order: stores, then projects.
+        let stores = KnowledgeStores {
+            roots: vec![
+                root("store:acme", Store, true, false),
+                root("store:okena-defaults", Store, true, true),
+                root("store:broken", Store, false, false),
+                root("path:/p/web", Project, true, false),
+                root("path:/p/gone", Project, false, false),
+            ],
+            ..Default::default()
+        };
+        let layers = layers_of(&stores);
+        let keys: Vec<&str> = layers.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["store:acme", "path:/p/web"]);
+
+        // The paths come along, since that is what resolution reads from.
+        assert_eq!(layers[0].1, std::path::PathBuf::from("/k/store:acme"));
+        // Nothing discovered, nothing to layer — the built-ins stand alone.
+        assert!(layers_of(&KnowledgeStores::default()).is_empty());
+    }
 
     fn item(owner: &str, kind: ContextKind, n: usize) -> ContextItem {
         let path = format!("/Users/someone/p/{owner}/docs/reference/topic-number-{n}.md");
@@ -321,7 +378,7 @@ mod tests {
             item("shop", ContextKind::MapEntry, 1),
             item("acme", ContextKind::Doc, 2),
         ];
-        let b = context_block(&items, false, None);
+        let b = context_block(&items, false, &Vec::new());
         assert!(
             b.contains("- shop:\n  - Map entry `area:topic-1`: Topic 1 (`/Users/someone/p/shop/docs/reference/topic-number-1.md`)"),
             "{b}"
@@ -341,7 +398,7 @@ mod tests {
                 item(owner, kind, n)
             })
             .collect();
-        let b = context_block(&items, false, None);
+        let b = context_block(&items, false, &Vec::new());
         let (listed, rest) = b
             .split_once("Also picked, named here to keep this brief short: ")
             .expect("the overflow line");
@@ -378,14 +435,14 @@ mod tests {
         let mut items: Vec<ContextItem> =
             (0..60).map(|n| item("acme", ContextKind::Doc, n)).collect();
         items.push(item("acme", ContextKind::Skill, 999));
-        let b = context_block(&items, true, None);
+        let b = context_block(&items, true, &Vec::new());
         assert!(
             b.contains("Loaded into this session: Topic 999 (skill)"),
             "{b}"
         );
         assert!(!b.contains("topic-number-999"), "{b}");
         // Nothing picked, nothing at all.
-        assert_eq!(context_block(&[], false, None), "");
+        assert_eq!(context_block(&[], false, &Vec::new()), "");
     }
 
     #[test]
@@ -408,7 +465,7 @@ mod tests {
 
     #[test]
     fn no_projects_means_no_list_and_no_label() {
-        assert_eq!(project_block("given-projects", &[], None), "");
+        assert_eq!(project_block("given-projects", &[], &Vec::new()), "");
     }
 
     #[test]
@@ -418,7 +475,7 @@ mod tests {
             ("web".to_string(), "/p/web".to_string()),
         ];
         assert_eq!(
-            project_block("given-projects", &given, None),
+            project_block("given-projects", &given, &Vec::new()),
             "\n\nProjects you were given:\n- okena (/p/okena)\n- web (/p/web)"
         );
     }

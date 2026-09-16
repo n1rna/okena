@@ -1130,6 +1130,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             content,
             revision,
         },
+        ActionRequest::SpecStoreClone { url, path } => ActionRequest::SpecStoreClone { url, path },
         ActionRequest::SpecStoreRegister { path, id } => {
             ActionRequest::SpecStoreRegister { path, id }
         }
@@ -1190,6 +1191,8 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::KnowledgeFolderCreate { .. }
         | ActionRequest::KnowledgeFileRename { .. }
         | ActionRequest::KnowledgeFileDelete { .. }
+        | ActionRequest::KnowledgeOverrides { .. }
+        | ActionRequest::KnowledgeOverride { .. }
         | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreRegister { .. }
         | ActionRequest::KnowledgeStoreUnregister { .. }
