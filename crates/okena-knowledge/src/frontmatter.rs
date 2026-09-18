@@ -91,6 +91,23 @@ impl Frontmatter {
             None => Vec::new(),
         }
     }
+
+    /// A mapping field of scalars, e.g. `models: { codex: gpt-5 }`. Entries
+    /// whose key or value is not a non-empty scalar are skipped.
+    pub fn map(&self, key: &str) -> std::collections::BTreeMap<String, String> {
+        match self.fields.get(key) {
+            Some(Value::Mapping(m)) => m
+                .iter()
+                .filter_map(|(k, v)| Some((scalar(k)?, scalar(v)?)))
+                .collect(),
+            _ => Default::default(),
+        }
+    }
+
+    /// The `model` and `models` fields a brief template runs its agent on.
+    pub fn agent_models(&self) -> okena_core::agent_model::AgentModels {
+        okena_core::agent_model::AgentModels::new(self.string("model"), self.map("models"))
+    }
 }
 
 fn scalar(value: &Value) -> Option<String> {

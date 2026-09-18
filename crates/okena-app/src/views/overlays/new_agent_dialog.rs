@@ -20,7 +20,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
-use okena_ui::agent_launcher::{AgentLauncher, LauncherStyle};
+use okena_ui::agent_launcher::{AgentLauncher, Launch, LauncherStyle};
 use okena_ui::modal::{modal_backdrop, modal_content};
 use okena_workspace::requests::NewAgentPrefill;
 
@@ -110,7 +110,7 @@ impl NewAgentDialog {
     }
 
     /// Start the session with `agent_command`; empty opens a plain shell.
-    fn start(&mut self, agent_command: String, cx: &mut Context<Self>) {
+    fn start(&mut self, agent_command: String, model: Option<String>, cx: &mut Context<Self>) {
         if self.starting {
             return;
         }
@@ -153,6 +153,7 @@ impl NewAgentDialog {
                         // An explicit empty string is the daemon's "no agent,
                         // just a shell".
                         agent_command: Some(agent_command),
+                        model,
                         // This dialog configures a session about work that
                         // exists; drafting a task is its own flow.
                         task_draft: None,
@@ -258,8 +259,13 @@ impl Render for NewAgentDialog {
         })
         .preferred(self.default_agent.clone())
         .busy(self.starting.then_some("Starting…"))
-        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
-            this.start(command.to_string(), cx);
+        .brief(crate::views::launch_briefs::brief_for(
+            &self.client,
+            "agent-session",
+            cx,
+        ))
+        .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
+            this.start(launch.command.to_string(), launch.model.clone(), cx);
         }));
 
         modal_backdrop("new-agent-backdrop", &t)

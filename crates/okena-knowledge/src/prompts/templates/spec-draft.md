@@ -2,6 +2,7 @@
 name: spec-draft
 description: Brief an agent to fill in a scaffolded OpenSpec change
 for: spec-draft
+model: sonnet
 ---
 Draft an OpenSpec change for this idea: {idea}
 

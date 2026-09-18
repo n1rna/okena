@@ -2,6 +2,7 @@
 name: break-down
 description: Brief an agent to split a task into sub-tasks through okena's MCP tools
 for: break-down
+model: sonnet
 ---
 Break {key} down into sub-tasks.
 

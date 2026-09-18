@@ -66,6 +66,7 @@ pub(super) fn scan_links(
     window_id: crate::workspace::state::WindowId,
     project_ids: Vec<String>,
     agent_command: Option<String>,
+    model: Option<String>,
     backend: &dyn okena_terminal::backend::TerminalBackend,
     terminals: &okena_terminal::TerminalsRegistry,
     settings: &AppSettings,
@@ -125,6 +126,7 @@ pub(super) fn scan_links(
         &brief,
         // A scan is handed no picked context.
         &Default::default(),
+        &briefs::launch_model(Flow::ProjectsScan, &prompts, model),
     ) else {
         return ActionResult::Err(
             "no agent to start — pick one, or set the agent command in Settings → Harness".into(),

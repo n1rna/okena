@@ -166,10 +166,12 @@ mod tests {
             root: None,
             request: "x".into(),
             agent_command: None,
+            model: None,
             context: Vec::new(),
         })
         .unwrap();
         assert!(!body.contains("context"), "{body}");
+        assert!(!body.contains("model"), "{body}");
     }
 
     #[test]

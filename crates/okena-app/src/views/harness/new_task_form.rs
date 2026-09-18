@@ -15,9 +15,11 @@ use crate::views::components::SimpleInput;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use okena_core::agent_model::AgentModels;
 use okena_core::api::ActionRequest;
 use okena_core::harness::AgentPurpose;
 use okena_core::tasks::{Task, TaskKind};
+use okena_ui::agent_launcher::Launch;
 use std::collections::BTreeMap;
 
 /// A team or project a task can be filed in.
@@ -228,11 +230,13 @@ impl HarnessPane {
     /// MCP server is what makes it useful — the agent reads the task and
     /// writes back through `okena_create_task` or `okena_update_task`, rather
     /// than handing the user text to retype.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn start_task_helper(
         &mut self,
         task: &Task,
         helper: TaskHelper,
         agent: String,
+        model: Option<String>,
         project_ids: Vec<String>,
         context: Vec<okena_core::context::ContextRef>,
         cx: &mut Context<Self>,
@@ -258,7 +262,8 @@ impl HarnessPane {
                 // Two round trips rather than one: rendering has to happen
                 // where the store registry is, and starting a session with a
                 // half-rendered brief would be worse than a moment's wait.
-                let goal = render_brief(&client, flow, vars)?;
+                let (goal, models) = render_brief(&client, flow, vars)?;
+                let model = launch_model(&models, &agent, model);
                 client
                     .post_action(ActionRequest::AgentStartSession {
                         context,
@@ -270,6 +275,7 @@ impl HarnessPane {
                         // do it.
                         project_ids,
                         agent_command: Some(agent),
+                        model,
                         task_draft: None,
                         task: Some(link),
                         purpose: Some(purpose),
@@ -489,17 +495,24 @@ impl HarnessPane {
                     (_, true) => Some("Starting…"),
                     _ => None,
                 })
-                .on_launch(
-                    cx.listener(move |this, command: &SharedString, _window, cx| {
-                        // The empty command is "File it": the same direct create
-                        // the form always had.
-                        if command.is_empty() {
-                            this.submit_new_task(cx);
-                        } else {
-                            this.draft_task_with_agent(command.to_string(), cx);
-                        }
-                    }),
-                ),
+                .brief(crate::views::launch_briefs::brief_for(
+                    &self.client,
+                    "task-create",
+                    cx,
+                ))
+                .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
+                    // The empty command is "File it": the same direct create
+                    // the form always had.
+                    if launch.command.is_empty() {
+                        this.submit_new_task(cx);
+                    } else {
+                        this.draft_task_with_agent(
+                            launch.command.to_string(),
+                            launch.model.clone(),
+                            cx,
+                        );
+                    }
+                })),
         );
 
         v_flex()
@@ -536,7 +549,12 @@ impl HarnessPane {
     /// Only a title is required, and only because an agent with nothing to go
     /// on would be inventing the work rather than drafting it. Everything else
     /// is what the agent is for.
-    pub(super) fn draft_task_with_agent(&mut self, agent: String, cx: &mut Context<Self>) {
+    pub(super) fn draft_task_with_agent(
+        &mut self,
+        agent: String,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(form) = self.tasks.new_task.as_ref() else {
             return;
         };
@@ -598,7 +616,8 @@ impl HarnessPane {
         let draft = title.clone();
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
-                let goal = render_brief(&client, "task-create", vars)?;
+                let (goal, models) = render_brief(&client, "task-create", vars)?;
+                let model = launch_model(&models, &agent, model);
                 client
                     .post_action(ActionRequest::AgentStartSession {
                         context: Vec::new(),
@@ -607,6 +626,7 @@ impl HarnessPane {
                         root: String::new(),
                         project_ids: Vec::new(),
                         agent_command: Some(agent),
+                        model,
                         task_draft: Some(draft),
                         task: None,
                         // A draft is told apart by `task_draft`; no card lists it.
@@ -741,6 +761,13 @@ impl TaskHelper {
     }
 }
 
+/// The model to send with a session this client briefed: its template's for
+/// `agent`, or the one picked on the launcher. Always explicit, `""` for the
+/// CLI's default, so the daemon does not apply the `agent-session` template's
+/// model to a brief that is not that template's.
+fn launch_model(models: &AgentModels, agent: &str, picked: Option<String>) -> Option<String> {
+    Some(okena_core::agent_model::resolve(models, agent, picked.as_deref()).unwrap_or_default())
+}
 /// Ask the daemon to render a launch brief.
 ///
 /// Blocking, to be called inside `smol::unblock` beside the action that sends
@@ -752,7 +779,7 @@ pub(super) fn render_brief(
     client: &okena_transport::remote_action::RemoteActionClient,
     flow: &str,
     vars: BTreeMap<String, String>,
-) -> Result<String, String> {
+) -> Result<(String, AgentModels), String> {
     let value = client
         .post_action(ActionRequest::PromptRender {
             flow: flow.to_string(),
@@ -773,10 +800,14 @@ pub(super) fn render_brief(
                 .join(", ")
         ));
     }
+    let models = value
+        .get("models")
+        .and_then(|m| serde_json::from_value(m.clone()).ok())
+        .unwrap_or_default();
     value
         .get("text")
         .and_then(|t| t.as_str())
-        .map(str::to_string)
+        .map(|text| (text.to_string(), models))
         .ok_or_else(|| format!("the `{flow}` prompt came back empty"))
 }
 

@@ -616,6 +616,7 @@ pub(super) fn spec_agent_shell(
     override_command: Option<&str>,
     prompt: &str,
     install: &super::agent_context::Install,
+    model: &super::agent_options::LaunchModel,
 ) -> Option<okena_terminal::shell_config::ShellType> {
     // An explicit empty string means "scaffold only, no agent", even when a
     // default agent is configured — same contract as starting work on a task.
@@ -631,7 +632,11 @@ pub(super) fn spec_agent_shell(
     // Named first, so a restart can resume this exact conversation; the
     // agent's own options before the prompt, which they never replace.
     let mut args = super::agent_resume::session_args(&command);
-    args.extend(super::agent_options::option_args(&command, settings));
+    args.extend(super::agent_options::option_args(
+        &command,
+        settings,
+        model.for_agent(&command).as_deref(),
+    ));
     args.extend(super::briefs::brief_args(&command, prompt));
     args.extend(super::agent_mcp::injection_args(&command, settings));
     // Skills and agents picked at launch, where this agent loads them itself.
@@ -678,6 +683,7 @@ pub(super) fn draft_change(
     idea: String,
     name: Option<String>,
     agent_command: Option<String>,
+    model: Option<String>,
     root: Option<String>,
     context_refs: Vec<okena_core::context::ContextRef>,
     backend: &dyn TerminalBackend,
@@ -754,6 +760,7 @@ pub(super) fn draft_change(
             // shell as it starts.
             let command = super::agent_context::launch_command(settings, agent_command.as_deref());
             let install = super::agent_context::install(&command, &context_items);
+            let prompts = briefs::prompt_roots(&ws.data.projects, settings);
             if let Some(shell) = spec_agent_shell(
                 settings,
                 agent_command.as_deref(),
@@ -764,9 +771,10 @@ pub(super) fn draft_change(
                     &root,
                     &context_items,
                     install.loaded(),
-                    &briefs::prompt_roots(&ws.data.projects, settings),
+                    &prompts,
                 ),
                 &install,
+                &briefs::launch_model(Flow::SpecDraft, &prompts, model),
             ) && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id)
             {
                 p.default_shell = Some(shell);

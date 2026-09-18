@@ -595,10 +595,14 @@ fn draft_shell(
     agent_command: Option<&str>,
     prompt: &str,
     install: &super::agent_context::Install,
+    model: &super::agent_options::LaunchModel,
 ) -> Result<okena_terminal::shell_config::ShellType, String> {
-    super::specs::spec_agent_shell(settings, agent_command, prompt, install).ok_or_else(|| {
-        "no agent to start — pick one, or set the agent command in Settings → Harness".to_string()
-    })
+    super::specs::spec_agent_shell(settings, agent_command, prompt, install, model).ok_or_else(
+        || {
+            "no agent to start — pick one, or set the agent command in Settings → Harness"
+                .to_string()
+        },
+    )
 }
 
 /// Open an agent session in a knowledge root, briefed to write there.
@@ -612,6 +616,7 @@ pub(super) fn draft(
     root: Option<String>,
     request: String,
     agent_command: Option<String>,
+    model: Option<String>,
     context_refs: Vec<okena_core::context::ContextRef>,
     backend: &dyn okena_terminal::backend::TerminalBackend,
     terminals: &okena_terminal::TerminalsRegistry,
@@ -634,17 +639,13 @@ pub(super) fn draft(
     };
     let command = super::agent_context::launch_command(settings, agent_command.as_deref());
     let install = super::agent_context::install(&command, &context_items);
+    let prompts = briefs::prompt_roots(&ws.data.projects, settings);
     let shell = match draft_shell(
         settings,
         agent_command.as_deref(),
-        &draft_brief(
-            &request,
-            &root,
-            &context_items,
-            install.loaded(),
-            &briefs::prompt_roots(&ws.data.projects, settings),
-        ),
+        &draft_brief(&request, &root, &context_items, install.loaded(), &prompts),
         &install,
+        &briefs::launch_model(Flow::KnowledgeDraft, &prompts, model),
     ) {
         Ok(s) => s,
         Err(e) => return ActionResult::Err(e),
@@ -753,11 +754,35 @@ mod draft_tests {
     fn a_draft_needs_an_agent_to_start() {
         let settings = AppSettings::default();
         assert!(
-            draft_shell(&settings, None, "p", &Default::default())
-                .is_err_and(|e| e.contains("Settings → Harness"))
+            draft_shell(
+                &settings,
+                None,
+                "p",
+                &Default::default(),
+                &Default::default()
+            )
+            .is_err_and(|e| e.contains("Settings → Harness"))
         );
-        assert!(draft_shell(&settings, Some("  "), "p", &Default::default()).is_err());
-        assert!(draft_shell(&settings, Some("claude"), "p", &Default::default()).is_ok());
+        assert!(
+            draft_shell(
+                &settings,
+                Some("  "),
+                "p",
+                &Default::default(),
+                &Default::default()
+            )
+            .is_err()
+        );
+        assert!(
+            draft_shell(
+                &settings,
+                Some("claude"),
+                "p",
+                &Default::default(),
+                &Default::default()
+            )
+            .is_ok()
+        );
     }
 }
 

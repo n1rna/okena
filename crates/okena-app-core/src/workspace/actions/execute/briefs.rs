@@ -73,6 +73,17 @@ pub(super) fn build(flow: Flow, roots: &PromptRoots, vars: &Vars<'_>) -> Brief {
     prompts::brief(flow, &layers(roots), vars)
 }
 
+/// The model `flow`'s template runs its agent on, with `picked` — the model
+/// the person chose for this launch, if any — over it.
+pub(super) fn launch_model(
+    flow: Flow,
+    roots: &PromptRoots,
+    picked: Option<String>,
+) -> super::agent_options::LaunchModel {
+    let models = prompts::template_info(flow, &layers(roots)).models;
+    super::agent_options::LaunchModel::new(models, picked)
+}
+
 /// A block that is either absent or set off by a blank line.
 ///
 /// The shape half the flow variables need: a description, a project list, a
@@ -304,6 +315,10 @@ pub(super) fn render_action(
         "text": brief.rendered.text,
         "unknown": brief.rendered.unknown,
         "source": source,
+        // What the launcher calls this brief, and the model its template runs
+        // the agent on (`model`, `models`).
+        "name": brief.name,
+        "models": brief.models,
     })))
 }
 

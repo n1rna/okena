@@ -2,6 +2,7 @@
 name: task-coordinate
 description: Brief an agent to split a parent task among sub-agents and start them
 for: task-coordinate
+model: opus
 ---
 You are coordinating {key}: {title}
 

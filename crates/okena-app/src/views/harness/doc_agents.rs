@@ -18,6 +18,7 @@ use okena_core::api::ActionRequest;
 use okena_core::harness::AgentPurpose;
 use okena_core::knowledge::KnowledgeTree;
 use okena_core::specs::SpecChange;
+use okena_ui::agent_launcher::Launch;
 use std::collections::HashSet;
 
 /// What a document's agent card holds between frames.
@@ -188,11 +189,19 @@ impl HarnessPane {
                     this.open_context_dialog(target, cx);
                 }),
             )
-            .on_launch(
-                cx.listener(move |this, command: &SharedString, _window, cx| {
-                    this.start_document_refine(section, command.to_string(), cx);
-                }),
-            )
+            .brief(crate::views::launch_briefs::brief_for(
+                &self.client,
+                "doc-refine",
+                cx,
+            ))
+            .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
+                this.start_document_refine(
+                    section,
+                    launch.command.to_string(),
+                    launch.model.clone(),
+                    cx,
+                );
+            }))
             .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
                 this.open_session(id.to_string(), cx);
             }))
@@ -204,6 +213,7 @@ impl HarnessPane {
         &mut self,
         section: HarnessSection,
         agent: String,
+        model: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some((root, path, dirty)) = self.open_document(section) else {
@@ -238,6 +248,7 @@ impl HarnessPane {
                 path,
                 request,
                 agent_command,
+                model,
             },
             _ => ActionRequest::KnowledgeRefineDocument {
                 context,
@@ -245,6 +256,7 @@ impl HarnessPane {
                 path,
                 request,
                 agent_command,
+                model,
             },
         };
         let client = self.client.clone();
@@ -550,6 +562,7 @@ mod tests {
                     files: Vec::new(),
                     flows: Vec::new(),
                     variables: Vec::new(),
+                    models: Default::default(),
                     status: Vec::new(),
                 })
                 .collect(),

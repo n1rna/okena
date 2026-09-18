@@ -440,6 +440,8 @@ fn agent_shell(
     // Whether `context` lists worktrees cut for this work, or the repos
     // themselves. The brief must not call a shared checkout a worktree.
     worktrees: bool,
+    // The model picked for this launch; `None` runs the template's.
+    picked_model: Option<&str>,
 ) -> Option<okena_terminal::shell_config::ShellType> {
     // An explicit override wins, including an explicit empty string, which is
     // how a caller says "worktrees only" despite a configured default.
@@ -474,8 +476,13 @@ fn agent_shell(
     // own options. Both before the brief rather than after: a flag after a
     // positional prompt is not guaranteed to be read as a flag by every agent
     // CLI.
+    let model = briefs::launch_model(task_flow(shape), prompts, picked_model.map(str::to_string));
     let mut args = super::agent_resume::session_args(&command);
-    args.extend(super::agent_options::option_args(&command, settings));
+    args.extend(super::agent_options::option_args(
+        &command,
+        settings,
+        model.for_agent(&command).as_deref(),
+    ));
     args.extend(super::briefs::brief_args(&command, &brief));
     // Hand the agent okena's MCP server so it can ask what task it is on and
     // report back without the user configuring anything.
@@ -535,6 +542,8 @@ pub(super) struct StartWork {
     pub(super) agent_root: Option<String>,
     pub(super) branch: Option<String>,
     pub(super) agent_command: Option<String>,
+    /// Model picked for this launch; `None` runs the template's.
+    pub(super) model: Option<String>,
     pub(super) note: Option<String>,
     pub(super) coordinate: bool,
     pub(super) also: Vec<String>,
@@ -572,6 +581,7 @@ pub(super) fn start_work(
         agent_root,
         branch: branch_override,
         agent_command,
+        model,
         note,
         coordinate,
         also,
@@ -921,6 +931,7 @@ pub(super) fn start_work(
         &prompts,
         &context_items,
         has_worktrees,
+        model.as_deref(),
     );
     let mut agent_session: Option<serde_json::Value> = None;
     // No agent and one worktree: nothing would run in a session, so there is
@@ -1351,6 +1362,7 @@ mod tests {
             agent_root: None,
             branch: None,
             agent_command: None,
+            model: None,
             note: None,
             coordinate: false,
             also: Vec::new(),
@@ -1542,7 +1554,20 @@ pub(super) mod agent_shell_tests {
         // Starting work must not spawn an AI agent unless asked to.
         let s = AppSettings::default();
         assert!(
-            agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[], true).is_none()
+            agent_shell(
+                &s,
+                None,
+                &task(),
+                "b",
+                &[],
+                None,
+                None,
+                &Vec::new(),
+                &[],
+                true,
+                None
+            )
+            .is_none()
         );
     }
 
@@ -1551,7 +1576,20 @@ pub(super) mod agent_shell_tests {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("   ".into());
         assert!(
-            agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[], true).is_none()
+            agent_shell(
+                &s,
+                None,
+                &task(),
+                "b",
+                &[],
+                None,
+                None,
+                &Vec::new(),
+                &[],
+                true,
+                None
+            )
+            .is_none()
         );
     }
 
@@ -1587,14 +1625,17 @@ pub(super) mod agent_shell_tests {
             &Vec::new(),
             &[],
             true,
+            None,
         ));
         assert_eq!(args[0], "--session-id");
         assert!(uuid::Uuid::parse_str(&args[1]).is_ok(), "{args:?}");
         assert_eq!(args[2], "--dangerously-skip-permissions");
+        // The task-start template's model, with the other options.
+        assert_eq!(args[3..5], ["--model", "opus"]);
         // The task-start brief, not something in its place.
-        assert!(args[3].contains("LIN-42"), "{args:?}");
-        assert!(args[3].contains("okena_test_plan"), "{args:?}");
-        assert_eq!(args[4..6], ["--mcp-config", "marker"]);
+        assert!(args[5].contains("LIN-42"), "{args:?}");
+        assert!(args[5].contains("okena_test_plan"), "{args:?}");
+        assert_eq!(args[6..8], ["--mcp-config", "marker"]);
     }
 
     #[test]
@@ -1624,8 +1665,20 @@ pub(super) mod agent_shell_tests {
         // gap.
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("codex".into());
-        match agent_shell(&s, None, &task(), "b1", &[], None, None, &Vec::new(), &[], true)
-            .expect("configured")
+        match agent_shell(
+            &s,
+            None,
+            &task(),
+            "b1",
+            &[],
+            None,
+            None,
+            &Vec::new(),
+            &[],
+            true,
+            None,
+        )
+        .expect("configured")
         {
             ShellType::Custom { path, args } => {
                 assert_eq!(path, "codex");
@@ -1701,6 +1754,7 @@ pub(super) mod agent_shell_tests {
             &Vec::new(),
             &[],
             true,
+            None,
         ));
         assert_eq!(
             args[..2],
@@ -1729,6 +1783,7 @@ pub(super) mod agent_shell_tests {
             &Vec::new(),
             &[],
             true,
+            None,
         ));
         assert!(args[0].contains("LIN-42"), "brief comes first: {args:?}");
         // Then only okena's wiring (MCP flags, Codex's notify hook).
@@ -1744,7 +1799,8 @@ pub(super) mod agent_shell_tests {
 
     #[test]
     fn with_nothing_set_every_route_launches_as_before() {
-        // Session id, prompt, MCP flags — nothing else.
+        // Session id, the template's model if it names one, prompt, MCP flags
+        // — nothing else.
         let mut s = settings_with_mcp_marker();
         s.harness.agent_command = Some("claude".into());
         let routes = [
@@ -1759,11 +1815,13 @@ pub(super) mod agent_shell_tests {
                 &Vec::new(),
                 &[],
                 true,
+                None,
             )),
             custom_args(super::custom_agent_shell(
                 &s,
                 None,
                 "goal",
+                &Default::default(),
                 &Default::default(),
             )),
             custom_args(super::super::specs::spec_agent_shell(
@@ -1771,15 +1829,22 @@ pub(super) mod agent_shell_tests {
                 None,
                 "draft",
                 &Default::default(),
+                &Default::default(),
             )),
         ];
-        for args in routes {
+        // Only the task start's template names a model; the other two were
+        // handed none.
+        for (args, model) in routes.into_iter().zip([Some("opus"), None, None]) {
             assert_eq!(args[0], "--session-id", "{args:?}");
-            assert!(
-                !args[2].starts_with("--"),
-                "prompt follows the id: {args:?}"
-            );
-            assert_eq!(args[3..5], ["--mcp-config", "marker"], "{args:?}");
+            let rest = match model {
+                Some(m) => {
+                    assert_eq!(args[2..4], ["--model", m], "{args:?}");
+                    &args[4..]
+                }
+                None => &args[2..],
+            };
+            assert!(!rest[0].starts_with("--"), "prompt follows: {args:?}");
+            assert_eq!(rest[1..3], ["--mcp-config", "marker"], "{args:?}");
         }
     }
 
@@ -1804,7 +1869,17 @@ pub(super) mod agent_shell_tests {
             (
                 "task start",
                 agent_shell(
-                    &s, None, &task(), "b1", &[], Some(&long), None, &Vec::new(), &[], true,
+                    &s,
+                    None,
+                    &task(),
+                    "b1",
+                    &[],
+                    Some(&long),
+                    None,
+                    &Vec::new(),
+                    &[],
+                    true,
+                    None,
                 ),
             ),
             (
@@ -1820,6 +1895,7 @@ pub(super) mod agent_shell_tests {
                     &Vec::new(),
                     &[],
                     true,
+                    None,
                 ),
             ),
             (
@@ -1835,23 +1911,43 @@ pub(super) mod agent_shell_tests {
                     &Vec::new(),
                     &[],
                     true,
+                    None,
                 ),
             ),
             (
                 "custom session",
-                super::custom_agent_shell(&s, None, &long, &Default::default()),
+                super::custom_agent_shell(
+                    &s,
+                    None,
+                    &long,
+                    &Default::default(),
+                    &Default::default(),
+                ),
             ),
             // Spec drafts, knowledge drafts and doc refine all launch here.
             (
                 "spec draft",
-                super::super::specs::spec_agent_shell(&s, None, &long, &Default::default()),
+                super::super::specs::spec_agent_shell(
+                    &s,
+                    None,
+                    &long,
+                    &Default::default(),
+                    &Default::default(),
+                ),
             ),
         ];
         for (route, shell) in routes {
             let shell = shell.expect("an agent");
             let args = custom_args(Some(shell.clone()));
-            // Named, then the reference where the brief went, then MCP.
+            // Named, then the template's model for a task's routes, then the
+            // reference where the brief went, then MCP.
             assert_eq!(args[0], "--session-id", "{route}: {args:?}");
+            let args = if args[2] == "--model" {
+                assert_eq!(args[3], "opus", "{route}");
+                [&args[..2], &args[4..]].concat()
+            } else {
+                args
+            };
             let file = brief_file::path_of(&args[2]).unwrap_or_else(|| panic!("{route}: {args:?}"));
             assert!(
                 std::path::Path::new(file).starts_with(dir.path()),
@@ -1903,6 +1999,7 @@ pub(super) mod agent_shell_tests {
             None,
             "goal",
             &Default::default(),
+            &Default::default(),
         ));
         assert_eq!(args.len(), 5, "{args:?}");
         let file = brief_file::path_of(&args[2]).expect("a reference");
@@ -1912,6 +2009,7 @@ pub(super) mod agent_shell_tests {
             &s,
             Some("copilot"),
             "draft",
+            &Default::default(),
             &Default::default(),
         ));
         let at = args.iter().position(|a| a == "--prompt").expect("--prompt");
@@ -1938,6 +2036,7 @@ pub(super) mod agent_shell_tests {
                     None,
                     "goal",
                     &Default::default(),
+                    &Default::default(),
                 )),
                 "goal",
             ),
@@ -1946,6 +2045,7 @@ pub(super) mod agent_shell_tests {
                     &s,
                     None,
                     "draft",
+                    &Default::default(),
                     &Default::default(),
                 )),
                 "draft",
@@ -1965,6 +2065,7 @@ pub(super) mod agent_shell_tests {
             Some("copilot"),
             "draft",
             &Default::default(),
+            &Default::default(),
         ));
         assert_eq!(args[..4], ["--mode", "autopilot", "--prompt", "draft"]);
     }
@@ -1976,8 +2077,20 @@ pub(super) mod agent_shell_tests {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("codex".into());
         let given = [("okena".to_string(), "/p/okena".to_string())];
-        match agent_shell(&s, None, &task(), "b1", &given, None, None, &Vec::new(), &[], true)
-            .expect("configured")
+        match agent_shell(
+            &s,
+            None,
+            &task(),
+            "b1",
+            &given,
+            None,
+            None,
+            &Vec::new(),
+            &[],
+            true,
+            None,
+        )
+        .expect("configured")
         {
             ShellType::Custom { args, .. } => {
                 let brief = args.first().expect("a brief was passed");
@@ -1994,8 +2107,20 @@ pub(super) mod agent_shell_tests {
         let picked = super::BriefShape::Picked(
             "- LIN-42 (Task): Ship the harness\n- LIN-7 (Defect): Fix the login".into(),
         );
-        match agent_shell(&s, None, &task(), "b1", &[], None, Some(&picked), &Vec::new(), &[], true)
-            .expect("configured")
+        match agent_shell(
+            &s,
+            None,
+            &task(),
+            "b1",
+            &[],
+            None,
+            Some(&picked),
+            &Vec::new(),
+            &[],
+            true,
+            None,
+        )
+        .expect("configured")
         {
             ShellType::Custom { args, .. } => {
                 let brief = args.first().expect("a brief was passed");
@@ -2510,6 +2635,116 @@ mod report_tests {
 }
 
 #[cfg(test)]
+mod launch_model_tests {
+    use super::super::agent_options::LaunchModel;
+    use super::agent_shell;
+    use super::agent_shell_tests::{custom_args, task};
+    use crate::workspace::persistence::AppSettings;
+    use okena_core::agent_model::AgentModels;
+
+    /// The value after `--model`, if the args have one.
+    fn model_of(args: &[String]) -> Option<&str> {
+        let at = args.iter().position(|a| a == "--model")?;
+        assert_eq!(
+            args.iter().filter(|a| *a == "--model").count(),
+            1,
+            "passed twice: {args:?}"
+        );
+        args.get(at + 1).map(String::as_str)
+    }
+
+    fn start(agent: &str, picked: Option<&str>, roots: &super::PromptRoots) -> Vec<String> {
+        let s = AppSettings::default();
+        custom_args(agent_shell(
+            &s,
+            Some(agent),
+            &task(),
+            "b",
+            &[],
+            None,
+            None,
+            roots,
+            &[],
+            true,
+            picked,
+        ))
+    }
+
+    #[test]
+    fn a_task_start_runs_the_templates_model_for_the_cli_it_fits() {
+        assert_eq!(model_of(&start("claude", None, &Vec::new())), Some("opus"));
+        // The built-in names a Claude alias, which means nothing to Codex.
+        assert_eq!(model_of(&start("codex", None, &Vec::new())), None);
+        assert_eq!(model_of(&start("copilot", None, &Vec::new())), None);
+    }
+
+    #[test]
+    fn a_pick_is_for_this_launch_and_can_be_the_clis_default() {
+        assert_eq!(
+            model_of(&start("claude", Some("haiku"), &Vec::new())),
+            Some("haiku")
+        );
+        assert_eq!(model_of(&start("claude", Some(""), &Vec::new())), None);
+        assert_eq!(
+            model_of(&start("codex", Some("gpt-5"), &Vec::new())),
+            Some("gpt-5")
+        );
+    }
+
+    #[test]
+    fn a_knowledge_roots_template_sets_the_model_codex_gets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("templates")).expect("mkdir");
+        std::fs::write(
+            dir.path().join("templates/task-start.md"),
+            "---\nmodel: sonnet\nmodels:\n  codex: gpt-5-codex\n---\nWork on {key}",
+        )
+        .expect("write");
+        let roots = vec![("store:acme".to_string(), dir.path().to_path_buf())];
+        assert_eq!(model_of(&start("codex", None, &roots)), Some("gpt-5-codex"));
+        assert_eq!(model_of(&start("claude", None, &roots)), Some("sonnet"));
+    }
+
+    #[test]
+    fn a_session_briefed_by_its_client_takes_the_model_it_sends() {
+        let s = AppSettings::default();
+        let args = |model: LaunchModel| {
+            custom_args(super::custom_agent_shell(
+                &s,
+                Some("claude"),
+                "Break QBL-1 down",
+                &Default::default(),
+                &model,
+            ))
+        };
+        // The agent-session template names none: the CLI's default.
+        assert_eq!(model_of(&args(LaunchModel::default())), None);
+        let sonnet = LaunchModel::new(AgentModels::default(), Some("sonnet".into()));
+        assert_eq!(model_of(&args(sonnet)), Some("sonnet"));
+    }
+
+    #[test]
+    fn a_hand_set_model_in_extra_args_is_not_passed_twice() {
+        let mut s = AppSettings::default();
+        s.harness.agents.claude.extra_args = vec!["--model".into(), "sonnet".into()];
+        let args = custom_args(agent_shell(
+            &s,
+            Some("claude"),
+            &task(),
+            "b",
+            &[],
+            None,
+            None,
+            &Vec::new(),
+            &[],
+            true,
+            None,
+        ));
+        assert_eq!(model_of(&args), Some("sonnet"));
+    }
+}
+
+#[cfg(test)]
 mod agent_override_tests {
     use super::agent_shell;
     use super::agent_shell_tests::task;
@@ -2520,8 +2755,20 @@ mod agent_override_tests {
     fn an_explicit_command_overrides_the_configured_one() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        match agent_shell(&s, Some("codex"), &task(), "b", &[], None, None, &Vec::new(), &[], true)
-            .expect("override applies")
+        match agent_shell(
+            &s,
+            Some("codex"),
+            &task(),
+            "b",
+            &[],
+            None,
+            None,
+            &Vec::new(),
+            &[],
+            true,
+            None,
+        )
+        .expect("override applies")
         {
             ShellType::Custom { path, .. } => assert_eq!(path, "codex"),
             other => panic!("expected a custom shell, got {other:?}"),
@@ -2534,12 +2781,36 @@ mod agent_override_tests {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
         assert!(
-            agent_shell(&s, Some(""), &task(), "b", &[], None, None, &Vec::new(), &[], true)
-                .is_none()
+            agent_shell(
+                &s,
+                Some(""),
+                &task(),
+                "b",
+                &[],
+                None,
+                None,
+                &Vec::new(),
+                &[],
+                true,
+                None
+            )
+            .is_none()
         );
         assert!(
-            agent_shell(&s, Some("   "), &task(), "b", &[], None, None, &Vec::new(), &[], true)
-                .is_none()
+            agent_shell(
+                &s,
+                Some("   "),
+                &task(),
+                "b",
+                &[],
+                None,
+                None,
+                &Vec::new(),
+                &[],
+                true,
+                None
+            )
+            .is_none()
         );
     }
 
@@ -2547,8 +2818,20 @@ mod agent_override_tests {
     fn no_override_falls_back_to_the_setting() {
         let mut s = AppSettings::default();
         s.harness.agent_command = Some("claude".into());
-        match agent_shell(&s, None, &task(), "b", &[], None, None, &Vec::new(), &[], true)
-            .expect("falls back")
+        match agent_shell(
+            &s,
+            None,
+            &task(),
+            "b",
+            &[],
+            None,
+            None,
+            &Vec::new(),
+            &[],
+            true,
+            None,
+        )
+        .expect("falls back")
         {
             ShellType::Custom { path, .. } => assert_eq!(path, "claude"),
             other => panic!("expected a custom shell, got {other:?}"),
@@ -2570,6 +2853,7 @@ pub(super) fn start_custom_session(
     root: String,
     project_ids: Vec<String>,
     agent_command: Option<String>,
+    model: Option<String>,
     task_draft: Option<String>,
     task: Option<okena_core::tasks::TaskRef>,
     purpose: Option<okena_core::harness::AgentPurpose>,
@@ -2643,14 +2927,13 @@ pub(super) fn start_custom_session(
 
     let command = super::agent_context::launch_command(settings, agent_command.as_deref());
     let install = super::agent_context::install(&command, &context_items);
-    let brief = custom_brief(
-        &goal,
-        &context,
-        &context_items,
-        install.loaded(),
-        &briefs::prompt_roots(&ws.data.projects, settings),
-    );
-    if let Some(shell) = custom_agent_shell(settings, agent_command.as_deref(), &brief, &install)
+    let prompts = briefs::prompt_roots(&ws.data.projects, settings);
+    let brief = custom_brief(&goal, &context, &context_items, install.loaded(), &prompts);
+    // A client that briefed the agent itself — break-down, refine, draft a
+    // task — resolved that brief's model and sends it as the pick.
+    let model = briefs::launch_model(Flow::AgentSession, &prompts, model);
+    if let Some(shell) =
+        custom_agent_shell(settings, agent_command.as_deref(), &brief, &install, &model)
         && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id)
     {
         p.default_shell = Some(shell);
@@ -2808,16 +3091,12 @@ fn task_brief(
         "context",
         briefs::context_block(context_items, loaded, prompts),
     );
-    // A coordinator is briefed to split the work rather than do it, so it gets
-    // that flow's template — not the work brief with the split tucked in.
-    let flow = match shape {
+    match shape {
         Some(BriefShape::Children(listed)) => {
             vars.insert("children", listed.clone());
-            Flow::TaskCoordinate
         }
         Some(BriefShape::Picked(listed)) => {
             vars.insert("tasks", listed.clone());
-            Flow::TasksCoordinate
         }
         // One agent on several tasks has no one branch: every task is listed
         // with its own, and it plans and verifies them all.
@@ -2826,17 +3105,30 @@ fn task_brief(
             vars.insert("tasks", tasks.clone());
             let verify = briefs::build(Flow::TaskVerify, prompts, &vars);
             vars.insert("verify", briefs::block(&verify.rendered.text));
-            Flow::TasksStart
         }
         // Only the agent doing the work plans and verifies it; a coordinator
         // hands that on to the agents it starts.
         None => {
             let verify = briefs::build(Flow::TaskVerify, prompts, &vars);
             vars.insert("verify", briefs::block(&verify.rendered.text));
-            Flow::TaskStart
         }
-    };
-    briefs::build(flow, prompts, &vars).rendered.text
+    }
+    briefs::build(task_flow(shape), prompts, &vars)
+        .rendered
+        .text
+}
+
+/// The flow a task start is briefed with.
+///
+/// A coordinator is briefed to split the work rather than do it, so it gets
+/// that flow's template — not the work brief with the split tucked in.
+fn task_flow(shape: Option<&BriefShape>) -> Flow {
+    match shape {
+        Some(BriefShape::Children(_)) => Flow::TaskCoordinate,
+        Some(BriefShape::Picked(_)) => Flow::TasksCoordinate,
+        Some(BriefShape::Group { .. }) => Flow::TasksStart,
+        None => Flow::TaskStart,
+    }
 }
 
 /// Shell for a custom agent session.
@@ -2845,6 +3137,7 @@ pub(super) fn custom_agent_shell(
     override_command: Option<&str>,
     brief: &str,
     install: &super::agent_context::Install,
+    model: &super::agent_options::LaunchModel,
 ) -> Option<okena_terminal::shell_config::ShellType> {
     // An explicit empty string means "no agent, just a shell here", even when a
     // default agent is configured — same contract as the other two routes.
@@ -2860,7 +3153,11 @@ pub(super) fn custom_agent_shell(
     // Named first, so a restart can resume this exact conversation; the
     // agent's own options before the brief, which they never replace.
     let mut args = super::agent_resume::session_args(&command);
-    args.extend(super::agent_options::option_args(&command, settings));
+    args.extend(super::agent_options::option_args(
+        &command,
+        settings,
+        model.for_agent(&command).as_deref(),
+    ));
     args.extend(super::briefs::brief_args(&command, brief));
     args.extend(super::agent_mcp::injection_args(&command, settings));
     args.extend(install.args.iter().cloned());

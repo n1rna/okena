@@ -2,6 +2,7 @@
 name: task-start
 description: Brief an agent starting work on a task, in its worktrees
 for: task-start
+model: opus
 ---
 Work on {key}: {title}
 

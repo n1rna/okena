@@ -1536,6 +1536,11 @@ pub enum ActionRequest {
         /// agent is configured.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Model for this launch only. `None` runs the one the brief's template
+        /// names for the agent (`okena_core::agent_model`); an empty string runs
+        /// the CLI's own default; anything else is passed to the CLI as is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         /// Extra context for the agent's opening brief.
         ///
         /// How a coordinating agent tells one of its sub-agents what its share
@@ -1635,6 +1640,11 @@ pub enum ActionRequest {
         /// empty string opens the session on a plain shell.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Model for this launch only. `None` runs the one the brief's template
+        /// names for the agent (`okena_core::agent_model`); an empty string runs
+        /// the CLI's own default; anything else is passed to the CLI as is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         /// Marks the session as drafting a task that does not exist yet,
         /// carrying the title the user typed.
         ///
@@ -1884,6 +1894,11 @@ pub enum ActionRequest {
         /// change and starts no agent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Model for this launch only. `None` runs the one the brief's template
+        /// names for the agent (`okena_core::agent_model`); an empty string runs
+        /// the CLI's own default; anything else is passed to the CLI as is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         /// Items picked for the agent, re-resolved by the daemon.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         context: Vec<crate::context::ContextRef>,
@@ -1905,6 +1920,11 @@ pub enum ActionRequest {
         /// `settings.harness.agent_command`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Model for this launch only. `None` runs the one the brief's template
+        /// names for the agent (`okena_core::agent_model`); an empty string runs
+        /// the CLI's own default; anything else is passed to the CLI as is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         /// Items picked for the agent, re-resolved by the daemon.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         context: Vec<crate::context::ContextRef>,
@@ -2082,6 +2102,11 @@ pub enum ActionRequest {
         /// `settings.harness.agent_command`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Model for this launch only. `None` runs the one the brief's template
+        /// names for the agent (`okena_core::agent_model`); an empty string runs
+        /// the CLI's own default; anything else is passed to the CLI as is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         /// Items picked for the agent, re-resolved by the daemon.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         context: Vec<crate::context::ContextRef>,
@@ -2100,6 +2125,11 @@ pub enum ActionRequest {
         /// `settings.harness.agent_command`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Model for this launch only. `None` runs the one the brief's template
+        /// names for the agent (`okena_core::agent_model`); an empty string runs
+        /// the CLI's own default; anything else is passed to the CLI as is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         /// Items picked for the agent, re-resolved by the daemon.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         context: Vec<crate::context::ContextRef>,
@@ -2120,6 +2150,11 @@ pub enum ActionRequest {
         /// `settings.harness.agent_command`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Model for this launch only. `None` runs the one the brief's template
+        /// names for the agent (`okena_core::agent_model`); an empty string runs
+        /// the CLI's own default; anything else is passed to the CLI as is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Read a project's map: not scanned, scanned, or invalid with its
     /// problems, and the knowledge root its docs are read from. Replies with a
@@ -2139,6 +2174,11 @@ pub enum ActionRequest {
         /// `settings.harness.agent_command`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
+        /// Model for this launch only. `None` runs the one the brief's template
+        /// names for the agent (`okena_core::agent_model`); an empty string runs
+        /// the CLI's own default; anything else is passed to the CLI as is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Match links across every repository with a map. Replies with a
     /// [`crate::project_map::ProjectLinks`].
@@ -2898,6 +2938,7 @@ mod tests {
                 root: String::new(),
                 project_ids: vec!["p1".into()],
                 agent_command: None,
+                model: Some("sonnet".into()),
                 task_draft: None,
                 task: None,
                 purpose: None,

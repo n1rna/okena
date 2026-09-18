@@ -14,6 +14,7 @@ use okena_core::api::ActionRequest;
 use okena_core::tasks::{
     GroupAxis, Task, TaskAuthState, TaskAuthStatusResponse, TaskKind, TaskState,
 };
+use okena_ui::agent_launcher::Launch;
 use okena_ui::resize_handle::ResizeHandle;
 use okena_views_terminal::layout::split_pane::DragState;
 
@@ -339,20 +340,7 @@ impl Facet {
     }
 }
 
-/// Say where a launch brief's template comes from, for the launch dialog.
-///
-/// `source` is the daemon's `PromptRender` answer: `{"builtin": true}` or
-/// `{"root": key, "path": path}`. Named so the user knows what to edit, which
-/// is the whole reason the dialog shows it instead of a goal box.
-pub(super) fn describe_brief_source(flow: &str, source: &serde_json::Value) -> String {
-    match (
-        source.get("root").and_then(|v| v.as_str()),
-        source.get("path").and_then(|v| v.as_str()),
-    ) {
-        (Some(root), Some(path)) => format!("`{path}` in {root}"),
-        _ => format!("okena's built-in `{flow}` template"),
-    }
-}
+pub(super) use crate::views::launch_briefs::describe_brief_source;
 
 /// How to put agents on a task that has sub-tasks.
 ///
@@ -1022,6 +1010,7 @@ impl HarnessPane {
         &mut self,
         task: &Task,
         agent_command: String,
+        model: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(project_ids) = self.quick_start_projects(cx) else {
@@ -1036,14 +1025,17 @@ impl HarnessPane {
                 project_ids,
                 None,
                 agent_command,
-                Default::default(),
+                super::StartExtras {
+                    model,
+                    ..Default::default()
+                },
                 cx,
             ),
             StartStrategy::PerSubtask => {
-                self.fan_out(task, project_ids, agent_command, Vec::new(), cx)
+                self.fan_out(task, project_ids, agent_command, model, Vec::new(), cx)
             }
             StartStrategy::Coordinated => {
-                self.start_coordinator(task, project_ids, agent_command, Vec::new(), cx)
+                self.start_coordinator(task, project_ids, agent_command, model, Vec::new(), cx)
             }
         }
     }
@@ -1075,6 +1067,7 @@ impl HarnessPane {
         task: &Task,
         project_ids: Vec<String>,
         agent_command: String,
+        model: Option<String>,
         context: Vec<okena_core::context::ContextRef>,
         cx: &mut Context<Self>,
     ) {
@@ -1101,6 +1094,7 @@ impl HarnessPane {
                 super::StartExtras {
                     siblings,
                     context: context.clone(),
+                    model: model.clone(),
                     ..Default::default()
                 },
                 cx,
@@ -1118,6 +1112,7 @@ impl HarnessPane {
         task: &Task,
         project_ids: Vec<String>,
         agent_command: String,
+        model: Option<String>,
         context: Vec<okena_core::context::ContextRef>,
         cx: &mut Context<Self>,
     ) {
@@ -1132,6 +1127,7 @@ impl HarnessPane {
             super::StartExtras {
                 coordinate: true,
                 context,
+                model,
                 ..Default::default()
             },
             cx,
@@ -1224,7 +1220,12 @@ impl HarnessPane {
 
     /// Start the ticked tasks with `agent_command` right away, or ask where
     /// when that cannot be told.
-    fn quick_start_selection(&mut self, agent_command: String, cx: &mut Context<Self>) {
+    fn quick_start_selection(
+        &mut self,
+        agent_command: String,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let picked = self.checked_tasks(cx);
         if picked.is_empty() {
             return;
@@ -1233,9 +1234,15 @@ impl HarnessPane {
         // name, as a second start on it would.
         let names = self.selection_branches(&picked, cx);
         match self.quick_start_projects(cx) {
-            Some(project_ids) => {
-                self.start_selection(&picked, project_ids, names, agent_command, Vec::new(), cx)
-            }
+            Some(project_ids) => self.start_selection(
+                &picked,
+                project_ids,
+                names,
+                agent_command,
+                model,
+                Vec::new(),
+                cx,
+            ),
             None => self.open_selection_form(picked, cx),
         }
     }
@@ -1323,12 +1330,14 @@ impl HarnessPane {
     /// coordinator takes none — it has no worktree, and each group it starts
     /// gets its own. The ticks clear once the starts are asked for, and the
     /// tasks move to Active as their agents come up.
+    #[allow(clippy::too_many_arguments)]
     fn start_selection(
         &mut self,
         picked: &[Task],
         project_ids: Vec<String>,
         names: Vec<String>,
         agent_command: String,
+        model: Option<String>,
         context: Vec<okena_core::context::ContextRef>,
         cx: &mut Context<Self>,
     ) {
@@ -1351,6 +1360,7 @@ impl HarnessPane {
                     branches: branches.clone(),
                     hand_picked: true,
                     context: context.clone(),
+                    model: model.clone(),
                     ..Default::default()
                 },
                 cx,
@@ -1380,6 +1390,7 @@ impl HarnessPane {
                             branches: sibling_branches,
                             hand_picked: true,
                             context: context.clone(),
+                            model: model.clone(),
                             ..Default::default()
                         },
                         cx,
@@ -1398,6 +1409,7 @@ impl HarnessPane {
                     also: rest,
                     hand_picked: true,
                     context: context.clone(),
+                    model: model.clone(),
                     ..Default::default()
                 },
                 cx,
@@ -1454,7 +1466,12 @@ impl HarnessPane {
     }
 
     /// Dispatch the configured run with `agent_command`.
-    pub(super) fn confirm_start(&mut self, agent_command: String, cx: &mut Context<Self>) {
+    pub(super) fn confirm_start(
+        &mut self,
+        agent_command: String,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(form) = self.tasks.start_form.as_ref() else {
             return;
         };
@@ -1470,6 +1487,7 @@ impl HarnessPane {
                     &task,
                     TaskHelper::BreakDown,
                     agent_command,
+                    model,
                     project_ids,
                     context,
                     cx,
@@ -1481,6 +1499,7 @@ impl HarnessPane {
                     &task,
                     TaskHelper::Refine,
                     agent_command,
+                    model,
                     project_ids,
                     context,
                     cx,
@@ -1506,6 +1525,7 @@ impl HarnessPane {
                         project_ids,
                         names,
                         agent_command,
+                        model,
                         context,
                         cx,
                     );
@@ -1522,16 +1542,22 @@ impl HarnessPane {
                         agent_command,
                         super::StartExtras {
                             context,
+                            model,
                             ..Default::default()
                         },
                         cx,
                     ),
                     StartStrategy::PerSubtask => {
-                        self.fan_out(&task, project_ids, agent_command, context, cx)
+                        self.fan_out(&task, project_ids, agent_command, model, context, cx)
                     }
-                    StartStrategy::Coordinated => {
-                        self.start_coordinator(&task, project_ids, agent_command, context, cx)
-                    }
+                    StartStrategy::Coordinated => self.start_coordinator(
+                        &task,
+                        project_ids,
+                        agent_command,
+                        model,
+                        context,
+                        cx,
+                    ),
                 }
             }
         }
@@ -1596,6 +1622,7 @@ impl HarnessPane {
                         // explicitly, which is not the same as `None` (fall
                         // back to the configured default).
                         agent_command: Some(agent_command),
+                        model: extras.model,
                         note: None,
                         coordinate: extras.coordinate,
                         also: extras.also,
@@ -3067,8 +3094,13 @@ impl HarnessPane {
             }
         }))
         .busy(busy.then_some("Creating worktrees…"))
-        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
-            this.quick_start_selection(command.to_string(), cx);
+        .brief(crate::views::launch_briefs::brief_for(
+            &self.client,
+            strategy.template(),
+            cx,
+        ))
+        .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
+            this.quick_start_selection(launch.command.to_string(), launch.model.clone(), cx);
         }))
         .on_configure(
             "Choose projects, context and branch…",
@@ -3227,6 +3259,11 @@ impl HarnessPane {
         let mode_hint =
             (!modes.is_empty()).then(|| self.strategy_for(&task.id.external_id).hint(children));
         let for_mode = task.id.external_id.clone();
+        // A split among agents is briefed by the coordinator's template.
+        let work_flow = match self.strategy_for(&task.id.external_id) {
+            StartStrategy::Coordinated => "task-coordinate",
+            StartStrategy::Single | StartStrategy::PerSubtask => "task-start",
+        };
         // A session already listed here may be stopped, or be somebody else's
         // run of the same task. Either way it must not be a dead end: without
         // this the card showed a finished agent and offered no way to start
@@ -3247,17 +3284,25 @@ impl HarnessPane {
                 }
             }))
             .busy(starting.then_some("Creating worktrees…"))
-            .on_launch(
-                cx.listener(move |this, command: &SharedString, _window, cx| {
-                    if has_work {
-                        // The branch is taken, so this one needs a name — and
-                        // quick-starting onto it would only fail in git.
-                        this.open_start_form(&for_launch, cx);
-                        return;
-                    }
-                    this.quick_start_work(&for_launch, command.to_string(), cx);
-                }),
-            )
+            .brief(crate::views::launch_briefs::brief_for(
+                &self.client,
+                work_flow,
+                cx,
+            ))
+            .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
+                if has_work {
+                    // The branch is taken, so this one needs a name — and
+                    // quick-starting onto it would only fail in git.
+                    this.open_start_form(&for_launch, cx);
+                    return;
+                }
+                this.quick_start_work(
+                    &for_launch,
+                    launch.command.to_string(),
+                    launch.model.clone(),
+                    cx,
+                );
+            }))
             .on_configure(
                 "Choose projects, context and branch…",
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
@@ -3308,18 +3353,22 @@ impl HarnessPane {
             // a finished breakdown must not hide the way to run another.
             .launch_alongside_sessions()
             .busy(starting.then_some("Starting…"))
-            .on_launch(
-                cx.listener(move |this, command: &SharedString, _window, cx| {
-                    this.start_task_helper(
-                        &for_launch,
-                        TaskHelper::BreakDown,
-                        command.to_string(),
-                        Vec::new(),
-                        Vec::new(),
-                        cx,
-                    );
-                }),
-            )
+            .brief(crate::views::launch_briefs::brief_for(
+                &self.client,
+                TaskHelper::BreakDown.flow(),
+                cx,
+            ))
+            .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
+                this.start_task_helper(
+                    &for_launch,
+                    TaskHelper::BreakDown,
+                    launch.command.to_string(),
+                    launch.model.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                    cx,
+                );
+            }))
             .on_configure(
                 "Choose projects and context…",
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
@@ -3366,18 +3415,22 @@ impl HarnessPane {
             // hide the way to run another once the task has moved on.
             .launch_alongside_sessions()
             .busy(starting.then_some("Starting…"))
-            .on_launch(
-                cx.listener(move |this, command: &SharedString, _window, cx| {
-                    this.start_task_helper(
-                        &for_launch,
-                        TaskHelper::Refine,
-                        command.to_string(),
-                        Vec::new(),
-                        Vec::new(),
-                        cx,
-                    );
-                }),
-            )
+            .brief(crate::views::launch_briefs::brief_for(
+                &self.client,
+                TaskHelper::Refine.flow(),
+                cx,
+            ))
+            .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
+                this.start_task_helper(
+                    &for_launch,
+                    TaskHelper::Refine,
+                    launch.command.to_string(),
+                    launch.model.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                    cx,
+                );
+            }))
             .on_configure(
                 "Choose projects and context…",
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
@@ -3986,6 +4039,8 @@ impl HarnessPane {
                 .to_string()
         };
 
+        let launch_brief =
+            crate::views::launch_briefs::brief_for(&self.client, self.launch_template(form), cx);
         let start_launcher =
             okena_ui::agent_launcher::AgentLauncher::new("sw-launcher", launch_title)
                 .style(okena_ui::agent_launcher::LauncherStyle::Inline)
@@ -4026,8 +4081,9 @@ impl HarnessPane {
                     this.load_brief_source(&task_for_mode, cx);
                     cx.notify();
                 }))
-                .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
-                    this.confirm_start(command.to_string(), cx);
+                .brief(launch_brief)
+                .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
+                    this.confirm_start(launch.command.to_string(), launch.model.clone(), cx);
                 }));
 
         let brief_line = form

@@ -482,6 +482,7 @@ impl ProjectInfoPanel {
     fn start_links_scan(
         &mut self,
         agent: String,
+        model: Option<String>,
         project_ids: Vec<String>,
         cx: &mut Context<Self>,
     ) {
@@ -500,6 +501,7 @@ impl ProjectInfoPanel {
                     .post_action(ActionRequest::ProjectsScan {
                         project_ids,
                         agent_command: Some(agent),
+                        model,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing links scan result".to_string()))
             })
@@ -553,7 +555,7 @@ impl ProjectInfoPanel {
     }
 
     /// Start an agent mapping this repository.
-    fn start_scan(&mut self, agent: String, cx: &mut Context<Self>) {
+    fn start_scan(&mut self, agent: String, model: Option<String>, cx: &mut Context<Self>) {
         if self.scan_starting {
             return;
         }
@@ -570,6 +572,7 @@ impl ProjectInfoPanel {
                     .post_action(ActionRequest::ProjectScan {
                         project_id,
                         agent_command: Some(agent),
+                        model,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing scan result".to_string()))
             })

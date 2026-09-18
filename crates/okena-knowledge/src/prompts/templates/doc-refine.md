@@ -2,6 +2,7 @@
 name: doc-refine
 description: Brief an agent to change one open document at the user's request
 for: doc-refine
+model: sonnet
 ---
 Change `{file}`: {request}
 

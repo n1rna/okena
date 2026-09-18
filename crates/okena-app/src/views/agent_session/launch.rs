@@ -7,6 +7,7 @@
 
 use super::{AGENT_COMMANDS, AgentSessionInfo};
 use crate::theme::ThemeColors;
+use okena_core::agents::command_name;
 use okena_ui::agent_launcher::{LaunchOption, LauncherSession};
 
 /// An agent okena knows how to start and recognize.
@@ -36,25 +37,28 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
     KnownAgent {
         command: "codex",
         label: "Codex",
-        icon: "icons/terminal.svg",
+        icon: "icons/agent-codex.svg",
         accent: 0x10A37F,
     },
 ];
 
-/// The option for `command`: the known agent's look, or a terminal for a
-/// command okena does not know.
+/// The option for `command`: the known agent's look — matched by program
+/// name, so `/opt/bin/claude` is Claude — or a generic agent named after its
+/// program for a command okena does not know. The command itself is kept, so
+/// the path configured is the path started.
 pub fn launch_option(command: &str, t: &ThemeColors) -> LaunchOption {
-    match KNOWN_AGENTS.iter().find(|a| a.command == command) {
+    let name = command_name(command);
+    match KNOWN_AGENTS.iter().find(|a| a.command == name) {
         Some(agent) => LaunchOption {
-            command: agent.command.into(),
+            command: command.to_string().into(),
             label: agent.label.into(),
             icon: agent.icon.into(),
             accent: agent.accent,
         },
         None => LaunchOption {
             command: command.to_string().into(),
-            label: command.to_string().into(),
-            icon: "icons/terminal.svg".into(),
+            label: okena_core::agents::display_name(&name).into(),
+            icon: "icons/bot.svg".into(),
             accent: t.text_secondary,
         },
     }
@@ -63,6 +67,7 @@ pub fn launch_option(command: &str, t: &ThemeColors) -> LaunchOption {
 /// Starting without an agent, named for what that means where it is offered —
 /// "Worktrees only", "Scaffold only", "Plain shell".
 pub fn no_agent_option(label: &str, t: &ThemeColors) -> LaunchOption {
+    // Drawn as words by the launcher; the icon is for anywhere that lists it.
     LaunchOption {
         command: "".into(),
         label: label.to_string().into(),
@@ -75,12 +80,14 @@ pub fn no_agent_option(label: &str, t: &ThemeColors) -> LaunchOption {
 ///
 /// The configured agent leads, so the default sits where a hand goes first,
 /// and is offered even when okena does not know it: a custom command in
-/// settings must stay startable from everywhere a known one is.
+/// settings must stay startable from everywhere a known one is. A configured
+/// path to a known agent stands in for it rather than beside it.
 pub fn offered_commands(configured: Option<&str>) -> Vec<String> {
     let configured = configured.map(str::trim).filter(|c| !c.is_empty());
+    let configured_name = configured.map(command_name);
     let mut commands: Vec<String> = configured.map(str::to_string).into_iter().collect();
     for command in AGENT_COMMANDS {
-        if configured != Some(*command) {
+        if configured_name.as_deref() != Some(*command) {
             commands.push((*command).to_string());
         }
     }
@@ -139,6 +146,14 @@ mod tests {
         assert_eq!(
             offered_commands(Some("aider")),
             ["aider", "claude", "copilot", "codex"]
+        );
+    }
+
+    #[test]
+    fn a_configured_path_to_a_known_agent_stands_in_for_it() {
+        assert_eq!(
+            offered_commands(Some("/opt/bin/claude")),
+            ["/opt/bin/claude", "copilot", "codex"]
         );
     }
 

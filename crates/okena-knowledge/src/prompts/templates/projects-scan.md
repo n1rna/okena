@@ -2,6 +2,7 @@
 name: projects-scan
 description: Brief an agent to find the links between several repositories and record each in both of their project maps
 for: projects-scan
+model: sonnet
 ---
 Find how these repositories connect, and record every link in both of their project maps.{projects}
 

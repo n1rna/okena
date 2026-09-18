@@ -20,6 +20,7 @@ use okena_core::api::ActionRequest;
 use okena_core::specs::{
     SpecChange, SpecDiagnostic, SpecDoc, SpecRoot, SpecRootKind, SpecSeverity, SpecStores, SpecTree,
 };
+use okena_ui::agent_launcher::Launch;
 
 use super::editor::DocumentBuffer;
 use super::store_git::{StoreSection, sync_badge};
@@ -252,7 +253,12 @@ impl HarnessPane {
 
     /// Scaffold the configured change, start `agent_command` on it, and return
     /// to the specs. An empty command scaffolds only.
-    pub(super) fn draft_spec_change(&mut self, agent_command: String, cx: &mut Context<Self>) {
+    pub(super) fn draft_spec_change(
+        &mut self,
+        agent_command: String,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.specs.drafting {
             return;
         }
@@ -282,6 +288,7 @@ impl HarnessPane {
                         idea,
                         name,
                         agent_command,
+                        model,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing draft result".to_string()))
             })
@@ -1147,8 +1154,13 @@ impl HarnessPane {
                 this.open_context_dialog(super::context_dialog::ContextTarget::SpecDraft, cx);
             }),
         )
-        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
-            this.draft_spec_change(command.to_string(), cx);
+        .brief(crate::views::launch_briefs::brief_for(
+            &self.client,
+            "spec-draft",
+            cx,
+        ))
+        .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
+            this.draft_spec_change(launch.command.to_string(), launch.model.clone(), cx);
         }))
         .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
             this.open_session(id.to_string(), cx);

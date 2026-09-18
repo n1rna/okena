@@ -1341,6 +1341,7 @@ mod tests {
             files: Vec::new(),
             flows: Vec::new(),
             variables: Vec::new(),
+            models: Default::default(),
             status: Vec::new(),
         }
     }

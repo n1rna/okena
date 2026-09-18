@@ -15,6 +15,7 @@ pub mod chrome;
 pub mod components;
 pub mod harness;
 pub mod known_tasks;
+pub mod launch_briefs;
 pub mod layout;
 pub mod overlay_manager;
 pub mod overlays;

@@ -40,6 +40,7 @@ pub use flows::Flow;
 pub use render::{Rendered, Vars, placeholders, render, render_with};
 
 use crate::frontmatter;
+use okena_core::agent_model::AgentModels;
 use std::path::Path;
 
 /// One root a file can be resolved from: the key naming it, and its checkout.
@@ -71,6 +72,13 @@ impl Source {
 pub struct Brief {
     pub flow: Flow,
     pub source: Source,
+    /// The template's frontmatter `name`, else the flow's id: what the
+    /// launcher calls this brief.
+    pub name: String,
+    /// The model the template runs its agent on. Comes with the template that
+    /// won, whole: an override that names no model runs the CLI's default,
+    /// just as its text replaces the built-in's rather than merging with it.
+    pub models: AgentModels,
     pub rendered: Rendered,
 }
 
@@ -94,23 +102,73 @@ pub fn builtin(flow: Flow) -> &'static str {
 /// all of them, in any layer.
 pub fn brief(flow: Flow, roots: Layers<'_>, vars: &Vars<'_>) -> Brief {
     let partial = |name: &str| partial_from(roots, name);
-    let rel = flow.template_path();
-    for (key, dir) in roots {
-        if let Some(body) = body_at(dir, &rel) {
-            return Brief {
-                flow,
-                source: Source::Root {
-                    key: (*key).to_string(),
-                    path: rel,
-                },
-                rendered: render_with(&body, vars, &partial),
-            };
-        }
-    }
+    let (source, template) = resolve(flow, roots);
     Brief {
         flow,
-        source: Source::Builtin,
-        rendered: render_with(builtin(flow), vars, &partial),
+        source,
+        name: template.name,
+        models: template.models,
+        rendered: render_with(&template.body, vars, &partial),
+    }
+}
+
+/// Which template `flow` launches with, without rendering it: where it comes
+/// from, what it is called, and the model it runs on. What a launcher shows
+/// before anything starts, and what a launch passes as the model flag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateInfo {
+    pub source: Source,
+    pub name: String,
+    pub models: AgentModels,
+}
+
+/// [`TemplateInfo`] for `flow`, resolved exactly as [`brief`] resolves it.
+pub fn template_info(flow: Flow, roots: Layers<'_>) -> TemplateInfo {
+    let (source, template) = resolve(flow, roots);
+    TemplateInfo {
+        source,
+        name: template.name,
+        models: template.models,
+    }
+}
+
+/// The first root with a non-empty template for `flow`, else the built-in.
+fn resolve(flow: Flow, roots: Layers<'_>) -> (Source, Template) {
+    let rel = flow.template_path();
+    for (key, dir) in roots {
+        if let Ok(content) = std::fs::read_to_string(dir.join(&rel))
+            && let Some(template) = Template::read(flow, &content)
+        {
+            let source = Source::Root {
+                key: (*key).to_string(),
+                path: rel,
+            };
+            return (source, template);
+        }
+    }
+    let template = Template::read(flow, defaults::file(flow))
+        .expect("every flow has a non-empty built-in template");
+    (Source::Builtin, template)
+}
+
+/// A flow's template file, read: what it is called, what it runs on, and the
+/// body to render.
+struct Template {
+    name: String,
+    models: AgentModels,
+    body: String,
+}
+
+impl Template {
+    /// `None` for an empty body, which is not an answer and falls through.
+    fn read(flow: Flow, content: &str) -> Option<Self> {
+        let (fm, body) = frontmatter::parse(content);
+        let body = body.trim_end();
+        (!body.is_empty()).then(|| Template {
+            name: fm.string("name").unwrap_or_else(|| flow.id().to_string()),
+            models: fm.agent_models(),
+            body: body.to_string(),
+        })
     }
 }
 
@@ -334,6 +392,60 @@ mod tests {
         let out = super::fragment("group-note", &[], &vars);
         assert!(out.is_complete(), "{:?}", out.unknown);
         assert!(out.text.contains("QBL-2, QBL-3"), "{}", out.text);
+    }
+
+    #[test]
+    fn builtins_run_work_on_opus_and_helpers_on_sonnet() {
+        use Flow::*;
+        let expected = |flow: Flow| match flow {
+            TaskStart | TasksStart | TaskCoordinate | TasksCoordinate | TaskVerify => Some("opus"),
+            TaskBreakDown | TaskCreate | TaskRefine | SpecDraft | DocumentRefine
+            | KnowledgeDraft | ProjectScan | ProjectsScan => Some("sonnet"),
+            AgentSession => None,
+        };
+        for flow in Flow::all() {
+            let b = brief(*flow, &[], &Vars::new());
+            assert_eq!(b.models.model.as_deref(), expected(*flow), "{flow}");
+            assert!(b.models.models.is_empty(), "{flow}");
+            // Every built-in is named for its flow.
+            assert_eq!(b.name, flow.id());
+        }
+    }
+
+    #[test]
+    fn a_roots_template_replaces_the_builtins_model_along_with_its_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let layers = [("store:acme", dir.path())];
+        write(
+            dir.path(),
+            "templates/task-start.md",
+            "---\nname: acme-start\nmodels:\n  codex: gpt-5-codex\n---\nWork on {key}",
+        );
+        let b = brief(Flow::TaskStart, &layers, &Vars::new());
+        assert_eq!(b.name, "acme-start");
+        assert_eq!(b.models.for_agent("codex"), Some("gpt-5-codex"));
+        // Not merged with the built-in's `opus`: the override names none.
+        assert_eq!(b.models.for_agent("claude"), None);
+
+        write(
+            dir.path(),
+            "templates/task-start.md",
+            "---\nmodel: haiku\n---\nx",
+        );
+        let b = brief(Flow::TaskStart, &layers, &Vars::new());
+        assert_eq!(b.models.for_agent("claude"), Some("haiku"));
+        // No `name`: called after its flow.
+        assert_eq!(b.name, "task-start");
+
+        // An empty override falls through, model and all.
+        write(
+            dir.path(),
+            "templates/task-start.md",
+            "---\nmodel: haiku\n---\n\n",
+        );
+        let b = brief(Flow::TaskStart, &layers, &Vars::new());
+        assert_eq!(b.source, Source::Builtin);
+        assert_eq!(b.models.for_agent("claude"), Some("opus"));
     }
 
     #[test]

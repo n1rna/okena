@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod agent_activity;
+pub mod agent_model;
 pub mod agents;
 pub mod api;
 pub mod context;
