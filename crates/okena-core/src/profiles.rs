@@ -37,6 +37,10 @@ impl ProfilePaths {
     pub fn updates_dir(&self) -> PathBuf {
         self.root.join("updates")
     }
+    /// Installed extensions: their registry, files, data and build cache.
+    pub fn extensions_dir(&self) -> PathBuf {
+        self.root.join("extensions")
+    }
     pub fn lock_path(&self) -> PathBuf {
         self.root.join("okena.lock")
     }
