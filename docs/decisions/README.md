@@ -20,3 +20,4 @@ a commit message suffices.
 - 0004 — [okena commits and pushes store checkouts through one shared store-git module](0004-store-commit-and-push.md) — accepted (2026-09-12)
 - 0005 — [A project map is agent-written docs plus one validated manifest in the repo's knowledge root](0005-project-maps.md) — accepted (2026-09-13)
 - 0006 — [Links between projects are written into both projects' maps](0006-project-links-on-both-sides.md) — accepted (2026-09-13)
+- 0007 — [Extensions from git run as sandboxed WASM in the daemon and return declarative views](0007-wasm-extensions.md) — accepted (2026-09-18)

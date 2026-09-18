@@ -1,0 +1,29 @@
+id = "my-extension"
+name = "My extension"
+version = "0.1.0"
+description = "What it shows and does, in a sentence."
+api = "0.1"
+refresh_interval_secs = 60
+
+[view]
+title = "My extension"
+
+[permissions]
+# Programs it runs. Each is shown to the user before install.
+commands = ["git"]
+# Paths it reads; `{config.<key>}` is a path from its configuration.
+paths = ["{config.folder}"]
+start_agents = false
+
+[[requires]]
+name = "git"
+check = ["git", "--version"]
+min_version = "2.30"
+install_hint = "https://git-scm.com/downloads"
+
+[[config]]
+key = "folder"
+label = "Folder"
+type = "path"
+description = "A git checkout to show the log of."
+required = true
