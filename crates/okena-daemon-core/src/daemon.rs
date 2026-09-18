@@ -548,6 +548,13 @@ impl DaemonCore {
         // notifications) and the command loop (native hook events), resolved by
         // its own poll, read by `GetState`.
         let agent_activity = Arc::new(crate::agent_activity::AgentActivityTracker::default());
+        // Extensions installed from git. Starting one loads and compiles its
+        // component, so the host does it on each extension's own thread.
+        let extension_host = crate::extensions::start_host(
+            reactor.workspace.clone(),
+            &settings,
+            state_version.clone(),
+        );
         local.block_on(&runtime, async move {
             // Observers MUST be spawned inside the LocalSet (they `spawn_local`).
             reactor.spawn_observers();
@@ -606,6 +613,13 @@ impl DaemonCore {
                 (*toast_tx).clone(),
                 reactor.state_version.clone(),
             ));
+
+            if let Some(host) = &extension_host {
+                tokio::task::spawn_local(crate::extensions::run_update_checks(
+                    host.clone(),
+                    handle.clone(),
+                ));
+            }
 
             // Materialize PTYs for every restored project's uninitialized
             // terminal slots BEFORE the command loop starts serving clients.
@@ -681,6 +695,7 @@ impl DaemonCore {
                 soft_close_deadlines,
                 git_poll_trigger_tx,
                 agent_activity,
+                extension_host,
             );
             tokio::pin!(cmd);
             let interrupted = tokio::select! {

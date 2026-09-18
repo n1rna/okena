@@ -6932,6 +6932,7 @@ dependencies = [
  "okena-app-core",
  "okena-context",
  "okena-core",
+ "okena-extension-host",
  "okena-git",
  "okena-hooks",
  "okena-remote-server",

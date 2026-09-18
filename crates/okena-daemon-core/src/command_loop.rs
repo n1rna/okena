@@ -2858,6 +2858,7 @@ pub async fn daemon_command_loop(
     deadlines: SoftCloseDeadlines,
     git_poll_trigger_tx: tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
     agent_activity: Arc<crate::agent_activity::AgentActivityTracker>,
+    extension_host: Option<Arc<okena_extension_host::host::ExtensionHost>>,
 ) {
     // Single dormant "main" FocusManager. The loop is single-threaded, so it
     // owns the FM directly instead of resolving a per-window entity like the
@@ -3061,6 +3062,37 @@ pub async fn daemon_command_loop(
                         .unwrap_or_else(|e| {
                             CommandResult::Err(format!("OpenSpec git worker failed: {e}"))
                         });
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
+                    }
+                });
+                continue;
+            }
+            // ── Extensions: off the queue and the workspace lock ──
+            // Installing runs git and may build with cargo for minutes; actions
+            // and queries wait on the extension's own worker. None of it
+            // touches the workspace.
+            RemoteCommand::Action(action) if crate::extensions::is_extension_action(&action) => {
+                let Some(host) = extension_host.clone() else {
+                    if let Some(reply) = reply {
+                        let _ = reply.send(CommandResult::Err(
+                            "extensions are unavailable in this okena (the WASM runtime did not start)".into(),
+                        ));
+                    }
+                    continue;
+                };
+                let settings = settings.clone();
+                let state_version = state_version.clone();
+                let worker_runtime = runtime.clone();
+                let _task = runtime.spawn(async move {
+                    let result = worker_runtime
+                        .spawn_blocking(move || {
+                            crate::extensions::execute(&host, action, &settings, &|| {
+                                state_version.send_modify(|v| *v = v.wrapping_add(1));
+                            })
+                        })
+                        .await
+                        .unwrap_or_else(|e| CommandResult::Err(format!("extension worker failed: {e}")));
                     if let Some(reply) = reply {
                         let _ = reply.send(result);
                     }
@@ -3349,6 +3381,13 @@ pub async fn daemon_command_loop(
                             &outcome, &settings, &terminals,
                         );
                         publish_committed_settings_change(&outcome, &state_version);
+                        // Enabling, disabling or configuring an extension
+                        // takes effect now, without a restart.
+                        if outcome.committed
+                            && let Some(host) = &extension_host
+                        {
+                            host.apply_settings(crate::extensions::host_settings(&settings.lock()));
+                        }
                         outcome.result
                     }
                     ActionRequest::GetThemes => daemon_config.get_themes(),
@@ -4621,7 +4660,7 @@ pub async fn daemon_command_loop(
 
                 // Shared projection: ordered projects + folders + flat back-compat
                 // fields → `StateResponse` (identical to the GUI loop).
-                let resp = build_state_response(
+                let mut resp = build_state_response(
                     sv,
                     data,
                     &git_statuses,
@@ -4632,6 +4671,9 @@ pub async fn daemon_command_loop(
                     windows,
                     hooks,
                 );
+                if let Some(host) = &extension_host {
+                    resp.extensions = host.snapshot();
+                }
 
                 // `match` (not `.expect`) so the daemon-core crate stays clean
                 // under `clippy::expect_used` had it been enabled — the serialize
@@ -5210,6 +5252,7 @@ mod tests {
                 Arc::new(Mutex::new(HashMap::new())),
                 tokio::sync::mpsc::unbounded_channel().0,
                 self.agent_activity,
+                None,
             ))
         }
     }

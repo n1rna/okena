@@ -1225,6 +1225,22 @@ pub fn execute_action(
         | ActionRequest::InvokeAction { .. } => {
             ActionResult::Err("app-scoped action must be handled by the remote bridge".to_string())
         }
+
+        // Extensions run in the daemon's extension host, which the command
+        // loop owns.
+        ActionRequest::ExtensionPreview { .. }
+        | ActionRequest::ExtensionInstall { .. }
+        | ActionRequest::ExtensionPreviewUpdate { .. }
+        | ActionRequest::ExtensionUpdate { .. }
+        | ActionRequest::ExtensionCheckUpdates
+        | ActionRequest::ExtensionReload { .. }
+        | ActionRequest::ExtensionRemove { .. }
+        | ActionRequest::ExtensionRefresh { .. }
+        | ActionRequest::ExtensionRecheck { .. }
+        | ActionRequest::ExtensionRunAction { .. }
+        | ActionRequest::ExtensionQuery { .. } => {
+            ActionResult::Err("extension actions must be handled by the daemon".to_string())
+        }
     }
 }
 

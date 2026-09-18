@@ -13,6 +13,7 @@ okena-context = { path = "../okena-context", features = ["index"] }
 okena-state = { path = "../okena-state" }
 okena-terminal = { path = "../okena-terminal" }
 okena-git = { path = "../okena-git" }
+okena-extension-host = { path = "../okena-extension-host" }
 okena-hooks = { path = "../okena-hooks", default-features = false }
 okena-workspace = { path = "../okena-workspace", default-features = false }
 okena-services = { path = "../okena-services", default-features = false }
