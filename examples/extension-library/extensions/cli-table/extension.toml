@@ -1,0 +1,47 @@
+id = "cli-table"
+name = "CLI table"
+version = "0.1.0"
+description = "Jobs per tenant, computed by jq: group, sort and filter them, unblock, skip or delete them, or hand a stuck one to an agent."
+api = "0.1"
+refresh_interval_secs = 30
+
+[view]
+title = "Jobs"
+
+[permissions]
+# jq turns the job list into rows.
+commands = ["jq"]
+# An optional JSON file of jobs to read instead of the built-in sample.
+paths = ["{config.jobs_file}"]
+# "Investigate now" starts an agent session without asking.
+start_agents = true
+
+[[requires]]
+name = "jq"
+check = ["jq", "--version"]
+min_version = "1.6"
+install_hint = "brew install jq   (or apt install jq)"
+
+[[config]]
+key = "jobs_file"
+label = "Jobs file"
+type = "path"
+description = "A JSON array of jobs ({id, tenant, status, attempts, started, message}). Empty uses the built-in sample, kept in the extension's storage."
+
+[[config]]
+key = "agent_root"
+label = "Agent working directory"
+type = "path"
+description = "Where agents investigating a job start. Empty uses okena's default."
+
+[[config]]
+key = "project"
+label = "Project for agents"
+type = "string"
+description = "The name of an okena project to give agents investigating a job, if any."
+
+[[config]]
+key = "stuck_after_minutes"
+label = "Stuck after (minutes)"
+type = "number"
+default = 30

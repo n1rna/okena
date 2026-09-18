@@ -27,8 +27,31 @@ pub fn fixture_wasm(name: &str) -> Option<PathBuf> {
     result
 }
 
+/// The example library shipped in `examples/extension-library`.
+pub fn example_library_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/extension-library")
+}
+
+/// The built component of the example extension `name` (a folder under
+/// `extensions/` in the example library).
+pub fn example_wasm(name: &str) -> Option<PathBuf> {
+    let key = format!("example:{name}");
+    static BUILT: OnceLock<Mutex<std::collections::HashMap<String, Option<PathBuf>>>> = OnceLock::new();
+    let mut built = BUILT.get_or_init(Default::default).lock().expect("lock");
+    if let Some(done) = built.get(&key) {
+        return done.clone();
+    }
+    let result = build_in(&example_library_dir().join("extensions").join(name), name);
+    built.insert(key, result.clone());
+    result
+}
+
 fn build(name: &str) -> Option<PathBuf> {
-    let dir = fixtures_dir().join(name);
+    build_in(&fixtures_dir().join(name), name)
+}
+
+fn build_in(dir: &Path, name: &str) -> Option<PathBuf> {
+    let dir = dir.to_path_buf();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let output = std::process::Command::new(cargo)
         .args(["build", "--release", "--target", "wasm32-wasip2", "--target-dir"])
