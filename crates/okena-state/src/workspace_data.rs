@@ -145,6 +145,12 @@ impl ProjectData {
         self.is_agent_session().then_some(AgentPurpose::Work)
     }
 
+    /// Whether this agent session was closed, and so belongs in the history
+    /// rather than the Agents list. See [`ProjectData::closed_at`].
+    pub fn is_closed(&self) -> bool {
+        self.closed_at.is_some()
+    }
+
     /// Whether this project is any kind of agent session.
     ///
     /// Both kinds are rooted above the repos rather than in one, so anything
@@ -547,6 +553,15 @@ pub struct ProjectData {
     /// record of them, and the scope must survive a daemon restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_projects: Vec<String>,
+    /// When an agent session was closed, in Unix millis; `None` while it is
+    /// open.
+    ///
+    /// Only the session panel's Close sets it: an agent that exits or is
+    /// stopped stays open. A closed session leaves the Agents list for its
+    /// history, keeping its record, worktrees and tracked PRs, and reopening
+    /// it clears this. Persisted so it stays closed across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<u64>,
     /// Folder icon color for this project
     #[serde(default)]
     pub folder_color: FolderColor,
@@ -702,6 +717,7 @@ mod tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
             folder_color: Default::default(),
             hooks: Default::default(),
             connection_id: None,
@@ -2418,6 +2434,7 @@ mod agent_session_tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),

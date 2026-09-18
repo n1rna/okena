@@ -6,6 +6,7 @@
 
 pub mod activity_repaint;
 pub mod agent_launcher;
+pub mod ago;
 pub mod badge;
 pub mod button;
 pub mod chip;

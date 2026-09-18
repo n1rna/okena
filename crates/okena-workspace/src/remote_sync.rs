@@ -21,6 +21,10 @@ pub struct RemoteProjectSnapshot {
     /// What the agent in each terminal is doing, keyed by (prefixed) terminal
     /// id, as the daemon decided it.
     pub agent_activity: HashMap<String, okena_core::agent_activity::AgentActivity>,
+    /// Whether a closed session's working directory is gone from the daemon's
+    /// disk, so it cannot be reopened. The daemon's answer: this client may
+    /// not share its filesystem.
+    pub cwd_missing: bool,
 }
 
 /// Transient remote-sync state that lives alongside persistent workspace data.

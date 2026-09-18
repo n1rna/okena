@@ -70,6 +70,39 @@ impl AgentSessionKind {
     }
 }
 
+/// How a closed session can be brought back, as its closed view offers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReopenChoice {
+    /// Resume the conversation the agent was having.
+    Resume,
+    /// okena cannot resume this agent: start a new conversation from its brief.
+    StartAgain,
+    /// Its working directory is gone — its worktree was removed — so it can
+    /// be neither resumed nor started there.
+    WorktreeRemoved,
+}
+
+impl ReopenChoice {
+    /// What the button says.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReopenChoice::Resume => "Resume conversation",
+            ReopenChoice::StartAgain => "Start again from its brief",
+            ReopenChoice::WorktreeRemoved => "Its worktree was removed",
+        }
+    }
+
+    /// Whether the button does anything.
+    pub fn enabled(self) -> bool {
+        !matches!(self, ReopenChoice::WorktreeRemoved)
+    }
+
+    /// Whether reopening starts a new conversation rather than resuming.
+    pub fn fresh(self) -> bool {
+        matches!(self, ReopenChoice::StartAgain)
+    }
+}
+
 /// A checkout this session's work lands in.
 #[derive(Clone, Debug)]
 pub struct RelatedWorkspace {
@@ -122,6 +155,11 @@ pub struct AgentSessionInfo {
     pub parent: Option<RelatedAgent>,
     /// Agents on this task's sub-tasks.
     pub children: Vec<RelatedAgent>,
+    /// When the session was closed, in Unix millis; `None` while it is open.
+    pub closed_at: Option<u64>,
+    /// Whether a closed session's working directory is gone, as the daemon
+    /// that owns the disk said.
+    pub cwd_missing: bool,
 }
 
 /// Another agent session in the same ticket breakdown.
@@ -407,6 +445,10 @@ impl AgentSessionInfo {
             workspaces,
             parent,
             children,
+            closed_at: project.closed_at,
+            cwd_missing: ws
+                .remote_snapshot(project_id)
+                .is_some_and(|s| s.cwd_missing),
         })
     }
 
@@ -483,6 +525,26 @@ impl AgentSessionInfo {
         activity_of(self.running, self.live, self.idle.clone())
     }
 
+    /// Whether the session was closed, and so is shown as history.
+    pub fn closed(&self) -> bool {
+        self.closed_at.is_some()
+    }
+
+    /// How the closed view offers to bring this session back.
+    ///
+    /// Resuming is the point of keeping a closed session, so it is offered
+    /// whenever okena can; a fresh start only when it cannot. A missing
+    /// directory rules out both, and says so rather than hiding the button.
+    pub fn reopen_choice(&self) -> ReopenChoice {
+        if self.cwd_missing {
+            ReopenChoice::WorktreeRemoved
+        } else if self.resumable {
+            ReopenChoice::Resume
+        } else {
+            ReopenChoice::StartAgain
+        }
+    }
+
     /// The line identifying what the session works on, for a card.
     ///
     /// A session on several picked tasks says how many more beside the first,
@@ -526,8 +588,8 @@ pub fn short_path(path: &str, keep: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentSessionInfo, AgentSessionKind, SessionActivity, activity_of, is_related, session_kind,
-        session_tasks, short_path, tasks_key,
+        AgentSessionInfo, AgentSessionKind, ReopenChoice, SessionActivity, activity_of,
+        is_related, session_kind, session_tasks, short_path, tasks_key,
     };
     use okena_core::agent_activity::AgentActivity;
     use okena_core::harness::AgentState;
@@ -554,6 +616,40 @@ mod tests {
             workspaces: Vec::new(),
             parent: None,
             children: Vec::new(),
+            closed_at: None,
+            cwd_missing: false,
+        }
+    }
+
+    #[test]
+    fn a_closed_session_resumes_when_okena_can() {
+        let mut s = info(false, None, "");
+        s.closed_at = Some(1);
+        s.resumable = true;
+        assert_eq!(s.reopen_choice(), ReopenChoice::Resume);
+        assert!(!s.reopen_choice().fresh());
+        assert_eq!(s.reopen_choice().label(), "Resume conversation");
+    }
+
+    #[test]
+    fn an_agent_okena_cannot_resume_starts_again_from_its_brief() {
+        let mut s = info(false, None, "");
+        s.closed_at = Some(1);
+        s.resumable = false;
+        assert_eq!(s.reopen_choice(), ReopenChoice::StartAgain);
+        assert!(s.reopen_choice().fresh() && s.reopen_choice().enabled());
+    }
+
+    #[test]
+    fn a_removed_worktree_disables_reopening_and_says_why() {
+        for resumable in [true, false] {
+            let mut s = info(false, None, "");
+            s.closed_at = Some(1);
+            s.resumable = resumable;
+            s.cwd_missing = true;
+            assert_eq!(s.reopen_choice(), ReopenChoice::WorktreeRemoved);
+            assert!(!s.reopen_choice().enabled());
+            assert_eq!(s.reopen_choice().label(), "Its worktree was removed");
         }
     }
 

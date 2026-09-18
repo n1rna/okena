@@ -210,6 +210,7 @@ pub fn apply_remote_snapshot(
                     existing.custom_session = api_project.custom_session.clone();
                     existing.agent_purpose = api_project.agent_purpose.clone();
                     existing.agent = api_project.agent.clone();
+                    existing.closed_at = api_project.closed_at;
                     existing.pinned = api_project.pinned;
                     existing.last_activity_at = api_project.last_activity_at;
                     existing.default_shell = api_project.default_shell.clone();
@@ -288,6 +289,7 @@ pub fn apply_remote_snapshot(
                         custom_session: api_project.custom_session.clone(),
                         agent_purpose: api_project.agent_purpose.clone(),
                         context_projects: api_project.context_projects.clone(),
+                        closed_at: api_project.closed_at,
                         agent: api_project.agent.clone(),
                         folder_color: project_color,
                         hooks: HooksConfig::from_api(&api_project.hooks),
@@ -311,6 +313,7 @@ pub fn apply_remote_snapshot(
                 snapshot.services = remote_services;
                 snapshot.host = remote_host;
                 snapshot.git_status = remote_git_status;
+                snapshot.cwd_missing = api_project.cwd_missing;
                 // Keyed by terminal, so prefixed like the layout's ids.
                 snapshot.agent_activity = api_project
                     .agent_activity
@@ -618,6 +621,8 @@ mod tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
+            cwd_missing: false,
             agent: None,
             agent_activity: Default::default(),
             pinned: false,
@@ -740,6 +745,31 @@ mod tests {
             entry.status,
             okena_state::HookTerminalStatus::Failed { exit_code: 3 }
         ));
+    }
+
+    #[test]
+    fn a_closed_mark_and_a_missing_directory_are_mirrored_and_cleared() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let snap = |closed_at: Option<u64>, cwd_missing: bool| {
+            let mut p = api_project("s", None);
+            p.custom_session = Some("audit".into());
+            p.closed_at = closed_at;
+            p.cwd_missing = cwd_missing;
+            RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(vec![p], vec!["s".into()], vec![])),
+            }
+        };
+
+        // Added closed, then updated back open: both paths carry the mark.
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(Some(7), true)], WindowId::Main);
+        assert_eq!(data.projects[0].closed_at, Some(7));
+        assert!(rs.snapshot("remote:c1:s").unwrap().cwd_missing);
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(None, false)], WindowId::Main);
+        assert_eq!(data.projects[0].closed_at, None);
+        assert!(!rs.snapshot("remote:c1:s").unwrap().cwd_missing);
     }
 
     #[test]

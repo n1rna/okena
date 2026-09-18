@@ -322,6 +322,8 @@ mod tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
+            cwd_missing: false,
             agent: None,
             agent_activity: Default::default(),
             pinned: false,

@@ -74,6 +74,18 @@ impl Sidebar {
         cx.notify();
     }
 
+    /// Swap the agents list for the closed agents' history, or back.
+    ///
+    /// In place, in the same list: history is a different set of the same
+    /// rows, not somewhere else to go.
+    pub(super) fn toggle_closed_agents(&mut self, cx: &mut Context<Self>) {
+        self.show_closed_agents = !self.show_closed_agents;
+        // The cursor indexes into the list that is going away.
+        self.cursor_index = None;
+        self.header_menu = None;
+        cx.notify();
+    }
+
     /// One list tab.
     fn list_tab(
         &self,
@@ -193,6 +205,24 @@ impl Sidebar {
                     .child(self.list_tab("AGENTS", SidebarList::Agents, cx))
                     .child(self.list_tab("PROJECTS", SidebarList::Projects, cx))
                     .child(div().flex_1().min_w_0())
+                    .children(shows_history_button(self.list).then(|| {
+                        let showing = self.show_closed_agents;
+                        self.header_icon(
+                            HeaderIcon {
+                                id: "list-history",
+                                icon: "icons/history.svg",
+                                tooltip: if showing {
+                                    "Back to live agents"
+                                } else {
+                                    "Closed agents"
+                                },
+                                active: showing,
+                                capture_bounds: None,
+                            },
+                            |this, _, _window, cx| this.toggle_closed_agents(cx),
+                            cx,
+                        )
+                    }))
                     .child(self.header_icon(
                         HeaderIcon {
                             id: "list-overflow",
@@ -605,6 +635,12 @@ impl Sidebar {
     }
 }
 
+/// Whether the header offers the closed agents' history: only on the Agents
+/// tab, whose rows it swaps.
+fn shows_history_button(list: SidebarList) -> bool {
+    list == SidebarList::Agents
+}
+
 /// Whether the grid is currently showing the whole of `list`.
 ///
 /// The two overviews share the grid, so each has to account for the other:
@@ -628,7 +664,13 @@ fn overview_is_showing(
 
 #[cfg(test)]
 mod tests {
-    use super::{SidebarList, overview_is_showing};
+    use super::{SidebarList, overview_is_showing, shows_history_button};
+
+    #[test]
+    fn only_the_agents_tab_offers_the_history() {
+        assert!(shows_history_button(SidebarList::Agents));
+        assert!(!shows_history_button(SidebarList::Projects));
+    }
 
     #[test]
     fn the_two_overviews_share_one_grid() {

@@ -2545,6 +2545,7 @@ mod tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
@@ -3410,6 +3411,28 @@ mod tests {
                 repo_path: "/p/okena".into(),
                 branch: branch.into(),
             });
+    }
+
+    #[test]
+    fn a_closed_session_keeps_its_prs_and_pushes_polled() {
+        // Closed sessions show their PRs' live state and CI in the history, so
+        // closing must not take them out of the poller's work.
+        let mut ws = linked_workspace();
+        track(&mut ws, "session", 9, git::PrState::Open);
+        record_push(&mut ws, "session", "feat/own");
+        ws.data
+            .projects
+            .iter_mut()
+            .find(|p| p.id == "session")
+            .unwrap()
+            .closed_at = Some(1_700_000_000_000);
+
+        let links = session_links(&ws);
+        assert_eq!(links["wt"].session_id, "session", "its worktree stays linked");
+        assert_eq!(tracked_pr_polls(&ws).len(), 1);
+        let pushed = pushed_branch_polls(&ws, &links);
+        assert_eq!(pushed.len(), 1, "{pushed:?}");
+        assert!(pushed[0].key.ends_with("|/p/okena|feat/own"));
     }
 
     #[test]

@@ -186,23 +186,7 @@ pub(crate) fn format_duration(ms: u64) -> String {
     }
 }
 
-/// How long ago `then` was, both in Unix millis.
-pub(crate) fn format_ago(then: u64, now: u64) -> String {
-    let secs = now.saturating_sub(then) / 1_000;
-    match secs {
-        0..60 => "just now".into(),
-        60..3_600 => format!("{} min ago", secs / 60),
-        3_600..86_400 => format!("{} h ago", secs / 3_600),
-        _ => format!("{} d ago", secs / 86_400),
-    }
-}
-
-fn now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
+use okena_ui::ago::{format_ago, now_millis};
 
 // ─── The view ────────────────────────────────────────────────────────────────
 
@@ -612,7 +596,7 @@ impl HarnessPane {
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{Tone, format_ago, format_duration, group_runs, run_status, step_row};
+    use super::{Tone, format_duration, group_runs, run_status, step_row};
     use crate::workspace::state::ProjectData;
     use okena_core::api::{
         VerificationEvidence, VerificationRun, VerificationStep, VerificationStepState as S,
@@ -801,12 +785,9 @@ mod tests {
     }
 
     #[test]
-    fn durations_and_ages_read_at_a_human_precision() {
+    fn durations_read_at_a_human_precision() {
         assert_eq!(format_duration(850), "850 ms");
         assert_eq!(format_duration(12_400), "12 s");
         assert_eq!(format_duration(184_000), "3 m 4 s");
-        assert_eq!(format_ago(0, 30_000), "just now");
-        assert_eq!(format_ago(0, 5 * 60_000), "5 min ago");
-        assert_eq!(format_ago(0, 3 * 3_600_000), "3 h ago");
     }
 }

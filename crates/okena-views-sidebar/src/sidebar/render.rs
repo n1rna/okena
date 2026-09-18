@@ -445,6 +445,10 @@ impl Sidebar {
         // match the activity view's `terminal_ids` (which filters them out).
         let mut hits: Vec<(Option<u64>, &ProjectData)> = Vec::new();
         for project in &workspace.data().projects {
+            // A closed session is history: nothing in it waits on you.
+            if project.is_closed() {
+                continue;
+            }
             let has_attention = project
                 .layout
                 .as_ref()
@@ -729,6 +733,11 @@ impl Render for Sidebar {
                 SidebarRequest::QuickCreateWorktree { project_id } => {
                     self.spawn_quick_create_worktree(&project_id, cx);
                 }
+                SidebarRequest::ShowLiveAgents => {
+                    self.list = super::SidebarList::Agents;
+                    self.show_closed_agents = false;
+                    self.cursor_index = None;
+                }
             }
         }
 
@@ -740,7 +749,11 @@ impl Render for Sidebar {
         // Agents list: a different set of rows entirely, so skip building the
         // project tree rather than building it and throwing it away.
         if self.list == super::SidebarList::Agents {
-            let agents = self.render_agents_list(cx).into_any_element();
+            let agents = if self.show_closed_agents {
+                self.render_closed_agents_list(cx).into_any_element()
+            } else {
+                self.render_agents_list(cx).into_any_element()
+            };
             return self.render_sidebar_container(vec![agents], cx);
         }
 

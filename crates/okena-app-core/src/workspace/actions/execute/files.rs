@@ -971,6 +971,7 @@ mod entry_mutation_tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
             agent: None,
             id: "p1".to_string(),
             name: "Project".to_string(),

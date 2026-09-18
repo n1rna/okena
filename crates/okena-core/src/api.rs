@@ -473,6 +473,20 @@ pub struct ApiProject {
     /// `ProjectData::context_projects`; daemon-side ids, only read there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_projects: Vec<String>,
+    /// When an agent session was closed (`AgentClose`), in Unix millis;
+    /// `None` while it is open. Mirrors `ProjectData::closed_at`. Clients list
+    /// a closed session in the Agents history instead of the Agents list, and
+    /// leave it out of the overview and the waiting indicators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<u64>,
+    /// Whether a closed session's working directory is gone from the daemon's
+    /// disk — its worktree was removed — so it cannot be reopened there.
+    ///
+    /// Decided by the daemon, whose disk it is: a remote client cannot look.
+    /// Only checked for closed sessions; always false for everything else.
+    /// serde-defaulted so an older daemon reads as "still there".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cwd_missing: bool,
     /// Whether this project is pinned to the top of the activity-sorted view.
     /// Carried over the wire so daemon-client projects keep their pin marker
     /// and stable pinned-tier ordering.
@@ -2242,6 +2256,29 @@ pub enum ActionRequest {
     AgentStop {
         project_id: String,
     },
+    /// Close an agent session: stop its agent and move it to the Agents
+    /// history.
+    ///
+    /// Closes every terminal in the session, as stopping does, and stamps
+    /// `closed_at`. Nothing else changes: the session record — its reported
+    /// status, assets, tracked PRs and launch command — and its worktrees and
+    /// branches all stay, and the git poller keeps its PRs current. Only
+    /// `AgentReopen` or a delete undoes it.
+    AgentClose {
+        project_id: String,
+    },
+    /// Bring a closed agent session back to the Agents list and start its
+    /// agent again.
+    ///
+    /// `fresh` off resumes the conversation, as `AgentRestart` does; on starts
+    /// a new one from the session's brief, for an agent okena cannot resume.
+    /// Clears `closed_at` either way. Refused, with the session left closed,
+    /// when its working directory no longer exists: its worktree was removed.
+    AgentReopen {
+        project_id: String,
+        #[serde(default)]
+        fresh: bool,
+    },
     RenameProjectDirectory {
         project_id: String,
         new_name: String,
@@ -2575,6 +2612,8 @@ mod tests {
                 custom_session: None,
                 agent_purpose: None,
                 context_projects: Vec::new(),
+                closed_at: Some(1_700_000_500_000),
+                cwd_missing: true,
                 pinned: true,
                 last_activity_at: Some(1_700_000_000_000),
                 default_shell: Some(ShellType::Default),
@@ -2642,6 +2681,8 @@ mod tests {
         assert!(matches!(parsed.projects[0].folder_color, FolderColor::Blue));
         assert!(parsed.projects[0].pinned);
         assert_eq!(parsed.projects[0].last_activity_at, Some(1_700_000_000_000));
+        assert_eq!(parsed.projects[0].closed_at, Some(1_700_000_500_000));
+        assert!(parsed.projects[0].cwd_missing);
         assert_eq!(parsed.projects[0].default_shell, Some(ShellType::Default));
         assert_eq!(parsed.projects[0].hook_terminals.len(), 1);
         assert_eq!(parsed.projects[0].hook_terminals[0].terminal_id, "h1");
@@ -3170,6 +3211,34 @@ mod tests {
             let json = serde_json::to_string(&action).unwrap();
             let _parsed: ActionRequest = serde_json::from_str(&json).unwrap();
         }
+    }
+
+    #[test]
+    fn a_project_from_an_older_daemon_is_open_with_its_directory_present() {
+        let old: ApiProject = serde_json::from_value(serde_json::json!({
+            "id": "s1", "name": "session", "path": "/tmp", "show_in_overview": true,
+            "layout": null, "terminal_names": {}, "folder_color": "default",
+        }))
+        .unwrap();
+        assert_eq!(old.closed_at, None);
+        assert!(!old.cwd_missing);
+    }
+
+    #[test]
+    fn a_reopen_without_fresh_resumes() {
+        let reopen: ActionRequest = serde_json::from_value(serde_json::json!({
+            "action": "agent_reopen", "project_id": "s1",
+        }))
+        .unwrap();
+        assert!(matches!(
+            reopen,
+            ActionRequest::AgentReopen { fresh: false, .. }
+        ));
+        let close: ActionRequest = serde_json::from_value(serde_json::json!({
+            "action": "agent_close", "project_id": "s1",
+        }))
+        .unwrap();
+        assert!(matches!(close, ActionRequest::AgentClose { .. }));
     }
 
     #[test]

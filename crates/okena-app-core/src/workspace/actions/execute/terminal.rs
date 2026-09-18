@@ -318,6 +318,125 @@ fn respawn_agent(
     super::spawn_agent_terminal(ws, project_id, backend, terminals, settings, cx)
 }
 
+/// Close an agent session: stop its agent and move it to the Agents history.
+///
+/// Every terminal in the session goes, as with Stop — their tmux sessions and
+/// the agent processes with them — and the session is stamped closed. That is
+/// all: its record, worktrees and branches are left exactly as they are, so a
+/// closed session still shows everything it had and can be reopened.
+pub(super) fn close_agent(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    project_id: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let Some(project) = ws.project(&project_id) else {
+        return ActionResult::Err(format!("project not found: {project_id}"));
+    };
+    if !project.is_any_agent_session() {
+        return ActionResult::Err("only an agent session can be closed".into());
+    }
+    if let Some(terminal_ids) = project.layout.as_ref().map(|l| l.collect_terminal_ids()) {
+        close_agent_terminals(
+            ws,
+            focus_manager,
+            &project_id,
+            &terminal_ids,
+            backend,
+            terminals,
+            cx,
+        );
+    }
+    let now = super::tasks::now_millis();
+    ws.with_project(&project_id, cx, |p| {
+        p.closed_at = Some(now);
+        true
+    });
+    ActionResult::Ok(None)
+}
+
+/// Reopen a closed agent session: start its agent again and bring it back to
+/// the Agents list.
+///
+/// Resumes its conversation unless `fresh`, which starts a new one from the
+/// brief — the session's own `default_shell` — for an agent okena cannot
+/// resume. The closed mark is cleared only once the agent has started, so a
+/// refused reopen leaves the session in the history where it was.
+pub(super) fn reopen_agent(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    project_id: String,
+    fresh: bool,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let Some(project) = ws.project(&project_id) else {
+        return ActionResult::Err(format!("project not found: {project_id}"));
+    };
+    // Its conversation is filed under this directory, and the agent would
+    // have nowhere to run: say why instead of spawning into a missing cwd.
+    if !std::path::Path::new(&project.path).is_dir() {
+        return ActionResult::Err(format!(
+            "Its worktree was removed: {} no longer exists",
+            project.path
+        ));
+    }
+    // Either way the agent comes back in its own pane, created afresh when
+    // closing took the session's layout with it.
+    let result = if fresh {
+        start_agent(
+            ws,
+            focus_manager,
+            project_id.clone(),
+            backend,
+            terminals,
+            settings,
+            cx,
+        )
+    } else {
+        restart_agent(
+            ws,
+            focus_manager,
+            project_id.clone(),
+            backend,
+            terminals,
+            settings,
+            cx,
+        )
+    };
+    if matches!(result, ActionResult::Ok(_)) {
+        ws.with_project(&project_id, cx, |p| p.closed_at.take().is_some());
+    }
+    result
+}
+
+/// Kill `terminal_ids` and drop the session's whole layout — the tree at
+/// once, so a pane whose terminal never started goes too rather than being
+/// spawned the next time the session is shown. Reopening gives the agent a
+/// new pane of its own.
+fn close_agent_terminals(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    project_id: &str,
+    terminal_ids: &[String],
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    cx: &mut impl WorkspaceCx,
+) {
+    for terminal_id in terminal_ids {
+        if terminals.lock().contains_key(terminal_id) {
+            ws.remember_closing_terminal_owner(project_id, terminal_id);
+        }
+        backend.kill(terminal_id);
+        terminals.lock().remove(terminal_id);
+    }
+    ws.close_terminal_and_focus_sibling(focus_manager, project_id, &[], cx);
+}
+
 pub(super) fn close(
     ws: &mut Workspace,
     focus_manager: &mut FocusManager,
