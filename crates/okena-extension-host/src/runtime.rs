@@ -399,6 +399,7 @@ impl host::Host for Ctx {
                 args: &command.args,
                 cwd: cwd.as_deref(),
                 env: &command.env,
+                remove_env: &[],
                 stdin: command.stdin.as_deref(),
                 timeout,
                 search_path: ctx.guard.search_path(),

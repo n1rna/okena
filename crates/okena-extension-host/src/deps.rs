@@ -37,6 +37,7 @@ fn check_tool(tool: &ExtRequiredTool, search_path: &SearchPath) -> ExtToolStatus
         args,
         cwd: None,
         env: &[],
+        remove_env: &[],
         stdin: None,
         timeout: CHECK_TIMEOUT,
         search_path,

@@ -67,6 +67,8 @@ pub struct Run<'a> {
     pub args: &'a [String],
     pub cwd: Option<&'a Path>,
     pub env: &'a [(String, String)],
+    /// Inherited variables to drop.
+    pub remove_env: &'a [&'a str],
     pub stdin: Option<&'a str>,
     pub timeout: Duration,
     pub search_path: &'a SearchPath,
@@ -93,6 +95,9 @@ pub fn run(run: Run<'_>) -> Result<Finished, String> {
         .stderr(Stdio::piped());
     if let Some(path) = &run.search_path.0 {
         command.env("PATH", path);
+    }
+    for key in run.remove_env {
+        command.env_remove(key);
     }
     for (key, value) in run.env {
         command.env(key, value);
@@ -186,6 +191,7 @@ mod tests {
             args: &args,
             cwd: None,
             env: &[],
+            remove_env: &[],
             stdin,
             timeout,
             search_path: &search,
