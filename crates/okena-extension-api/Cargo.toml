@@ -1,0 +1,15 @@
+[package]
+name = "okena-extension-api"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Write okena extensions in Rust: typed helpers over the okena:extension WIT interface."
+
+# The SDK extensions are written against. It compiles to wasm32-wasip2 inside an
+# extension and natively for okena's own checks (host calls panic natively).
+# `wit/extension.wit` is the interface; the daemon's host binds the same file.
+
+[dependencies]
+wit-bindgen = "0.62"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

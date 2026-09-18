@@ -1,0 +1,16 @@
+[package]
+name = "okena-ext-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A test extension for okena-extension-host: each query exercises one host
+# call or failure mode. Built by the host's tests for wasm32-wasip2.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+okena-extension-api = { path = "../../../../okena-extension-api" }
+
+[workspace]

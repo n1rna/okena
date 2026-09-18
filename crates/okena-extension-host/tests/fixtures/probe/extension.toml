@@ -1,0 +1,18 @@
+id = "probe"
+name = "Probe"
+version = "0.1.0"
+description = "Exercises the host calls."
+refresh_interval_secs = 0
+
+[view]
+title = "Probe"
+
+[permissions]
+commands = ["echo"]
+paths = ["{config.dir}"]
+start_agents = true
+
+[[config]]
+key = "dir"
+label = "Directory"
+type = "path"

@@ -1,0 +1,29 @@
+[package]
+name = "okena-extension-host"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Runs extensions installed from git as WASM components, for the daemon: the
+# manifest, permissions and dependency check, the wasmtime host, and install /
+# update / remove on disk. GPUI-free and daemon-safe.
+
+[dependencies]
+okena-core = { path = "../okena-core" }
+okena-git = { path = "../okena-git" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.0"
+semver = "1.0"
+log = "0.4"
+parking_lot = "0.12"
+dirs = "5.0"
+wasmtime = { version = "48", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "parallel-compilation"] }
+wasmtime-wasi = { version = "48", default-features = false, features = ["p2"] }
+# The stderr sink the guest writes to implements wasmtime-wasi's stream traits.
+tokio = { version = "1", default-features = false }
+async-trait = "0.1"
+bytes = "1"
+
+[dev-dependencies]
+tempfile = "3"

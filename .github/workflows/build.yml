@@ -58,6 +58,11 @@ jobs:
       - name: Install test dependencies
         run: sudo apt-get install -y dtach zsh fish
 
+      # The extension host's tests build their fixture extensions for WASM.
+      # Added to the toolchain rust-toolchain.toml selects, not the one above.
+      - name: Install the wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
@@ -91,6 +96,7 @@ jobs:
           # Turn a missing prerequisite from a silent skip into a failure.
           OKENA_REQUIRE_SHELLS: 1
           OKENA_REQUIRE_TUI: 1
+          OKENA_REQUIRE_WASM: 1
         run: cargo test --workspace --no-fail-fast
 
   # Windows-only `cfg` branches never compile in the Linux `check` job above, so
