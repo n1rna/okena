@@ -77,10 +77,10 @@ impl ExtensionsManager {
         let subscription = extensions_entity(cx).map(|e| cx.observe(&e, |_, _, cx| cx.notify()));
         let mut this = Self {
             source_kind: SourceKind::Git,
-            url: input("https://github.com/acme/okena-extensions.git", cx),
-            git_ref: input("main (optional: a branch, tag or commit)", cx),
-            path: input("extensions/cli-table (optional: the folder in the repo)", cx),
-            local_path: input("/path/to/extension (the folder with extension.toml)", cx),
+            url: input("e.g. https://github.com/acme/okena-extensions.git", cx),
+            git_ref: input("Optional: a branch, tag or commit (default branch if empty)", cx),
+            path: input("For a library: the extension's folder, e.g. extensions/cli-table", cx),
+            local_path: input("The folder holding extension.toml, e.g. /code/my-ext", cx),
             target: None,
             review: None,
             busy: None,

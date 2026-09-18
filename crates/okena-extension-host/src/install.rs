@@ -104,6 +104,9 @@ pub fn prepare(dirs: &Dirs, source: &ExtSource, search: &SearchPath) -> Result<P
     if !dir.is_dir() {
         return Err(format!("{} does not exist in the source", dir.display()));
     }
+    if !dir.join(crate::manifest::MANIFEST_FILE).is_file() {
+        return Err(no_manifest_here(&dir, &source));
+    }
     let manifest = Manifest::load(&dir)?;
     let prebuilt = dir.join(PREBUILT_WASM).is_file();
     Ok(Prepared {
@@ -112,6 +115,57 @@ pub fn prepare(dirs: &Dirs, source: &ExtSource, search: &SearchPath) -> Result<P
         manifest,
         prebuilt,
     })
+}
+
+/// What to say when the folder has no manifest: most likely the root of a
+/// library, so name the extension folders inside it.
+fn no_manifest_here(dir: &Path, source: &ExtSource) -> String {
+    let mut found = Vec::new();
+    find_manifests(dir, dir, 0, &mut found);
+    found.sort();
+    let what = match source {
+        ExtSource::Git { .. } => "Folder in the repository",
+        ExtSource::Local { .. } => "Folder",
+    };
+    if found.is_empty() {
+        format!(
+            "There is no {} in {}. Point {what} at the folder holding the extension's manifest.",
+            crate::manifest::MANIFEST_FILE,
+            dir.display()
+        )
+    } else {
+        let shown: Vec<String> = found.iter().take(8).map(|p| format!("  {p}")).collect();
+        format!(
+            "There is no {} at the top of {}; it looks like a library. Set {what} to one of:\n{}",
+            crate::manifest::MANIFEST_FILE,
+            dir.display(),
+            shown.join("\n")
+        )
+    }
+}
+
+/// Folders under `root` holding an `extension.toml`, relative to `base`,
+/// a few levels deep.
+fn find_manifests(base: &Path, root: &Path, depth: usize, found: &mut Vec<String>) {
+    if depth > 4 || found.len() >= 50 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !path.is_dir() || name.starts_with('.') || name == "target" || name == "node_modules" {
+            continue;
+        }
+        if path.join(crate::manifest::MANIFEST_FILE).is_file() {
+            if let Ok(relative) = path.strip_prefix(base) {
+                found.push(relative.to_string_lossy().into_owned());
+            }
+        } else {
+            find_manifests(base, &path, depth + 1, found);
+        }
+    }
 }
 
 /// A path inside the repo, refusing anything that climbs out of it.
@@ -363,6 +417,23 @@ pub fn place(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_library_root_names_the_extension_folders_in_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for id in ["cli-table", "git-tree"] {
+            let ext = dir.path().join("extensions").join(id);
+            std::fs::create_dir_all(&ext).expect("mkdir");
+            std::fs::write(ext.join("extension.toml"), "").expect("write");
+        }
+        let source = ExtSource::Local {
+            path: dir.path().to_string_lossy().into_owned(),
+        };
+        let err = prepare(&Dirs::new(dir.path().join("x")), &source, &SearchPath::from_env())
+            .expect_err("no manifest at the root");
+        assert!(err.contains("looks like a library"), "{err}");
+        assert!(err.contains("extensions/cli-table") && err.contains("extensions/git-tree"), "{err}");
+    }
 
     #[test]
     fn repo_paths_cannot_climb_out() {
