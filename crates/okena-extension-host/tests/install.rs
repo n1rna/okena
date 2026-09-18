@@ -488,3 +488,32 @@ fn an_extension_refreshes_on_its_declared_interval() {
     let gap = again.refreshed_at_ms.unwrap_or_default() - first;
     assert!((4_000..10_000).contains(&gap), "refreshed {gap}ms after the first");
 }
+
+#[test]
+fn an_agents_destructive_call_waits_for_the_users_answer() {
+    let Some(lib) = Library::new(true) else { return };
+    let h = harness("an_agents_destructive_call_waits_for_the_users_answer");
+    let preview = h.host.preview_install(&lib.source()).expect("preview");
+    h.host.install(&lib.source(), None, &preview.permissions).expect("install");
+    h.enable(&["probe"], HashMap::new());
+    h.wait_ready("probe");
+    let wipe = h.host.action_def("probe", "wipe").expect("wipe");
+    let host = Arc::new(h);
+
+    for approve in [true, false] {
+        let waiting = {
+            let host = host.clone();
+            let wipe = wipe.clone();
+            std::thread::spawn(move || host.host.await_confirmation("probe", &wipe, &["a".into()], None))
+        };
+        let pending = host.wait("probe", "a pending confirmation", |e| !e.pending_confirmations.is_empty());
+        let request = &pending.pending_confirmations[0];
+        assert_eq!(request.action_label, "Wipe");
+        assert_eq!(request.items, vec!["a".to_string()]);
+        host.host.confirm("probe", &request.id, approve).expect("answer");
+        assert_eq!(waiting.join().expect("join"), approve);
+        let after = host.host.extension("probe").expect("ext");
+        assert!(after.pending_confirmations.is_empty(), "answered requests leave the snapshot");
+        assert!(host.host.confirm("probe", &request.id, true).is_err(), "and cannot be answered twice");
+    }
+}

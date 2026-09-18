@@ -11,9 +11,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use okena_core::extension::{
-    ApiExtension, ExtActionDef, ExtActionOutcome, ExtInstallPreview, ExtPermissions,
-    ExtQueryDef, ExtRefusal, ExtRunState, ExtSource, ExtStatus, ExtToolStatus, ExtUpdate,
-    ExtView, Invoker,
+    ApiExtension, ExtActionDef, ExtActionOutcome, ExtInstallPreview, ExtPendingConfirmation,
+    ExtPermissions, ExtQueryDef, ExtRefusal, ExtRunState, ExtSource, ExtStatus, ExtToolStatus,
+    ExtUpdate, ExtView, Invoker,
 };
 use parking_lot::Mutex;
 
@@ -29,6 +29,8 @@ use crate::store::{self, Dirs, InstalledRecord, now_ms};
 const MAX_REFUSALS: usize = 10;
 /// How long a caller waits for an action or query before giving up on it.
 const CALL_TIMEOUT: Duration = Duration::from_secs(6 * 60);
+/// How long an agent's destructive call waits for the user to answer.
+pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// What the host needs from the daemon.
 pub struct HostConfig {
@@ -58,6 +60,15 @@ pub struct ExtensionHost {
     /// Serialises install, update, reload and remove, which share the git
     /// cache and the registry.
     lifecycle: Mutex<()>,
+    /// Destructive actions agents asked for, waiting on the user.
+    pending: Arc<Mutex<Vec<Pending>>>,
+    next_pending: std::sync::atomic::AtomicU64,
+}
+
+struct Pending {
+    extension: String,
+    confirmation: ExtPendingConfirmation,
+    answer: Sender<bool>,
 }
 
 /// One installed extension: its record, manifest, and what it last showed.
@@ -157,6 +168,8 @@ impl ExtensionHost {
             workers: Mutex::new(HashMap::new()),
             settings: Mutex::new(HostSettings::default()),
             lifecycle: Mutex::new(()),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            next_pending: std::sync::atomic::AtomicU64::new(1),
         })
     }
 
@@ -171,16 +184,89 @@ impl ExtensionHost {
     /// Every installed extension, as clients see it.
     pub fn snapshot(&self) -> Vec<ApiExtension> {
         let settings = self.settings.lock().clone();
-        self.entries
+        let entries: Vec<ApiExtension> = self
+            .entries
             .lock()
             .values()
             .map(|entry| to_api(entry, &settings))
-            .collect()
+            .collect();
+        entries.into_iter().map(|e| self.with_pending(e)).collect()
     }
 
     pub fn extension(&self, id: &str) -> Option<ApiExtension> {
         let settings = self.settings.lock().clone();
-        self.entries.lock().get(id).map(|e| to_api(e, &settings))
+        let ext = self.entries.lock().get(id).map(|e| to_api(e, &settings))?;
+        Some(self.with_pending(ext))
+    }
+
+    fn with_pending(&self, mut ext: ApiExtension) -> ApiExtension {
+        ext.pending_confirmations = self
+            .pending
+            .lock()
+            .iter()
+            .filter(|p| p.extension == ext.id)
+            .map(|p| p.confirmation.clone())
+            .collect();
+        ext
+    }
+
+    /// An action's definition, once the extension has described itself.
+    pub fn action_def(&self, id: &str, action: &str) -> Option<ExtActionDef> {
+        self.entries
+            .lock()
+            .get(id)?
+            .run
+            .actions
+            .iter()
+            .find(|a| a.id == action)
+            .cloned()
+    }
+
+    /// The permissions the user approved for `id`.
+    pub fn approved(&self, id: &str) -> Option<ExtPermissions> {
+        self.entries.lock().get(id).map(|e| e.record.approved.clone())
+    }
+
+    /// Holds an agent's destructive call until the user answers in okena,
+    /// or [`CONFIRM_TIMEOUT`] passes. Blocks. `true` when the user approved.
+    pub fn await_confirmation(
+        &self,
+        id: &str,
+        action: &ExtActionDef,
+        items: &[String],
+        session_project_id: Option<String>,
+    ) -> bool {
+        let number = self.next_pending.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let confirmation = format!("{id}-{number}");
+        let (answer, answered) = mpsc::channel();
+        self.pending.lock().push(Pending {
+            extension: id.to_string(),
+            confirmation: ExtPendingConfirmation {
+                id: confirmation.clone(),
+                action: action.id.clone(),
+                action_label: action.label.clone(),
+                items: items.to_vec(),
+                session_project_id,
+                requested_at_ms: now_ms(),
+            },
+            answer,
+        });
+        (self.config.on_change)();
+        let approved = answered.recv_timeout(CONFIRM_TIMEOUT).unwrap_or(false);
+        self.pending.lock().retain(|p| p.confirmation.id != confirmation);
+        (self.config.on_change)();
+        approved
+    }
+
+    /// The user's answer to a pending confirmation.
+    pub fn confirm(&self, id: &str, confirmation: &str, approve: bool) -> Result<(), String> {
+        let pending = self.pending.lock();
+        let entry = pending
+            .iter()
+            .find(|p| p.extension == id && p.confirmation.id == confirmation)
+            .ok_or("that request is no longer waiting (it was answered or timed out)")?;
+        let _ = entry.answer.send(approve);
+        Ok(())
     }
 
     /// Starts, stops and reconfigures workers to match `settings`.

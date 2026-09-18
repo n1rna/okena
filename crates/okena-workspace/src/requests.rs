@@ -155,6 +155,16 @@ pub struct NewAgentPrefill {
     pub name: String,
     /// Task the session is about, carried through to the start.
     pub task: Option<okena_core::tasks::TaskRef>,
+    /// Where the agent works; empty leaves it to the daemon.
+    pub root: String,
+    /// Projects to pick, as the daemon names them.
+    pub project_ids: Vec<String>,
+    /// Context to hand the agent.
+    pub context: Vec<okena_core::context::ContextRef>,
+    /// Which card started it, carried through to the start.
+    pub purpose: Option<okena_core::harness::AgentPurpose>,
+    /// The daemon to start it on; `None` is this machine's.
+    pub connection_id: Option<String>,
 }
 
 /// Requests consumed by WindowView::process_pending_requests().

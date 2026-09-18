@@ -2217,6 +2217,26 @@ pub enum ActionRequest {
         #[serde(default)]
         args: serde_json::Value,
     },
+    /// An agent's call, through okena's MCP, to the extension that started
+    /// its session: the session holding `terminal_id` must have been started
+    /// by that extension. Actions must be marked agent-callable; a
+    /// destructive one waits until the user confirms it in okena.
+    ExtensionAgentCall {
+        terminal_id: String,
+        call: crate::extension::ExtAgentCall,
+    },
+    /// What the agent in `terminal_id` may call, as an
+    /// [`crate::extension::ExtAgentTools`]; an error when no extension
+    /// started its session.
+    ExtensionAgentTools {
+        terminal_id: String,
+    },
+    /// The user's answer to a destructive action an agent asked for.
+    ExtensionConfirm {
+        id: String,
+        confirmation: String,
+        approve: bool,
+    },
     // ─── Agent reporting (written by agents through okena's MCP server) ───
     /// Record something an agent produced against its session project.
     ///

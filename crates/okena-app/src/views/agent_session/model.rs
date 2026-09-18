@@ -119,6 +119,9 @@ pub struct AgentSessionInfo {
     pub project_id: String,
     pub name: String,
     pub kind: AgentSessionKind,
+    /// The extension that started it, and the item it is about: e.g.
+    /// `("cli-table", Some("job-7 (acme)"))`.
+    pub origin: Option<(String, Option<String>)>,
     /// Every task the session covers: the one it is named after, then the
     /// others picked with it. Empty unless it is a task session.
     pub tasks: Vec<TaskRef>,
@@ -409,9 +412,18 @@ impl AgentSessionInfo {
             _ => (None, Vec::new()),
         };
 
+        let origin = match &project.agent_purpose {
+            Some(okena_core::harness::AgentPurpose::Extension {
+                extension,
+                item,
+                item_label,
+            }) => Some((extension.clone(), item_label.clone().or_else(|| item.clone()))),
+            _ => None,
+        };
         Some(Self {
             project_id: project.id.clone(),
             name: project.name.clone(),
+            origin,
             tasks: session_tasks(project),
             kind,
             root: project.path.clone(),
@@ -600,6 +612,7 @@ mod tests {
             project_id: "s1".into(),
             name: "s".into(),
             kind: AgentSessionKind::Plain,
+            origin: None,
             tasks: Vec::new(),
             root: "/p".into(),
             agent: None,

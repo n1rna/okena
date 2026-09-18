@@ -98,6 +98,58 @@ fn dispatch(method: &str, params: &Value) -> Result<Value, Value> {
 fn tool_definitions() -> Value {
     json!([
         {
+            "name": "okena_extension_tools",
+            "description":
+                "When an okena extension started this session (e.g. from a row of \
+                 its table), list what that extension lets you do: its queries and \
+                 the actions agents may run, with their inputs, and the item the \
+                 session is about. Fails for sessions no extension started.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "okena_extension_query",
+            "description":
+                "Ask the extension that started this session a question by query \
+                 id (from okena_extension_tools), e.g. re-read the item you are \
+                 working on. Returns the extension's JSON answer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The query's id." },
+                    "args": { "type": "object", "description": "The query's parameters, by key." }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "okena_extension_action",
+            "description":
+                "Run an action of the extension that started this session, by \
+                 action id (from okena_extension_tools), on the items (row ids) \
+                 given. Only actions the extension lets agents run. An action \
+                 marked destructive waits until the user confirms it in okena, \
+                 and fails if they decline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "description": "The action's id." },
+                    "items": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Ids of the rows or items it runs on."
+                    },
+                    "inputs": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "The action's form values, by input key."
+                    }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "okena_whoami",
             "description":
                 "Identify the okena session this agent is running in: terminal, \
@@ -636,6 +688,9 @@ fn call_tool(params: &Value) -> Result<Value, Value> {
         "okena_test_step_start" => test_step_start(&args),
         "okena_test_step_result" => test_step_result(&args),
         "okena_test_run_finish" => test_run_finish(&args),
+        "okena_extension_tools" => extension_tools(),
+        "okena_extension_query" => extension_query(&args),
+        "okena_extension_action" => extension_action(&args),
         other => {
             return Err(rpc_error(
                 METHOD_NOT_FOUND,
@@ -1453,9 +1508,65 @@ fn context_read(args: &Value) -> Result<Value, String> {
     action(&context_read_body(args, &terminal)?)
 }
 
+// ─── Extensions ──────────────────────────────────────────────────────────────
+
+fn extension_tools() -> Result<Value, String> {
+    let terminal = session_terminal(std::env::var("OKENA_TERMINAL_ID").ok())?;
+    action(&json!({ "action": "extension_agent_tools", "terminal_id": terminal }))
+}
+
+/// The daemon action behind `okena_extension_query`.
+fn extension_query_body(args: &Value, terminal_id: &str) -> Result<Value, String> {
+    let query = str_arg(args, "query").ok_or("`query` is required — a query id from okena_extension_tools")?;
+    Ok(json!({
+        "action": "extension_agent_call",
+        "terminal_id": terminal_id,
+        "call": {
+            "kind": "query",
+            "query": query,
+            "args": args.get("args").cloned().unwrap_or_else(|| json!({})),
+        }
+    }))
+}
+
+/// The daemon action behind `okena_extension_action`.
+fn extension_action_body(args: &Value, terminal_id: &str) -> Result<Value, String> {
+    let action_id = str_arg(args, "action").ok_or("`action` is required — an action id from okena_extension_tools")?;
+    let items: Vec<String> = args
+        .get("items")
+        .and_then(|i| i.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let inputs: Vec<(String, String)> = args
+        .get("inputs")
+        .and_then(|i| i.as_object())
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_string)))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(json!({
+        "action": "extension_agent_call",
+        "terminal_id": terminal_id,
+        "call": { "kind": "action", "action_id": action_id, "items": items, "inputs": inputs }
+    }))
+}
+
+fn extension_query(args: &Value) -> Result<Value, String> {
+    let terminal = session_terminal(std::env::var("OKENA_TERMINAL_ID").ok())?;
+    action(&extension_query_body(args, &terminal)?)
+}
+
+fn extension_action(args: &Value) -> Result<Value, String> {
+    let terminal = session_terminal(std::env::var("OKENA_TERMINAL_ID").ok())?;
+    action(&extension_action_body(args, &terminal)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
+        extension_action_body, extension_query_body,
         INVALID_PARAMS, METHOD_NOT_FOUND, PROTOCOL_VERSION, dispatch, layout_has_terminal,
         tool_definitions, tool_error, tool_result,
     };
@@ -1735,6 +1846,9 @@ mod tests {
                 "okena_context_search",
                 "okena_create_subtask",
                 "okena_create_task",
+                "okena_extension_action",
+                "okena_extension_query",
+                "okena_extension_tools",
                 "okena_get_task",
                 "okena_list_containers",
                 "okena_list_projects",
@@ -1843,5 +1957,37 @@ mod tests {
         assert!(super::rejects_field(older, "branch"));
         assert!(!super::rejects_field(older, "project"));
         assert!(!super::rejects_field("project not found: s1", "branch"));
+    }
+
+    #[test]
+    fn extension_calls_parse_as_the_daemon_action() {
+        let query = extension_query_body(&json!({ "query": "get_job", "args": { "id": "job-7" } }), "t1")
+            .expect("query");
+        let action: okena_core::api::ActionRequest = serde_json::from_value(query).expect("parses");
+        assert!(matches!(
+            action,
+            okena_core::api::ActionRequest::ExtensionAgentCall { ref terminal_id, call: okena_core::extension::ExtAgentCall::Query { ref query, .. } }
+                if terminal_id == "t1" && query == "get_job"
+        ));
+
+        let body = extension_action_body(
+            &json!({ "action": "unblock", "items": ["job-7"], "inputs": { "reason": "stuck", "n": 2 } }),
+            "t1",
+        )
+        .expect("action");
+        let action: okena_core::api::ActionRequest = serde_json::from_value(body).expect("parses");
+        let okena_core::api::ActionRequest::ExtensionAgentCall {
+            call: okena_core::extension::ExtAgentCall::Action { action_id, items, inputs },
+            ..
+        } = action
+        else {
+            panic!("an action call")
+        };
+        assert_eq!(action_id, "unblock");
+        assert_eq!(items, vec!["job-7".to_string()]);
+        assert!(inputs.contains(&("reason".to_string(), "stuck".to_string())));
+        assert!(inputs.contains(&("n".to_string(), "2".to_string())));
+
+        assert!(extension_action_body(&json!({}), "t1").is_err());
     }
 }

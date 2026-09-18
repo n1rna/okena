@@ -568,6 +568,37 @@ pub struct ExtPendingConfirmation {
     pub requested_at_ms: u64,
 }
 
+/// What an agent asks of the extension that started it, through okena's MCP.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExtAgentCall {
+    Query {
+        query: String,
+        #[serde(default)]
+        args: serde_json::Value,
+    },
+    Action {
+        action_id: String,
+        #[serde(default)]
+        items: Vec<String>,
+        #[serde(default)]
+        inputs: Vec<(String, String)>,
+    },
+}
+
+/// What an agent session may call: the extension that started it, with its
+/// agent-callable actions and its queries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtAgentTools {
+    pub extension: String,
+    pub name: String,
+    /// The row or item the session is about, if it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    pub actions: Vec<ExtActionDef>,
+    pub queries: Vec<ExtQueryDef>,
+}
+
 /// An installed extension, as every client sees it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ApiExtension {

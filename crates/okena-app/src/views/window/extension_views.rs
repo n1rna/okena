@@ -20,7 +20,7 @@ impl WindowView {
     pub(crate) fn show_extension_view(&mut self, key: String, cx: &mut Context<Self>) {
         if !self.extension_panes.contains_key(&key) {
             let broker = self.request_broker.clone();
-            let badges = agent_badges_fn(self.workspace.clone());
+            let badges = agent_badges_fn(self.workspace.clone(), self.terminals.clone());
             let pane = cx.new(|cx| ExtensionPane::new(key.clone(), broker, badges, cx));
             cx.subscribe(&pane, |this, _pane, event: &ExtensionPaneEvent, cx| {
                 this.on_extension_pane_event(event, cx);
@@ -101,8 +101,10 @@ pub(super) fn sync_extensions(
     });
 }
 
-/// Badges for rows agent sessions were started from. Filled in by the
-/// agent-session integration; empty until a session names the extension.
-fn agent_badges_fn(workspace: Entity<crate::workspace::state::Workspace>) -> AgentBadgesFn {
-    Arc::new(move |ext, cx| crate::views::extension_agents::badges(ext, &workspace, cx))
+/// Badges for the rows agent sessions were started from.
+fn agent_badges_fn(
+    workspace: Entity<crate::workspace::state::Workspace>,
+    terminals: okena_terminal::TerminalsRegistry,
+) -> AgentBadgesFn {
+    Arc::new(move |ext, cx| crate::views::extension_agents::badges(ext, &workspace, &terminals, cx))
 }

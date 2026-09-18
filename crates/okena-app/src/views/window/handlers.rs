@@ -455,6 +455,11 @@ impl WindowView {
         }
         // Closing an agent's pane asks first; the held close goes on only on
         // confirm.
+        // An agent asked an extension for something destructive.
+        if crate::views::extension_agents::is_confirm_action(&event.action_id) {
+            crate::views::extension_agents::answer(&event.toast_id, &event.action_id, cx);
+            return;
+        }
         if event.action_id == crate::agent_close::CONFIRM_ACTION
             || event.action_id == crate::agent_close::CANCEL_ACTION
         {
@@ -1537,7 +1542,15 @@ impl WindowView {
                     });
                 }
                 OverlayRequest::NewAgentDialog(prefill) => {
-                    match self.local_daemon_action_client(cx) {
+                    let client = match prefill.connection_id.as_deref() {
+                        Some(connection) if connection != okena_transport::client::LOCAL_DAEMON_CONNECTION_ID => {
+                            okena_workspace::extensions_state::extensions_entity(cx)
+                                .and_then(|e| e.read(cx).client(connection))
+                                .ok_or_else(|| format!("{connection} is not connected"))
+                        }
+                        _ => self.local_daemon_action_client(cx),
+                    };
+                    match client {
                         Ok(client) => {
                             let fm = self.focus_manager.clone();
                             // Default to the configured agent, the way every

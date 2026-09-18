@@ -1238,7 +1238,10 @@ pub fn execute_action(
         | ActionRequest::ExtensionRefresh { .. }
         | ActionRequest::ExtensionRecheck { .. }
         | ActionRequest::ExtensionRunAction { .. }
-        | ActionRequest::ExtensionQuery { .. } => {
+        | ActionRequest::ExtensionQuery { .. }
+        | ActionRequest::ExtensionAgentCall { .. }
+        | ActionRequest::ExtensionAgentTools { .. }
+        | ActionRequest::ExtensionConfirm { .. } => {
             ActionResult::Err("extension actions must be handled by the daemon".to_string())
         }
     }

@@ -219,6 +219,7 @@ pub struct DaemonCore {
     /// Receiving end of the command bridge — the remote server sends commands,
     /// the command loop consumes them.
     bridge_rx: BridgeReceiver,
+    self_bridge: bridge::BridgeSender,
     /// Terminal backend over the PTY manager, threaded into the command loop's
     /// `execute_action` / `ensure_terminal`.
     backend: Arc<dyn TerminalBackend>,
@@ -442,6 +443,9 @@ impl DaemonCore {
         let active_connections = Arc::new(AtomicU64::new(0));
         let shutdown_requested = Arc::new(tokio::sync::Notify::new());
         let (bridge_tx, bridge_rx) = bridge::bridge_channel();
+        // The daemon's own way into its command loop, for extension actions
+        // that start agent sessions.
+        let self_bridge = bridge_tx.clone();
         let (git_poll_trigger_tx, git_poll_trigger_rx) = mpsc::unbounded_channel();
 
         // ── 6. Start the remote server ───────────────────────────────────────
@@ -488,6 +492,7 @@ impl DaemonCore {
             reactor,
             remote_server,
             bridge_rx,
+            self_bridge,
             backend,
             terminals,
             pty_manager,
@@ -519,6 +524,7 @@ impl DaemonCore {
             reactor,
             mut remote_server,
             bridge_rx,
+            self_bridge,
             backend,
             terminals,
             pty_manager,
@@ -696,6 +702,7 @@ impl DaemonCore {
                 git_poll_trigger_tx,
                 agent_activity,
                 extension_host,
+                Some(self_bridge),
             );
             tokio::pin!(cmd);
             let interrupted = tokio::select! {

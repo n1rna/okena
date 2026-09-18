@@ -365,6 +365,21 @@ impl ExtensionPane {
         });
     }
 
+    /// The user's answer to an agent's destructive call.
+    pub(crate) fn answer(&mut self, confirmation: &str, approve: bool, cx: &mut Context<Self>) {
+        let Some(ext) = self.extension(cx) else { return };
+        let request = ActionRequest::ExtensionConfirm {
+            id: ext.ext.id.clone(),
+            confirmation: confirmation.to_string(),
+            approve,
+        };
+        self.post(request, cx, |_, result, cx| {
+            if let Err(e) = result {
+                ToastManager::error(e, cx);
+            }
+        });
+    }
+
     pub(crate) fn dismiss_refusals(&mut self, ext: &ApiExtension, cx: &mut Context<Self>) {
         self.dismissed_refusals.extend(ext.refusals.iter().map(|r| r.at_ms));
         cx.notify();
@@ -530,6 +545,42 @@ impl ExtensionPane {
                     .into_any_element(),
             ),
             _ => {}
+        }
+
+        for request in &ext.pending_confirmations {
+            let target = match request.items.len() {
+                0 => String::new(),
+                1 => format!(" on {}", request.items[0]),
+                n => format!(" on {n} items"),
+            };
+            let (yes, no) = (request.id.clone(), request.id.clone());
+            out.push(
+                banner("ext-pending-confirm", t.warning, &t)
+                    .child(banner_title(
+                        format!("An agent asks to run {}{target}", request.action_label),
+                        &t,
+                        cx,
+                    ))
+                    .child(banner_text(
+                        "It is marked destructive, so it waits for you. Declining tells the agent no.",
+                        &t,
+                        cx,
+                    ))
+                    .child(
+                        h_flex()
+                            .pt(px(8.0))
+                            .gap(px(8.0))
+                            .child(
+                                render::danger_button("ext-confirm-yes", format!("Run {}", request.action_label), &t)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.answer(&yes, true, cx))),
+                            )
+                            .child(
+                                button("ext-confirm-no", "Decline", &t)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.answer(&no, false, cx))),
+                            ),
+                    )
+                    .into_any_element(),
+            );
         }
 
         let refusals: Vec<_> = ext

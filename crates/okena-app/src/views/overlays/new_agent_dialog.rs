@@ -46,6 +46,8 @@ pub struct NewAgentDialog {
     heading: Option<String>,
     /// Task the session is about, when a task's launcher sent us here.
     task: Option<okena_core::tasks::TaskRef>,
+    /// Which card started it, when one filled the dialog in.
+    purpose: Option<okena_core::harness::AgentPurpose>,
     starting: bool,
     error: Option<String>,
 }
@@ -70,9 +72,11 @@ impl NewAgentDialog {
                 .placeholder("Optional — derived from the goal")
                 .default_value(prefill.name)
         });
+        let root = prefill.root.clone();
         let root_input = cx.new(|cx| {
             SimpleInputState::new(cx)
                 .placeholder("Optional — the selected project, or your projects root")
+                .default_value(root)
         });
         let pickers = cx.new(|cx| {
             LaunchPickers::new(
@@ -87,6 +91,27 @@ impl NewAgentDialog {
         // The launch button counts the projects.
         cx.subscribe(&pickers, |_, _, _: &LaunchPickersEvent, cx| cx.notify())
             .detach();
+        if !prefill.project_ids.is_empty() || !prefill.context.is_empty() {
+            // The pickers hold the ids this client shows: a remote daemon's
+            // projects carry its connection's prefix.
+            let connection = client.connection_id().to_string();
+            let ids: Vec<String> = prefill
+                .project_ids
+                .iter()
+                .map(|id| {
+                    if connection == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID {
+                        id.clone()
+                    } else {
+                        okena_transport::client::make_prefixed_id(&connection, id)
+                    }
+                })
+                .collect();
+            let context = prefill.context.clone();
+            pickers.update(cx, |pickers, cx| {
+                pickers.set_project_ids(&ids, cx);
+                pickers.preset_context(&context, cx);
+            });
+        }
         Self {
             client,
             workspace,
@@ -100,6 +125,7 @@ impl NewAgentDialog {
             default_agent,
             heading: prefill.heading,
             task: prefill.task,
+            purpose: prefill.purpose,
             starting: false,
             error: None,
         }
@@ -129,6 +155,7 @@ impl NewAgentDialog {
             (pickers.daemon_project_ids(cx), pickers.context_refs(cx))
         };
         let task = self.task.clone();
+        let purpose = self.purpose.clone();
         // A session about a task is started from where you were reading the
         // task; jumping into its terminal would lose that place. Its launcher
         // shows it once it appears.
@@ -157,8 +184,9 @@ impl NewAgentDialog {
                         // exists; drafting a task is its own flow.
                         task_draft: None,
                         task,
-                        // Free-form: no card started it, so none lists it.
-                        purpose: None,
+                        // Free-form unless a card (an extension's action)
+                        // filled it in, which then lists it.
+                        purpose,
                         context,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing session result".to_string()))

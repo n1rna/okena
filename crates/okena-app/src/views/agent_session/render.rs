@@ -316,6 +316,26 @@ impl AgentSessionPanel {
 
         // ── Session ──────────────────────────────────────────────────────────
         let mut facts = vec![self.chip(info.kind.label().to_string(), t.button_primary_bg, cx)];
+        if let Some((extension, item)) = &info.origin {
+            // Named as the user knows it, when this client has the extension.
+            let name = okena_workspace::extensions_state::extensions_entity(cx)
+                .and_then(|e| {
+                    e.read(cx)
+                        .list()
+                        .iter()
+                        .find(|x| &x.ext.id == extension)
+                        .map(|x| x.ext.name.clone())
+                })
+                .unwrap_or_else(|| extension.clone());
+            facts.push(self.chip(
+                match item {
+                    Some(item) => format!("from {name} · {item}"),
+                    None => format!("from {name}"),
+                },
+                t.term_magenta,
+                cx,
+            ));
+        }
         if let Some(agent) = &info.agent {
             facts.push(self.chip(agent.clone(), t.text_secondary, cx));
         }

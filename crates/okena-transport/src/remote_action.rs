@@ -89,6 +89,18 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // Same shape as drafting a spec change: creates a project, runs its
         // hooks, and launches an agent.
         ActionRequest::KnowledgeDraft { .. } => ActionClientKind::LongMutation,
+        // Installing clones and may build from source for minutes; an
+        // action may start an agent; an agent's destructive call waits for
+        // the user for up to ten minutes.
+        ActionRequest::ExtensionPreview { .. }
+        | ActionRequest::ExtensionInstall { .. }
+        | ActionRequest::ExtensionPreviewUpdate { .. }
+        | ActionRequest::ExtensionUpdate { .. }
+        | ActionRequest::ExtensionReload { .. }
+        | ActionRequest::ExtensionCheckUpdates
+        | ActionRequest::ExtensionRunAction { .. }
+        | ActionRequest::ExtensionAgentCall { .. } => ActionClientKind::LongMutation,
+        ActionRequest::ExtensionQuery { .. } => ActionClientKind::Search,
         // Refining an open document is the same shape again, in either section.
         ActionRequest::SpecRefineDocument { .. } | ActionRequest::KnowledgeRefineDocument { .. } => {
             ActionClientKind::LongMutation

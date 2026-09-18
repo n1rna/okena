@@ -1787,7 +1787,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::ExtensionRefresh { .. }
         | ActionRequest::ExtensionRecheck { .. }
         | ActionRequest::ExtensionRunAction { .. }
-        | ActionRequest::ExtensionQuery { .. }) => a,
+        | ActionRequest::ExtensionQuery { .. }
+        | ActionRequest::ExtensionAgentCall { .. }
+        | ActionRequest::ExtensionAgentTools { .. }
+        | ActionRequest::ExtensionConfirm { .. }) => a,
     }
 }
 

@@ -2859,6 +2859,8 @@ pub async fn daemon_command_loop(
     git_poll_trigger_tx: tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
     agent_activity: Arc<crate::agent_activity::AgentActivityTracker>,
     extension_host: Option<Arc<okena_extension_host::host::ExtensionHost>>,
+    // Back into this loop, for extension actions that start agent sessions.
+    self_bridge: Option<okena_remote_server::bridge::BridgeSender>,
 ) {
     // Single dormant "main" FocusManager. The loop is single-threaded, so it
     // owns the FM directly instead of resolving a per-window entity like the
@@ -3081,18 +3083,21 @@ pub async fn daemon_command_loop(
                     }
                     continue;
                 };
-                let settings = settings.clone();
-                let state_version = state_version.clone();
-                let worker_runtime = runtime.clone();
+                let Some(bridge) = self_bridge.clone() else {
+                    if let Some(reply) = reply {
+                        let _ = reply.send(CommandResult::Err("extensions are unavailable".into()));
+                    }
+                    continue;
+                };
+                let cx = crate::extensions::Context {
+                    settings: settings.clone(),
+                    state_version: state_version.clone(),
+                    workspace: workspace.clone(),
+                    bridge,
+                    runtime: runtime.clone(),
+                };
                 let _task = runtime.spawn(async move {
-                    let result = worker_runtime
-                        .spawn_blocking(move || {
-                            crate::extensions::execute(&host, action, &settings, &|| {
-                                state_version.send_modify(|v| *v = v.wrapping_add(1));
-                            })
-                        })
-                        .await
-                        .unwrap_or_else(|e| CommandResult::Err(format!("extension worker failed: {e}")));
+                    let result = crate::extensions::run(host, action, cx).await;
                     if let Some(reply) = reply {
                         let _ = reply.send(result);
                     }
@@ -5252,6 +5257,7 @@ mod tests {
                 Arc::new(Mutex::new(HashMap::new())),
                 tokio::sync::mpsc::unbounded_channel().0,
                 self.agent_activity,
+                None,
                 None,
             ))
         }
