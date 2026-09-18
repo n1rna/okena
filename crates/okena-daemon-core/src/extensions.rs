@@ -255,6 +255,7 @@ async fn start_session(id: &str, agent: &ExtAgentLaunch, cx: &Context) -> Result
         root: agent.root.clone().unwrap_or_default(),
         project_ids: agent.project_ids.clone(),
         agent_command: None,
+        model: None,
         task_draft: None,
         task: None,
         purpose: Some(extension_purpose(id, agent)),
