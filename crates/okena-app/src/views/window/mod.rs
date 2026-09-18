@@ -1,4 +1,6 @@
 mod handlers;
+mod overview_bar;
+mod overview_filter;
 mod harness_columns;
 mod pane_switcher;
 mod render;
@@ -252,6 +254,11 @@ pub struct WindowView {
     last_project_paths: HashMap<String, String>,
     /// Last observed wholesale workspace data replacement epoch.
     last_data_replacement_epoch: u64,
+    /// The search bar above the Projects overview. Per window and per
+    /// overview, held here rather than in `WindowState` so it is never saved.
+    projects_search: overview_bar::OverviewSearch,
+    /// The search bar and chips above the Agents overview.
+    agents_search: overview_bar::OverviewSearch,
 }
 
 impl WindowView {
@@ -482,6 +489,8 @@ impl WindowView {
             center_next_navigation: false,
             last_project_paths: HashMap::new(),
             last_data_replacement_epoch,
+            projects_search: overview_bar::OverviewSearch::new(false, cx),
+            agents_search: overview_bar::OverviewSearch::new(true, cx),
         };
 
         // Slice 07 cri 7: persist OS bounds back into this window's
