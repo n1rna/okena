@@ -8,6 +8,8 @@ pub mod claude_env;
 pub mod context;
 pub mod focus;
 #[cfg(feature = "gpui")]
+pub mod extensions_state;
+#[cfg(feature = "gpui")]
 pub mod harness_state;
 pub mod hook_monitor;
 pub mod hooks;

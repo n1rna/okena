@@ -47,7 +47,9 @@ impl Sidebar {
         ]
         .into_iter()
         .map(|(slug, label, list)| {
-            let is_active = active.is_none() && self.overview_is_active(list, cx);
+            let is_active = active.is_none()
+                && okena_workspace::harness_state::active_extension(self.window_id, cx).is_none()
+                && self.overview_is_active(list, cx);
             self.nav_item(
                 SharedString::from(format!("harness-nav-{slug}")),
                 label,
@@ -79,6 +81,49 @@ impl Sidebar {
             })
             .collect();
 
+        // Extensions with a view of their own, after the harness views. A
+        // remote daemon's are named after it, since two daemons may run the
+        // same extension.
+        let active_extension = okena_workspace::harness_state::active_extension(self.window_id, cx);
+        let extension_entries: Vec<(String, String)> =
+            okena_workspace::extensions_state::extensions_entity(cx)
+                .map(|entity| {
+                    entity
+                        .read(cx)
+                        .with_views()
+                        .map(|e| {
+                            let title = e.ext.view_title.clone().unwrap_or_else(|| e.ext.name.clone());
+                            let label = if e.local {
+                                title
+                            } else {
+                                format!("{title} ({})", e.connection_name)
+                            };
+                            (e.key(), label)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        let extensions: Vec<AnyElement> = extension_entries
+            .into_iter()
+            .map(|(key, label)| {
+                let broker = self.request_broker.clone();
+                let is_active = active.is_none() && active_extension.as_deref() == Some(key.as_str());
+                self.nav_item(
+                    SharedString::from(format!("harness-nav-ext-{key}")),
+                    SharedString::from(label),
+                    is_active,
+                    cx,
+                )
+                .on_click(move |_, _window, cx| {
+                    let key = key.clone();
+                    broker.update(cx, |b, cx| {
+                        b.push_workbench_request(WorkbenchRequest::OpenExtensionView { key }, cx);
+                    });
+                })
+                .into_any_element()
+            })
+            .collect();
+
         v_flex()
             .child(
                 div()
@@ -92,6 +137,7 @@ impl Sidebar {
             )
             .children(overviews)
             .children(items)
+            .children(extensions)
             .child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border)))
     }
 }
@@ -101,7 +147,7 @@ impl Sidebar {
     fn nav_item(
         &self,
         id: SharedString,
-        label: &'static str,
+        label: impl Into<SharedString>,
         is_active: bool,
         cx: &App,
     ) -> Stateful<Div> {
@@ -121,7 +167,7 @@ impl Sidebar {
             } else {
                 rgb(t.text_secondary)
             })
-            .child(label)
+            .child(label.into())
     }
 
     /// Leave the harness view so the projects grid shows again.

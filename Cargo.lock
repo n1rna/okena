@@ -6813,6 +6813,7 @@ dependencies = [
  "okena-theme",
  "okena-transport",
  "okena-ui",
+ "okena-views-extensions",
  "okena-views-git",
  "okena-views-remote",
  "okena-views-services",
@@ -7422,6 +7423,22 @@ dependencies = [
  "okena-extensions",
  "okena-ui",
  "serde_json",
+]
+
+[[package]]
+name = "okena-views-extensions"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui-component",
+ "log",
+ "lyon",
+ "okena-core",
+ "okena-transport",
+ "okena-ui",
+ "okena-workspace",
+ "serde_json",
+ "smol",
 ]
 
 [[package]]

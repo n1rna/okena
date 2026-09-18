@@ -680,6 +680,13 @@ fn main() {
             harness_state,
         ));
 
+        // Extensions every connected daemon runs, filled from their snapshots.
+        let extensions_state =
+            cx.new(|_| okena_workspace::extensions_state::ExtensionsState::default());
+        cx.set_global(okena_workspace::extensions_state::GlobalExtensions(
+            extensions_state,
+        ));
+
         // Register theme provider for okena-files crate
         cx.set_global(okena_files::theme::GlobalThemeProvider(|cx| {
             okena_app::theme::theme(cx)

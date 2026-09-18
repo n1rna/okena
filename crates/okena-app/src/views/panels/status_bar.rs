@@ -140,6 +140,8 @@ pub struct StatusBar {
     window_id: WindowId,
     workspace: Entity<Workspace>,
     focus_manager: Entity<crate::workspace::focus::FocusManager>,
+    /// Opens an extension's view when its widget is clicked.
+    request_broker: Entity<crate::workspace::request_broker::RequestBroker>,
     cache: Arc<Mutex<SystemInfoCache>>,
     /// Activate functions cloned from registry (keyed by extension ID).
     activate_fns: Vec<(String, okena_extensions::ActivateFn)>,
@@ -215,10 +217,80 @@ impl GridMenu {
 }
 
 impl StatusBar {
+    /// A label for each enabled extension from git that reports one; a
+    /// click opens its view.
+    fn render_git_extension_widgets(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let t = theme(cx);
+        let Some(entity) = okena_workspace::extensions_state::extensions_entity(cx) else {
+            return Vec::new();
+        };
+        struct Widget {
+            key: String,
+            label: String,
+            tone: Option<okena_core::extension::Tone>,
+            tooltip: Option<String>,
+            has_view: bool,
+        }
+        let entries: Vec<Widget> = entity
+            .read(cx)
+            .list()
+            .iter()
+            .filter(|e| e.ext.enabled)
+            .filter_map(|e| {
+                let status = e.ext.status.as_ref()?;
+                let label = if e.local {
+                    status.label.clone()
+                } else {
+                    format!("{} ({})", status.label, e.connection_name)
+                };
+                Some(Widget {
+                    key: e.key(),
+                    label,
+                    tone: status.tone,
+                    tooltip: status.tooltip.clone().or_else(|| Some(e.ext.name.clone())),
+                    has_view: e.ext.view_title.is_some(),
+                })
+            })
+            .collect();
+        entries
+            .into_iter()
+            .map(|Widget { key, label, tone, tooltip, has_view }| {
+                let color = tone.map_or(t.text_secondary, |tone| okena_views_extensions::tone_color(tone, &t));
+                let broker = self.request_broker.clone();
+                let open_key = key.clone();
+                div()
+                    .id(SharedString::from(format!("status-ext-{key}")))
+                    .px(px(4.0))
+                    .py(px(1.0))
+                    .rounded(px(4.0))
+                    .text_color(rgb(color))
+                    .child(label)
+                    .when(has_view, |d| {
+                        d.cursor_pointer()
+                            .hover(|s| s.bg(rgb(t.bg_hover)))
+                            .on_click(move |_, _, cx| {
+                                let key = open_key.clone();
+                                broker.update(cx, |b, cx| {
+                                    b.push_workbench_request(
+                                        crate::workspace::requests::WorkbenchRequest::OpenExtensionView { key },
+                                        cx,
+                                    );
+                                });
+                            })
+                    })
+                    .when_some(tooltip, |d, tip| {
+                        d.tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+                    })
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     pub fn new(
         window_id: WindowId,
         workspace: Entity<Workspace>,
         focus_manager: Entity<crate::workspace::focus::FocusManager>,
+        request_broker: Entity<crate::workspace::request_broker::RequestBroker>,
         cx: &mut Context<Self>,
     ) -> Self {
         let cache = Arc::new(Mutex::new(SystemInfoCache::new()));
@@ -285,11 +357,16 @@ impl StatusBar {
         if let Some(harness) = okena_workspace::harness_state::harness_state_entity(cx) {
             cx.observe(&harness, |_, _, cx| cx.notify()).detach();
         }
+        // Extensions from git draw their widget from the daemon's snapshot.
+        if let Some(extensions) = okena_workspace::extensions_state::extensions_entity(cx) {
+            cx.observe(&extensions, |_, _, cx| cx.notify()).detach();
+        }
 
         Self {
             window_id,
             workspace,
             focus_manager,
+            request_broker,
             cache,
             activate_fns,
             active_extensions,
@@ -1223,6 +1300,8 @@ impl Render for StatusBar {
         // rest of this function.
         let grid_menu = self.render_grid_menu(cx);
 
+        let git_extension_widgets = self.render_git_extension_widgets(cx);
+
         // Collect widgets in stable registry order from active extensions
         let left_widgets: Vec<&Vec<AnyView>> = self
             .activate_fns
@@ -1296,6 +1375,7 @@ impl Render for StatusBar {
                         left = left.child(widget.clone());
                     }
                 }
+                left = left.children(git_extension_widgets);
 
                 left
             })

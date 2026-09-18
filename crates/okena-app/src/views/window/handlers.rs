@@ -1257,6 +1257,9 @@ impl WindowView {
                 crate::workspace::requests::WorkbenchRequest::OpenHarnessView(section) => {
                     self.show_harness_view(section, cx);
                 }
+                crate::workspace::requests::WorkbenchRequest::OpenExtensionView { key } => {
+                    self.show_extension_view(key, cx);
+                }
                 crate::workspace::requests::WorkbenchRequest::OpenKnowledgeDoc {
                     root_key,
                     path,

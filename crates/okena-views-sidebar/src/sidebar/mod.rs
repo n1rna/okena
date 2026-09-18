@@ -255,6 +255,11 @@ impl Sidebar {
             cx.observe(&harness, |_this, _state, cx| cx.notify())
                 .detach();
         }
+        // And when extensions with views come and go.
+        if let Some(extensions) = okena_workspace::extensions_state::extensions_entity(cx) {
+            cx.observe(&extensions, |_this, _state, cx| cx.notify())
+                .detach();
+        }
 
         // Observe RequestBroker to drain sidebar requests outside of render().
         // Requests are stored in pending_sidebar_requests and applied in render()

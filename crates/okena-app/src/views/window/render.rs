@@ -1603,6 +1603,9 @@ impl Render for WindowView {
                                     .flex_row()
                                     .map(|d| match self.active_harness_pane(cx) {
                                         Some(pane) => d.child(pane),
+                                        None if let Some(pane) = self.active_extension_pane(cx) => {
+                                            d.child(pane)
+                                        }
                                         // A project's or session's context
                                         // lives in its own column, behind the
                                         // header's info toggle — not in a
