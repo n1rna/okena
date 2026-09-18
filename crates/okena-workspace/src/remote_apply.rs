@@ -640,6 +640,7 @@ mod tests {
             shell_type: Default::default(),
             cols: None,
             rows: None,
+            agent: false,
         }
     }
 

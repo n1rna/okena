@@ -153,15 +153,9 @@ pub(super) fn scan_links(
         p.project_scan = Some(names.clone());
         p.default_shell = Some(shell);
     }
-    if let ActionResult::Err(e) = super::spawn_uninitialized_terminals(
-        ws,
-        &session_id,
-        backend,
-        terminals,
-        settings,
-        None,
-        cx,
-    ) {
+    if let ActionResult::Err(e) =
+        super::spawn_session_terminals(ws, &session_id, backend, terminals, settings, cx)
+    {
         log::warn!("[project-links] links session terminal failed to spawn: {e}");
     }
     ws.notify_data(cx);

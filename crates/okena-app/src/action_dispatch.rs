@@ -188,7 +188,47 @@ impl ActionDispatcher {
     }
 
     /// Dispatch a standard action (split, close, create terminal, service action, etc.).
+    ///
+    /// A close that would take an agent session's agent pane is held until
+    /// the user confirms it: closing that pane stops the agent.
     pub fn dispatch(&self, action: ActionRequest, cx: &mut impl AppContext) {
+        if let Some(agent) = self.closes_an_agent(&action, cx) {
+            crate::agent_close::ask(self.clone(), action, agent, cx);
+            return;
+        }
+        self.dispatch_confirmed(action, cx);
+    }
+
+    /// Whether `action` closes an agent session's running agent pane, and if
+    /// so which agent it runs, when that is known.
+    fn closes_an_agent(
+        &self,
+        action: &ActionRequest,
+        cx: &mut impl AppContext,
+    ) -> Option<Option<String>> {
+        let (project_id, terminal_ids) = match action {
+            ActionRequest::CloseTerminal {
+                project_id,
+                terminal_id,
+            } => (project_id, std::slice::from_ref(terminal_id)),
+            ActionRequest::CloseTerminals {
+                project_id,
+                terminal_ids,
+            } => (project_id, terminal_ids.as_slice()),
+            _ => return None,
+        };
+        let Self::Remote { workspace, .. } = self;
+        workspace.read_with(cx, |ws, _cx| {
+            let project = ws.project(project_id)?;
+            let agent = project.layout.as_ref()?.agent_terminal_id()?;
+            terminal_ids
+                .contains(&agent)
+                .then(|| project.agent_pane_agent())
+        })
+    }
+
+    /// Dispatch without asking first — for a close the user already confirmed.
+    pub fn dispatch_confirmed(&self, action: ActionRequest, cx: &mut impl AppContext) {
         let Self::Remote {
             connection_id,
             manager,
@@ -1054,6 +1094,12 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             pushed_from,
         },
         ActionRequest::AgentRestart { project_id } => ActionRequest::AgentRestart {
+            project_id: s(&project_id),
+        },
+        ActionRequest::AgentStart { project_id } => ActionRequest::AgentStart {
+            project_id: s(&project_id),
+        },
+        ActionRequest::AgentStop { project_id } => ActionRequest::AgentStop {
             project_id: s(&project_id),
         },
         ActionRequest::TaskDeleteWorkspace {

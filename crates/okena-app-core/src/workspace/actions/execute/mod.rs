@@ -25,6 +25,8 @@ mod agent_options;
 pub mod agent_mcp;
 // Skills and agents picked at launch, handed over the way each agent takes them.
 mod agent_context;
+#[cfg(test)]
+mod agent_pane_tests;
 // Public so the agent panel can tell whether a session can be resumed.
 pub mod agent_resume;
 mod review;
@@ -826,6 +828,18 @@ pub fn execute_action(
         ActionRequest::AgentHookEvent { .. } => {
             ActionResult::Err("agent hook events are handled by the daemon".into())
         }
+        ActionRequest::AgentStart { project_id } => terminal::start_agent(
+            ws,
+            focus_manager,
+            project_id,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
+        ActionRequest::AgentStop { project_id } => {
+            terminal::stop_agent(ws, project_id, backend, terminals, cx)
+        }
         ActionRequest::AgentRestart { project_id } => terminal::restart_agent(
             ws,
             focus_manager,
@@ -1222,11 +1236,13 @@ pub fn ensure_terminal(
     for project in &ws.data().projects {
         if let Some(layout) = &project.layout
             && let Some(path) = layout.find_terminal_path(terminal_id)
-            && let Some(LayoutNode::Terminal { shell_type, .. }) = layout.get_at_path(&path)
+            && let Some(LayoutNode::Terminal {
+                shell_type, agent, ..
+            }) = layout.get_at_path(&path)
         {
             let shell = shell_type
                 .clone()
-                .resolve_default(project.default_shell.as_ref(), &settings.default_shell);
+                .resolve_default(project.inherited_shell(*agent), &settings.default_shell);
             reconnect = Some((project.path.clone(), TerminalLaunchPlan::for_shell(shell)));
             break;
         }
@@ -1288,7 +1304,9 @@ pub fn reserve_uninitialized_terminal_launches(
             .as_ref()
             .and_then(|worktree| ws.project(&worktree.parent_project_id))
             .map(|parent| parent.hooks.clone());
-        let project_default_shell = project.default_shell.clone();
+        // Pending panes are never the agent's, so they take the session's
+        // ordinary shell rather than its agent launch.
+        let project_default_shell = project.inherited_shell(false).cloned();
         let mut uninitialized = Vec::new();
         if let Some(layout) = &project.layout {
             collect_uninitialized_terminals_with_shell(layout, Vec::new(), &mut uninitialized);
@@ -1409,9 +1427,11 @@ fn assign_shell_to_uninitialized(node: &mut LayoutNode, shell: &ShellType) {
         LayoutNode::Terminal {
             terminal_id,
             shell_type,
+            agent,
             ..
         } => {
-            if terminal_id.is_none() {
+            // A stopped agent keeps its launch: it is not a pane being opened.
+            if terminal_id.is_none() && !*agent {
                 *shell_type = shell.clone();
             }
         }
@@ -1455,6 +1475,78 @@ pub fn spawn_uninitialized_terminals(
     inherit_cwd: Option<String>,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
+    spawn_pending_terminals(
+        ws,
+        project_id,
+        backend,
+        terminals,
+        settings,
+        inherit_cwd,
+        false,
+        cx,
+    )
+}
+
+/// Start a freshly opened agent session's terminals.
+///
+/// A session given an agent launch (`default_shell`) runs it in its first
+/// pane, which is marked as the session's agent: that pane alone runs the
+/// agent, and the session's agent controls act on it alone.
+pub(super) fn spawn_session_terminals(
+    ws: &mut Workspace,
+    project_id: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id)
+        && p.default_shell.is_some()
+        && p.is_any_agent_session()
+        && let Some(layout) = p.layout.as_mut()
+        && layout.agent_terminal_path().is_none()
+    {
+        let first = layout.find_first_terminal_path();
+        if let Some(LayoutNode::Terminal { agent, .. }) = layout.get_at_path_mut(&first) {
+            *agent = true;
+        }
+    }
+    let others =
+        spawn_uninitialized_terminals(ws, project_id, backend, terminals, settings, None, cx);
+    let agent = spawn_agent_terminal(ws, project_id, backend, terminals, settings, cx);
+    match (others, agent) {
+        (ActionResult::Err(e), _) | (_, ActionResult::Err(e)) => ActionResult::Err(e),
+        (ActionResult::Ok(_), ActionResult::Ok(agent)) => ActionResult::Ok(agent),
+    }
+}
+
+/// Start an agent session's agent in its own pane, when that pane is stopped.
+///
+/// The pane's shell is resolved against the session's agent launch, which no
+/// other pane inherits. It opens in the session's directory.
+pub fn spawn_agent_terminal(
+    ws: &mut Workspace,
+    project_id: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    spawn_pending_terminals(ws, project_id, backend, terminals, settings, None, true, cx)
+}
+
+/// Spawn a project's pending panes, or with `agent` only its stopped agent pane.
+#[allow(clippy::too_many_arguments)]
+fn spawn_pending_terminals(
+    ws: &mut Workspace,
+    project_id: &str,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    inherit_cwd: Option<String>,
+    agent: bool,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
     // Don't spawn terminals for projects whose worktree is still being created
     if ws.is_creating_project(project_id) {
         return ActionResult::Ok(None);
@@ -1477,10 +1569,22 @@ pub fn spawn_uninitialized_terminals(
         .as_ref()
         .and_then(|wt| ws.project(&wt.parent_project_id))
         .map(|p| p.hooks.clone());
-    let project_default_shell = project.default_shell.clone();
+    let project_default_shell = project.inherited_shell(agent).cloned();
     let mut uninitialized = Vec::new();
     if let Some(layout) = &project.layout {
-        collect_uninitialized_terminals_with_shell(layout, vec![], &mut uninitialized);
+        if agent {
+            if let Some(path) = layout.agent_terminal_path()
+                && let Some(LayoutNode::Terminal {
+                    terminal_id: None,
+                    shell_type,
+                    ..
+                }) = layout.get_at_path(&path)
+            {
+                uninitialized.push((path, shell_type.clone()));
+            }
+        } else {
+            collect_uninitialized_terminals_with_shell(layout, vec![], &mut uninitialized);
+        }
     }
     log::info!(
         "spawn_uninitialized_terminals: project={}, uninitialized_count={}",
@@ -1627,17 +1731,20 @@ fn validate_leaf_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Recursively collect paths to all Terminal nodes with `terminal_id: None`.
-/// Collect uninitialized terminals in a layout tree, returning their paths and shell types.
+/// Collect uninitialized terminals in a layout tree, returning their paths and
+/// shell types. A stopped agent pane is not one of them.
 fn collect_uninitialized_terminals_with_shell(
     node: &LayoutNode,
     current_path: Vec<usize>,
     result: &mut Vec<(Vec<usize>, ShellType)>,
 ) {
     match node {
+        // A stopped agent pane has no id either, but only the session's
+        // Start, Resume and Restart bring it back (`spawn_agent_terminal`).
         LayoutNode::Terminal {
             terminal_id: None,
             shell_type,
+            agent: false,
             ..
         } => {
             result.push((current_path, shell_type.clone()));
@@ -1868,6 +1975,7 @@ mod reconnect_shell_tests {
                 minimized: false,
                 detached: false,
                 zoom_level: 1.0,
+                agent: false,
             }),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),

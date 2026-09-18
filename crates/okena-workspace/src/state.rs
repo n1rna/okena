@@ -2908,6 +2908,7 @@ mod workspace_tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
+                agent: false,
             }),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -2968,6 +2969,7 @@ mod workspace_tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
+                    agent: false,
                 })
                 .collect(),
             active_tab,
@@ -3302,6 +3304,7 @@ mod workspace_tests {
                     detached: true,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
+                    agent: false,
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("t2".to_string()),
@@ -3309,6 +3312,7 @@ mod workspace_tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
+                    agent: false,
                 },
             ],
         });
@@ -3967,6 +3971,7 @@ mod gpui_tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
+                agent: false,
             }),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -4021,6 +4026,7 @@ mod gpui_tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         }
     }
 
@@ -4207,6 +4213,7 @@ mod gpui_tests {
             shell_type: Default::default(),
             cols: None,
             rows: None,
+            agent: false,
         }
     }
 

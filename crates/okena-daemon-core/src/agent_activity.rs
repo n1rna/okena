@@ -245,6 +245,7 @@ mod tests {
                 args: Vec::new(),
             },
             zoom_level: 1.0,
+            agent: false,
         });
         project
     }

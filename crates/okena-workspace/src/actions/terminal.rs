@@ -53,6 +53,27 @@ impl Workspace {
         });
     }
 
+    /// An agent session's agent exited: its pane stays as a stopped agent.
+    ///
+    /// Clearing the id is what keeps it stopped — a pane still holding the id
+    /// of a dead terminal is revived by the next keystroke, resize or
+    /// reconnect, and would come back running the agent again. Returns whether
+    /// `terminal_id` was an agent's.
+    pub fn stop_exited_agent(&mut self, terminal_id: &str, cx: &mut impl WorkspaceCx) -> bool {
+        let Some((project_id, path)) = self.data.projects.iter().find_map(|p| {
+            let layout = p.layout.as_ref()?;
+            let path = layout.find_terminal_path(terminal_id)?;
+            layout
+                .get_at_path(&path)
+                .is_some_and(LayoutNode::is_agent)
+                .then(|| (p.id.clone(), path))
+        }) else {
+            return false;
+        };
+        self.clear_terminal_id(&project_id, &path, cx);
+        true
+    }
+
     /// Set shell type for a terminal at a layout path
     pub fn set_terminal_shell(
         &mut self,

@@ -453,6 +453,18 @@ impl WindowView {
             ToastManager::dismiss(&event.toast_id, cx);
             return;
         }
+        // Closing an agent's pane asks first; the held close goes on only on
+        // confirm.
+        if event.action_id == crate::agent_close::CONFIRM_ACTION
+            || event.action_id == crate::agent_close::CANCEL_ACTION
+        {
+            crate::agent_close::answer(
+                &event.toast_id,
+                event.action_id == crate::agent_close::CONFIRM_ACTION,
+                cx,
+            );
+            return;
+        }
         // The daemon owns the grace deadlines + kept-alive PTYs, so dispatch the
         // undo/finalize to it (the project_id from `decode_action` is the
         // connection-prefixed id, so `dispatcher_for_project` resolves it; the

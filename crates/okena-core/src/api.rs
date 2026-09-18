@@ -709,6 +709,10 @@ pub enum ApiLayoutNode {
         cols: Option<u16>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rows: Option<u16>,
+        /// The agent session's agent pane. Absent from ordinary panes and
+        /// from older daemons.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        agent: bool,
     },
     Split {
         direction: SplitDirection,
@@ -2224,6 +2228,20 @@ pub enum ActionRequest {
     AgentRestart {
         project_id: String,
     },
+    /// Start a session's agent again from its brief, in its own pane.
+    ///
+    /// A running agent is replaced; the session's other terminals are left
+    /// as they are.
+    AgentStart {
+        project_id: String,
+    },
+    /// Stop a session's agent, keeping its pane in place as a stopped agent.
+    ///
+    /// Only the agent's process ends: the session's other terminals keep
+    /// running, and Start or Resume bring the agent back in the same pane.
+    AgentStop {
+        project_id: String,
+    },
     RenameProjectDirectory {
         project_id: String,
         new_name: String,
@@ -2523,6 +2541,7 @@ mod tests {
                             shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
+                            agent: false,
                         },
                         ApiLayoutNode::Tabs {
                             active_tab: 0,
@@ -2533,6 +2552,7 @@ mod tests {
                                 shell_type: ShellType::Default,
                                 cols: None,
                                 rows: None,
+                                agent: false,
                             }],
                         },
                     ],
@@ -3229,6 +3249,7 @@ mod tests {
                     shell_type: ShellType::Default,
                     cols: None,
                     rows: None,
+                    agent: false,
                 },
                 ApiLayoutNode::Tabs {
                     active_tab: 0,
@@ -3240,6 +3261,7 @@ mod tests {
                             shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
+                            agent: false,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: None,
@@ -3248,6 +3270,7 @@ mod tests {
                             shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
+                            agent: false,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: Some("t3".into()),
@@ -3256,6 +3279,7 @@ mod tests {
                             shell_type: ShellType::Default,
                             cols: None,
                             rows: None,
+                            agent: false,
                         },
                     ],
                 },

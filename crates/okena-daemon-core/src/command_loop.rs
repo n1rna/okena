@@ -6623,6 +6623,7 @@ mod tests {
                 args: Vec::new(),
             },
             zoom_level: 1.0,
+            agent: false,
         });
         {
             let mut ws = h.workspace.lock();
@@ -6988,6 +6989,7 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
+                agent: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),
@@ -7717,6 +7719,7 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
+                agent: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),
@@ -8477,6 +8480,7 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
+                agent: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),
@@ -8731,6 +8735,7 @@ mod tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
+                    agent: false,
                 }),
                 terminal_names: Default::default(),
                 hidden_terminals: Default::default(),
@@ -8839,6 +8844,7 @@ mod tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
+                    agent: false,
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("second-in-checkout".to_string()),
@@ -8846,6 +8852,7 @@ mod tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
+                    agent: false,
                 },
             ],
         });
@@ -9370,6 +9377,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         });
         let mut unaffected = data.projects[0].clone();
         unaffected.id = "unaffected".to_string();
@@ -9383,6 +9391,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         });
         data.projects.push(nested);
         data.projects.push(unaffected);
@@ -10372,6 +10381,7 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
+                agent: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),

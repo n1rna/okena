@@ -448,7 +448,19 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                 project_for_names.as_ref().is_some_and(|p| p.hook_terminals.contains_key(tid))
             });
 
-            let tab_label = if let Some(ref tid) = terminal_id {
+            // An agent session's agent pane says so, and which agent; the
+            // session's other panes are ordinary terminals.
+            let agent_badge = child.is_agent().then(|| {
+                match project_for_names.as_ref().and_then(|p| p.agent_pane_agent()) {
+                    Some(agent) => format!("Agent · {}", okena_core::agents::display_name(&agent)),
+                    None => "Agent".to_string(),
+                }
+            });
+            let agent_stopped = child.is_agent() && terminal_id.is_none();
+
+            let tab_label = if agent_stopped {
+                "stopped".to_string()
+            } else if let Some(ref tid) = terminal_id {
                 if let Some(ref p) = project_for_names {
                     let osc_title = terminals.lock().get(tid).and_then(|t| t.title());
                     p.terminal_display_name(tid, osc_title)
@@ -546,6 +558,16 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
                             .overflow_hidden()
                             .text_ellipsis()
                             .child(svg().path(icon_path).size(px(12.0)).flex_shrink_0().text_color(icon_color))
+                            .children(agent_badge.as_ref().map(|badge| {
+                                div()
+                                    .flex_shrink_0()
+                                    .px(px(4.0))
+                                    .rounded(px(3.0))
+                                    .text_size(ui_text_sm(cx))
+                                    .bg(with_alpha(t.border_active, 0.15))
+                                    .text_color(rgb(t.border_active))
+                                    .child(badge.clone())
+                            }))
                             .child(tab_label.clone())
                             .children(idle_label.as_ref().map(|d| {
                                 div().text_size(ui_text_sm(cx)).text_color(rgb(t.border_idle)).child(d.clone())

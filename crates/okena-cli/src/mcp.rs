@@ -1471,6 +1471,7 @@ mod tests {
             shell_type: ShellType::Default,
             cols: None,
             rows: None,
+            agent: false,
         }
     }
 
