@@ -254,6 +254,9 @@ pub(crate) struct StartExtras {
     /// Map entries, specs and knowledge picked on the launcher. Every agent a
     /// fan-out or a coordinator starts from one launch is handed the same.
     pub(crate) context: Vec<okena_core::context::ContextRef>,
+    /// The model picked on the launcher for this launch; `None` runs the
+    /// template's. Every agent one launch starts runs the same.
+    pub(crate) model: Option<String>,
 }
 
 /// State of the "Start work" dialog.

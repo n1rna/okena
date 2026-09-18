@@ -210,9 +210,16 @@ impl ProjectInfoPanel {
         ))
         .preferred(self.default_agent.clone())
         .busy(self.scan_starting.then_some("Starting\u{2026}"))
-        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
-            this.start_scan(command.to_string(), cx);
-        }));
+        .brief(crate::views::launch_briefs::brief_for(
+            &self.client,
+            "project-scan",
+            cx,
+        ))
+        .on_launch(cx.listener(
+            |this, launch: &okena_ui::agent_launcher::Launch, _window, cx| {
+                this.start_scan(launch.command.to_string(), launch.model.clone(), cx);
+            },
+        ));
         out.push(launcher.into_any_element());
         out
     }
@@ -316,11 +323,21 @@ impl ProjectInfoPanel {
         ))
         .preferred(self.default_agent.clone())
         .busy(self.links_starting.then_some("Starting\u{2026}"))
-        .on_launch(
-            cx.listener(move |this, command: &SharedString, _window, cx| {
-                this.start_links_scan(command.to_string(), project_ids.clone(), cx);
-            }),
-        );
+        .brief(crate::views::launch_briefs::brief_for(
+            &self.client,
+            "projects-scan",
+            cx,
+        ))
+        .on_launch(cx.listener(
+            move |this, launch: &okena_ui::agent_launcher::Launch, _window, cx| {
+                this.start_links_scan(
+                    launch.command.to_string(),
+                    launch.model.clone(),
+                    project_ids.clone(),
+                    cx,
+                );
+            },
+        ));
         out.push(launcher.into_any_element());
         out
     }

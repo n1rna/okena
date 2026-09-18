@@ -15,6 +15,7 @@ use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
 use okena_core::harness::AgentPurpose;
 use okena_core::knowledge::{KnowledgeRootKind, KnowledgeStores};
+use okena_ui::agent_launcher::Launch;
 use std::collections::{HashMap, HashSet};
 
 /// State of the Knowledge view's "New" form.
@@ -85,7 +86,12 @@ impl HarnessPane {
         })
     }
 
-    fn start_knowledge_draft(&mut self, agent: String, cx: &mut Context<Self>) {
+    fn start_knowledge_draft(
+        &mut self,
+        agent: String,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.knowledge_draft.starting {
             return;
         }
@@ -111,6 +117,7 @@ impl HarnessPane {
                         root,
                         request,
                         agent_command: Some(agent),
+                        model,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing draft result".to_string()))
             })
@@ -294,8 +301,9 @@ impl HarnessPane {
                 this.open_context_dialog(super::context_dialog::ContextTarget::KnowledgeDraft, cx);
             }),
         )
-        .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
-            this.start_knowledge_draft(command.to_string(), cx);
+        .brief(crate::views::launch_briefs::brief_for(&self.client, "knowledge-draft", cx))
+        .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
+            this.start_knowledge_draft(launch.command.to_string(), launch.model.clone(), cx);
         }))
         .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
             this.open_session(id.to_string(), cx);

@@ -468,7 +468,7 @@ impl ProjectCanvas {
     }
 
     /// Start one agent looking for links between the selected projects.
-    fn start_links_scan(&mut self, agent: String, cx: &mut Context<Self>) {
+    fn start_links_scan(&mut self, agent: String, model: Option<String>, cx: &mut Context<Self>) {
         let project_ids: Vec<String> = self.selected.iter().map(|c| self.daemon_id(c)).collect();
         if project_ids.len() < 2 || self.links_starting {
             return;
@@ -485,6 +485,7 @@ impl ProjectCanvas {
                     .post_action(ActionRequest::ProjectsScan {
                         project_ids,
                         agent_command: Some(agent),
+                        model,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing links scan result".to_string()))
             })

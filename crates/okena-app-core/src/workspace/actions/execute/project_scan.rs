@@ -35,6 +35,7 @@ pub(super) fn scan(
     window_id: crate::workspace::state::WindowId,
     project_id: String,
     agent_command: Option<String>,
+    model: Option<String>,
     backend: &dyn okena_terminal::backend::TerminalBackend,
     terminals: &okena_terminal::TerminalsRegistry,
     settings: &AppSettings,
@@ -68,6 +69,7 @@ pub(super) fn scan(
         &brief,
         // A scan is handed no picked context.
         &Default::default(),
+        &briefs::launch_model(Flow::ProjectScan, &prompts, model),
     ) else {
         // Nothing is scaffolded, so a session without an agent has no purpose.
         return ActionResult::Err(

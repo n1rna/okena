@@ -2,6 +2,7 @@
 name: knowledge-draft
 description: Brief an agent to add to or update a knowledge root
 for: knowledge-draft
+model: sonnet
 ---
 Add to or update this knowledge base: {request}
 

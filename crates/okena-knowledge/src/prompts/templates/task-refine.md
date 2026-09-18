@@ -2,6 +2,7 @@
 name: task-refine
 description: Brief an agent to sharpen an existing task, asking before it rewrites it
 for: task-refine
+model: sonnet
 ---
 Refine {key} so that whoever picks it up knows exactly what to do.
 

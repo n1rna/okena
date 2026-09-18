@@ -2,6 +2,7 @@
 name: project-scan
 description: Brief an agent to write or update a repository's project map
 for: project-scan
+model: sonnet
 ---
 Map the repository {project} at `{path}`: the areas its code is divided into, the concepts they implement, what it exposes to and consumes from other projects, and how it is built and run.
 

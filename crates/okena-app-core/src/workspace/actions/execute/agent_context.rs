@@ -364,8 +364,14 @@ mod tests {
 
         let settings = AppSettings::default();
         let args = args_of(
-            super::super::tasks::custom_agent_shell(&settings, Some("claude"), &brief, &install)
-                .expect("an agent"),
+            super::super::tasks::custom_agent_shell(
+                &settings,
+                Some("claude"),
+                &brief,
+                &install,
+                &Default::default(),
+            )
+            .expect("an agent"),
         );
         let at = args
             .iter()
@@ -386,8 +392,14 @@ mod tests {
         assert!(brief.contains(&items[2].path), "{brief}");
         let settings = AppSettings::default();
         let args = args_of(
-            super::super::tasks::custom_agent_shell(&settings, Some("codex"), &brief, &install)
-                .expect("an agent"),
+            super::super::tasks::custom_agent_shell(
+                &settings,
+                Some("codex"),
+                &brief,
+                &install,
+                &Default::default(),
+            )
+            .expect("an agent"),
         );
         assert!(!args.iter().any(|a| a == "--plugin-dir"));
         assert!(args.iter().any(|a| a.contains("skills/release/SKILL.md")));

@@ -97,6 +97,13 @@ pub struct KnowledgeEntry {
     /// For a template: the `{placeholder}` names its body uses, sorted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variables: Vec<String>,
+    /// For a template: the model its agent runs on, from frontmatter `model`
+    /// and `models` (see [`crate::agent_model`]).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent_model::AgentModels::is_empty"
+    )]
+    pub models: crate::agent_model::AgentModels,
     /// Problems that still let the entry be listed, e.g. unparseable
     /// frontmatter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -315,6 +322,7 @@ mod tests {
             files: Vec::new(),
             flows: Vec::new(),
             variables: Vec::new(),
+            models: Default::default(),
             status: Vec::new(),
         }
     }

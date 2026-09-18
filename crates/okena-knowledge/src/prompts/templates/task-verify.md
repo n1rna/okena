@@ -2,6 +2,7 @@
 name: task-verify
 description: Tell an agent working on a task to plan its steps and prove each one through okena
 for: task-verify
+model: opus
 ---
 Plan {key} before you build it, and prove it works one step at a time.
 

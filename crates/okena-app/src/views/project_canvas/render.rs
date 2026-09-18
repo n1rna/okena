@@ -361,9 +361,12 @@ impl ProjectCanvas {
             ))
             .preferred(self.default_agent.clone())
             .busy(self.links_starting.then_some("Starting…"))
-            .on_launch(cx.listener(|this, command: &SharedString, _window, cx| {
-                this.start_links_scan(command.to_string(), cx);
-            }));
+            .brief(crate::views::launch_briefs::brief_for(&self.client, "projects-scan", cx))
+            .on_launch(cx.listener(
+                |this, launch: &okena_ui::agent_launcher::Launch, _window, cx| {
+                    this.start_links_scan(launch.command.to_string(), launch.model.clone(), cx);
+                },
+            ));
             panel = panel.child(div().w(px(360.0)).child(launcher));
         } else if self.selected.len() == 1 {
             panel = panel.child(muted(

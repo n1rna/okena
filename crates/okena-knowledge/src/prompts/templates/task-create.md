@@ -2,6 +2,7 @@
 name: task-create
 description: Brief an agent to draft a new task properly before it is filed
 for: task-create
+model: sonnet
 ---
 Draft a new {kind} for this: {title}
 

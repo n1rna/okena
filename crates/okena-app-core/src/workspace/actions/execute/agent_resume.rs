@@ -94,7 +94,14 @@ pub fn resume_shell(
         return None;
     };
     let mut resumed = resume_args(path, args)?;
-    resumed.extend(super::agent_options::option_args(path, settings));
+    // The model it was launched on is not in settings: it came from the brief's
+    // template or a pick at launch, so it is read back from the launch itself.
+    let model = okena_core::agent_model::model_in(path, args);
+    resumed.extend(super::agent_options::option_args(
+        path,
+        settings,
+        model.as_deref(),
+    ));
     resumed.extend(super::agent_mcp::injection_args(path, settings));
     Some(ShellType::Custom {
         path: path.clone(),
@@ -170,6 +177,25 @@ mod tests {
             "a named conversation is always exact"
         );
         assert!(!super::resumable(&ShellType::Default, false));
+    }
+
+    #[test]
+    fn a_restart_keeps_the_model_it_was_launched_on() {
+        use okena_terminal::shell_config::ShellType;
+        use okena_workspace::settings::AppSettings;
+        let s = AppSettings::default();
+        // Picked at launch, so it is in no setting: only argv remembers it.
+        let launched = ShellType::Custom {
+            path: "claude".into(),
+            args: strings(&["--session-id", "abc", "--model", "haiku", "Work on QBL-1"]),
+        };
+        match super::resume_shell(&launched, &s).expect("resumable") {
+            ShellType::Custom { args, .. } => {
+                assert_eq!(args[..4], strings(&["--resume", "abc", "--model", "haiku"]));
+                assert_eq!(args.iter().filter(|a| *a == "--model").count(), 1);
+            }
+            other => panic!("expected a custom shell, got {other:?}"),
+        }
     }
 
     #[test]

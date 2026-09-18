@@ -41,6 +41,7 @@ pub(super) fn refine_spec_document(
     path: String,
     request: String,
     agent_command: Option<String>,
+    model: Option<String>,
     context_refs: Vec<okena_core::context::ContextRef>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
@@ -75,6 +76,7 @@ pub(super) fn refine_spec_document(
         target,
         request,
         agent_command,
+        model,
         context_refs,
         backend,
         terminals,
@@ -92,6 +94,7 @@ pub(super) fn refine_knowledge_document(
     path: String,
     request: String,
     agent_command: Option<String>,
+    model: Option<String>,
     context_refs: Vec<okena_core::context::ContextRef>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
@@ -130,6 +133,7 @@ pub(super) fn refine_knowledge_document(
         target,
         request,
         agent_command,
+        model,
         context_refs,
         backend,
         terminals,
@@ -191,6 +195,7 @@ fn start(
     target: Target,
     request: String,
     agent_command: Option<String>,
+    model: Option<String>,
     context_refs: Vec<okena_core::context::ContextRef>,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
@@ -205,17 +210,22 @@ fn start(
         super::context::resolve_for_launch(&ws.data.projects, settings, &context_refs);
     let command = super::agent_context::launch_command(settings, agent_command.as_deref());
     let install = super::agent_context::install(&command, &context_items);
+    let prompts = briefs::prompt_roots(&ws.data.projects, settings);
     let brief = document_brief(
         &request,
         &target,
         &context_items,
         install.loaded(),
-        &briefs::prompt_roots(&ws.data.projects, settings),
+        &prompts,
     );
     // Nothing is scaffolded, so a session without an agent would do nothing.
-    let Some(shell) =
-        super::specs::spec_agent_shell(settings, agent_command.as_deref(), &brief, &install)
-    else {
+    let Some(shell) = super::specs::spec_agent_shell(
+        settings,
+        agent_command.as_deref(),
+        &brief,
+        &install,
+        &briefs::launch_model(Flow::DocumentRefine, &prompts, model),
+    ) else {
         return ActionResult::Err(
             "no agent to start — pick one, or set the agent command in Settings → Harness".into(),
         );

@@ -2,6 +2,7 @@
 name: tasks-coordinate
 description: Brief an agent to split a hand-picked set of tasks among agents and start them
 for: tasks-coordinate
+model: opus
 ---
 You are coordinating these tasks, picked to be worked on together:
 {tasks}{note}{projects}{context}

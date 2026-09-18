@@ -978,6 +978,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             agent_root,
             branch,
             agent_command,
+            model,
             note,
             coordinate,
             also,
@@ -995,6 +996,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             agent_root,
             branch,
             agent_command,
+            model,
             note,
             coordinate,
             also,
@@ -1120,6 +1122,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             root,
             project_ids,
             agent_command,
+            model,
             task_draft,
             task,
             purpose,
@@ -1130,6 +1133,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             root,
             project_ids: project_ids.iter().map(|id| s(id)).collect(),
             agent_command,
+            model,
             task_draft,
             task,
             purpose,
@@ -1198,12 +1202,14 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             idea,
             name,
             agent_command,
+            model,
             context,
         } => ActionRequest::SpecDraftChange {
             root,
             idea,
             name,
             agent_command,
+            model,
             context: strip_context_refs(context, s),
         },
         passthrough @ (ActionRequest::SpecStoreFetch { .. }
@@ -1219,12 +1225,14 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             path,
             request,
             agent_command,
+            model,
             context,
         } => ActionRequest::SpecRefineDocument {
             root,
             path,
             request,
             agent_command,
+            model,
             context: strip_context_refs(context, s),
         },
         // Knowledge actions likewise carry only root keys the daemon
@@ -1252,32 +1260,38 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             path,
             request,
             agent_command,
+            model,
             context,
         } => ActionRequest::KnowledgeRefineDocument {
             root,
             path,
             request,
             agent_command,
+            model,
             context: strip_context_refs(context, s),
         },
         ActionRequest::KnowledgeDraft {
             root,
             request,
             agent_command,
+            model,
             context,
         } => ActionRequest::KnowledgeDraft {
             root,
             request,
             agent_command,
+            model,
             context: strip_context_refs(context, s),
         },
         // Project ids are client-side and must be stripped for the daemon.
         ActionRequest::ProjectScan {
             project_id,
             agent_command,
+            model,
         } => ActionRequest::ProjectScan {
             project_id: s(&project_id),
             agent_command,
+            model,
         },
         ActionRequest::ProjectMapRead { project_id } => ActionRequest::ProjectMapRead {
             project_id: s(&project_id),
@@ -1285,9 +1299,11 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::ProjectsScan {
             project_ids,
             agent_command,
+            model,
         } => ActionRequest::ProjectsScan {
             project_ids: project_ids.iter().map(|id| s(id)).collect(),
             agent_command,
+            model,
         },
         ActionRequest::ProjectLinks => ActionRequest::ProjectLinks,
         // Task actions carry provider ids, not okena ids, so they cross

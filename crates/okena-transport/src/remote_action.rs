@@ -193,6 +193,11 @@ impl RemoteActionClient {
         }
     }
 
+    /// Whether `other` is a clone of this client: the same connection.
+    pub fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Post an action and return its optional JSON payload.
     pub fn post_action(&self, action: ActionRequest) -> Result<Option<serde_json::Value>, String> {
         let transport = match client_kind_for(&action) {
@@ -792,6 +797,7 @@ mod action_timeout_tests {
             agent_root: None,
             branch: None,
             agent_command: None,
+            model: None,
             note: None,
             coordinate: false,
             also: Vec::new(),
@@ -822,6 +828,7 @@ mod action_timeout_tests {
             idea: "add login".into(),
             name: None,
             agent_command: None,
+            model: None,
             context: Vec::new(),
         };
         assert!(matches!(

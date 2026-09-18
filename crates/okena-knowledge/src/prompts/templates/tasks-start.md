@@ -2,6 +2,7 @@
 name: tasks-start
 description: Brief one agent starting work on several tasks, each in worktrees of its own
 for: tasks-start
+model: opus
 ---
 Work on {key}, together.
 {tasks}{note}{context}

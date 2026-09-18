@@ -300,6 +300,7 @@ impl LaunchPickers {
                 client.post_action(ActionRequest::ProjectScan {
                     project_id,
                     agent_command: None,
+                    model: None,
                 })
             })
             .await;

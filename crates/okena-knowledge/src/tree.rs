@@ -264,6 +264,7 @@ fn bare_entry(root: &Path, kind: KnowledgeKind, path: &Path, name: String) -> Kn
         files: Vec::new(),
         flows: Vec::new(),
         variables: Vec::new(),
+        models: Default::default(),
         status: Vec::new(),
     }
 }
@@ -306,9 +307,9 @@ fn read_entry(
         .string("title")
         .or_else(|| first_heading(body))
         .unwrap_or_else(|| name.clone());
-    let (flows, variables) = match kind {
-        KnowledgeKind::Template => (fm.list("for"), placeholders(body)),
-        _ => (Vec::new(), Vec::new()),
+    let (flows, variables, models) = match kind {
+        KnowledgeKind::Template => (fm.list("for"), placeholders(body), fm.agent_models()),
+        _ => (Vec::new(), Vec::new(), Default::default()),
     };
     KnowledgeEntry {
         kind,
@@ -320,6 +321,7 @@ fn read_entry(
         files: Vec::new(),
         flows,
         variables,
+        models,
         status,
     }
 }
@@ -484,6 +486,38 @@ mod tests {
         // and is never filled, so listing it as a variable would tell a
         // template author something okena does not do.
         assert_eq!(template.variables, ["change_dir", "idea"]);
+    }
+
+    #[test]
+    fn a_template_reads_its_model_and_a_model_per_cli() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        write(
+            &root.join("templates/task-start.md"),
+            "---\nfor: task-start\nmodel: sonnet\nmodels:\n  codex: gpt-5-codex\n  Copilot: gpt-5\n---\nWork on {key}",
+        );
+        write(
+            &root.join("templates/plain.md"),
+            "---\nfor: task-start\n---\nx",
+        );
+        // Only templates carry a model: a doc's `model:` is just a field.
+        write(&root.join("docs/a.md"), "---\nmodel: opus\n---\n");
+        let tree = read_tree(root);
+        let models = &tree
+            .entry("templates/task-start.md")
+            .expect("template")
+            .models;
+        assert_eq!(models.model.as_deref(), Some("sonnet"));
+        assert_eq!(models.for_agent("claude"), Some("sonnet"));
+        assert_eq!(models.for_agent("codex"), Some("gpt-5-codex"));
+        assert_eq!(models.for_agent("copilot"), Some("gpt-5"));
+        assert!(
+            tree.entry("templates/plain.md")
+                .expect("plain")
+                .models
+                .is_empty()
+        );
+        assert!(tree.entry("docs/a.md").expect("doc").models.is_empty());
     }
 
     #[test]
