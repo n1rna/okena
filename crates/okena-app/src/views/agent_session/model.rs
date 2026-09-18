@@ -5,6 +5,7 @@
 //! they were separately written and had already started to.
 
 use crate::workspace::state::Workspace;
+use crate::workspace::state::agent_links::is_related;
 use okena_core::agent_activity::AgentActivity;
 use okena_core::harness::{AgentState, AgentSuggestion};
 use okena_core::session_assets::{LinkedCheckout, SessionAsset, derive_session_assets};
@@ -246,23 +247,6 @@ pub(super) fn activity_of(
         AgentActivity::Unknown => reason(AgentState::Unknown),
         AgentActivity::Waiting | AgentActivity::Done => SessionActivity::Waiting { idle },
     }
-}
-
-/// Whether `candidate` works on any of the session's tasks, and isn't the
-/// session itself.
-///
-/// Every task on both sides counts: a session started on several picked tasks
-/// owns the worktrees of its second and later tasks too. Matched on the
-/// provider's own task id rather than the display key, which changes when an
-/// issue moves team and would silently drop the worktrees.
-pub(super) fn is_related<'a>(
-    session_id: &str,
-    session_tasks: &[String],
-    candidate_id: &str,
-    mut candidate_tasks: impl Iterator<Item = &'a TaskRef>,
-) -> bool {
-    candidate_id != session_id
-        && candidate_tasks.any(|t| session_tasks.contains(&t.id.external_id))
 }
 
 /// Classify a project as an agent session.
@@ -589,7 +573,7 @@ pub fn short_path(path: &str, keep: usize) -> String {
 mod tests {
     use super::{
         AgentSessionInfo, AgentSessionKind, ReopenChoice, SessionActivity, activity_of,
-        is_related, session_kind, session_tasks, short_path, tasks_key,
+        session_kind, session_tasks, short_path, tasks_key,
     };
     use okena_core::agent_activity::AgentActivity;
     use okena_core::harness::AgentState;
@@ -723,81 +707,6 @@ mod tests {
 
     fn project(json: serde_json::Value) -> crate::workspace::state::ProjectData {
         serde_json::from_value(json).unwrap()
-    }
-
-    fn ids(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn a_worktree_on_the_same_task_is_related() {
-        assert!(is_related(
-            "s1",
-            &ids(&["u1"]),
-            "wt1",
-            [task("u1", "QBL-1")].iter()
-        ));
-    }
-
-    #[test]
-    fn a_worktree_on_a_sessions_second_task_is_related() {
-        // A session started on two picked tasks: the worktree Start work made
-        // for the second one is as much this session's as the first's.
-        assert!(is_related(
-            "s1",
-            &ids(&["u1", "u2"]),
-            "wt2",
-            [task("u2", "QBL-2")].iter()
-        ));
-        // And a worktree covering several tasks matches on any of them.
-        assert!(is_related(
-            "s1",
-            &ids(&["u2"]),
-            "wt1",
-            [task("u1", "QBL-1"), task("u2", "QBL-2")].iter()
-        ));
-    }
-
-    #[test]
-    fn the_session_is_not_related_to_itself() {
-        // It carries the same task as its worktrees, so it would otherwise
-        // list itself as one of its own checkouts.
-        assert!(!is_related(
-            "s1",
-            &ids(&["u1"]),
-            "s1",
-            [task("u1", "QBL-1")].iter()
-        ));
-    }
-
-    #[test]
-    fn a_different_task_is_not_related() {
-        assert!(!is_related(
-            "s1",
-            &ids(&["u1", "u2"]),
-            "wt1",
-            [task("u9", "QBL-9")].iter()
-        ));
-    }
-
-    #[test]
-    fn an_unlinked_project_is_not_related() {
-        assert!(!is_related("s1", &ids(&["u1"]), "p1", std::iter::empty()));
-    }
-
-    #[test]
-    fn matching_is_by_provider_id_not_display_key() {
-        // The display key changes when an issue moves team; the provider id
-        // does not. Matching on the key would silently drop the worktrees.
-        let moved = TaskRef {
-            id: TaskId::new("linear", "u1"),
-            display_key: "NEW-7".to_string(),
-            title: "Title".to_string(),
-            url: "http://x".to_string(),
-            parent_id: None,
-            parent_key: None,
-        };
-        assert!(is_related("s1", &ids(&["u1"]), "wt1", [moved].iter()));
     }
 
     #[test]

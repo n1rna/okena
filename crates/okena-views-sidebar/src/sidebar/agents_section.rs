@@ -30,7 +30,7 @@ use std::collections::HashMap;
 /// Distinct hues rather than shades of one, so the kinds are told apart at a
 /// glance in a mixed list. Implementing is the primary colour because it is
 /// the one that means work is actually happening.
-fn role_color(role: AgentRole, t: &okena_ui::theme::ThemeColors) -> u32 {
+pub(super) fn role_color(role: AgentRole, t: &okena_ui::theme::ThemeColors) -> u32 {
     match role {
         AgentRole::Implement => t.button_primary_bg,
         AgentRole::Task => t.term_cyan,
@@ -72,26 +72,37 @@ fn nest_by_ticket(sessions: Vec<SessionRow>) -> Vec<SessionRow> {
 }
 
 /// A session row: the project, its kind, and what it is working on.
-struct SessionRow {
-    info: SidebarProjectInfo,
-    role: AgentRole,
+pub(super) struct SessionRow {
+    pub(super) info: SidebarProjectInfo,
+    pub(super) role: AgentRole,
     /// Provider ids of the session's task and its task's parent, for placing
     /// it in the hierarchy.
-    task_id: Option<String>,
-    parent_task_id: Option<String>,
+    pub(super) task_id: Option<String>,
+    pub(super) parent_task_id: Option<String>,
     /// How deep the ticket hierarchy puts it. Filled in after sorting.
-    depth: usize,
+    pub(super) depth: usize,
     /// Whether this is the session currently open in the main area.
-    focused: bool,
+    pub(super) focused: bool,
     /// Task key for a task session, change name for a spec session.
-    subtitle: Option<String>,
+    pub(super) subtitle: Option<String>,
     /// Last time anything ran in this session, for activity ordering. `None`
     /// for a session that has not run anything yet.
-    last_activity_at: Option<u64>,
+    pub(super) last_activity_at: Option<u64>,
     /// How it is doing: the terminal's state and the agent's report combined.
-    card: CardState,
+    pub(super) card: CardState,
     /// What the agent last said it was doing.
-    status: Option<String>,
+    pub(super) status: Option<String>,
+}
+
+/// A closed session's row: who it was and when it was closed.
+pub(super) struct ClosedRow {
+    pub(super) info: SidebarProjectInfo,
+    pub(super) role: AgentRole,
+    pub(super) subtitle: Option<String>,
+    /// "closed 3h ago".
+    pub(super) when: String,
+    /// Whether this is the session currently open in the main area.
+    pub(super) focused: bool,
 }
 
 /// The closed agent sessions, most recently closed first.
@@ -152,13 +163,96 @@ impl Sidebar {
 
     /// Colour for a card state: the attention states stand out, the rest
     /// recede so the ones that need you are the ones you see.
-    fn card_color(state: CardState, t: &okena_ui::theme::ThemeColors) -> u32 {
+    pub(super) fn card_color(state: CardState, t: &okena_ui::theme::ThemeColors) -> u32 {
         match state {
             CardState::NeedsInput | CardState::ReadyForReview | CardState::Unknown => t.warning,
             CardState::Blocked => t.error,
             CardState::Working => t.success,
             CardState::Waiting | CardState::Done | CardState::Stopped => t.text_muted,
         }
+    }
+
+    /// A live session as its row in the Agents list shows it: identity,
+    /// state and last report, read from the workspace and the terminals.
+    ///
+    /// Shared with the Projects list, so an agent under a worktree carries
+    /// the same badge and state as it does here.
+    pub(super) fn live_session_row(
+        &self,
+        p: &okena_workspace::state::ProjectData,
+        role: AgentRole,
+        workspace: &okena_workspace::state::Workspace,
+        focused_id: Option<&str>,
+    ) -> SessionRow {
+        let (info, subtitle) = self.session_identity(p, role, workspace);
+        // Whether anything runs, live from the registry like the project
+        // rows; what the agent is doing, from the daemon.
+        let (running, activity) = {
+            let registry = self.terminals.lock();
+            let live: Vec<&String> = info
+                .terminal_ids
+                .iter()
+                .filter(|tid| registry.contains_key(*tid))
+                .collect();
+            (
+                !live.is_empty(),
+                live.iter()
+                    .find_map(|tid| workspace.agent_activity(&p.id, tid)),
+            )
+        };
+        let status = p
+            .agent
+            .as_ref()
+            .and_then(|a| a.status.clone())
+            .filter(|s| !s.trim().is_empty());
+        SessionRow {
+            info,
+            role,
+            task_id: p.task_ref.as_ref().map(|t| t.id.external_id.clone()),
+            parent_task_id: p.task_ref.as_ref().and_then(|t| t.parent_id.clone()),
+            depth: 0,
+            focused: focused_id == Some(p.id.as_str()),
+            subtitle,
+            last_activity_at: p.last_activity_at,
+            card: card_state(running, activity),
+            status,
+        }
+    }
+
+    /// A closed session as the history shows it: its identity as it was
+    /// while live, and when it was closed.
+    pub(super) fn closed_session_row(
+        &self,
+        p: &okena_workspace::state::ProjectData,
+        role: AgentRole,
+        workspace: &okena_workspace::state::Workspace,
+        focused_id: Option<&str>,
+        now: u64,
+    ) -> ClosedRow {
+        let (info, subtitle) = self.session_identity(p, role, workspace);
+        let when = p
+            .closed_at
+            .map(|at| format!("closed {}", okena_ui::ago::format_ago(at, now)))
+            .unwrap_or_default();
+        ClosedRow {
+            info,
+            role,
+            subtitle,
+            when,
+            focused: focused_id == Some(p.id.as_str()),
+        }
+    }
+
+    /// The colour a session's card is drawn in, standing on its own.
+    ///
+    /// Keyed by the ticket family the tasks view colours by, so an agent
+    /// matches the task it works on: the parent ticket when there is one,
+    /// then its own ticket, and only a session without a ticket by its id.
+    fn session_color_key(row: &SessionRow) -> &str {
+        row.parent_task_id
+            .as_deref()
+            .or(row.task_id.as_deref())
+            .unwrap_or(&row.info.id)
     }
 
     /// One agent as a card: kind, name and state, then what it last said.
@@ -315,15 +409,7 @@ impl Sidebar {
     ) -> (AnyElement, usize) {
         let root = &rows[0];
         // A sub-agent takes its family's colour, not one of its own.
-        // Keyed by the ticket family the tasks view colours by, so an agent
-        // matches the task it works on: the parent ticket when there is one,
-        // then its own ticket, and only a session without a ticket by its id.
-        let key = root
-            .parent_task_id
-            .as_deref()
-            .or(root.task_id.as_deref())
-            .unwrap_or(&root.info.id);
-        let color = agent_color(key, family);
+        let color = agent_color(Self::session_color_key(root), family);
         let family = family.unwrap_or(color);
         let mut used = 1;
         let mut children: Vec<AnyElement> = Vec::new();
@@ -394,39 +480,7 @@ impl Sidebar {
             if p.is_closed() {
                 continue;
             }
-            let (info, subtitle) = self.session_identity(p, role, workspace);
-            // Whether anything runs, live from the registry like the project
-            // rows; what the agent is doing, from the daemon.
-            let (running, activity) = {
-                let registry = self.terminals.lock();
-                let live: Vec<&String> = info
-                    .terminal_ids
-                    .iter()
-                    .filter(|tid| registry.contains_key(*tid))
-                    .collect();
-                (
-                    !live.is_empty(),
-                    live.iter()
-                        .find_map(|tid| workspace.agent_activity(&p.id, tid)),
-                )
-            };
-            let status = p
-                .agent
-                .as_ref()
-                .and_then(|a| a.status.clone())
-                .filter(|s| !s.trim().is_empty());
-            sessions.push(SessionRow {
-                info,
-                role,
-                task_id: p.task_ref.as_ref().map(|t| t.id.external_id.clone()),
-                parent_task_id: p.task_ref.as_ref().and_then(|t| t.parent_id.clone()),
-                depth: 0,
-                focused: focused_id.as_deref() == Some(p.id.as_str()),
-                subtitle,
-                last_activity_at: p.last_activity_at,
-                card: card_state(running, activity),
-                status,
-            });
+            sessions.push(self.live_session_row(p, role, workspace, focused_id.as_deref()));
         }
 
         let sort_mode = workspace
@@ -496,24 +550,16 @@ impl Sidebar {
         let focused_id = self.focus_manager.read(cx).focused_project_id().cloned();
         let now = okena_ui::ago::now_millis();
 
-        let closed: Vec<_> = closed_sessions(&workspace.data().projects)
+        let closed: Vec<ClosedRow> = closed_sessions(&workspace.data().projects)
             .into_iter()
             .filter_map(|p| {
                 let role = p.agent_role()?;
-                let (info, subtitle) = self.session_identity(p, role, workspace);
-                let when = p
-                    .closed_at
-                    .map(|at| format!("closed {}", okena_ui::ago::format_ago(at, now)))
-                    .unwrap_or_default();
-                let focused = focused_id.as_deref() == Some(p.id.as_str());
-                Some((info, role, subtitle, when, focused))
+                Some(self.closed_session_row(p, role, workspace, focused_id.as_deref(), now))
             })
             .collect();
         let rows: Vec<AnyElement> = closed
-            .into_iter()
-            .map(|(info, role, subtitle, when, focused)| {
-                self.render_closed_row(info, role, subtitle, when, focused, cx)
-            })
+            .iter()
+            .map(|row| self.render_closed_row(row, cx))
             .collect();
 
         // The way back, at the top of the list it replaced.
@@ -579,16 +625,16 @@ impl Sidebar {
 
     /// One closed session: kind, name and when it was closed, then what it
     /// worked on.
-    fn render_closed_row(
-        &self,
-        info: SidebarProjectInfo,
-        role: AgentRole,
-        subtitle: Option<String>,
-        closed: String,
-        focused: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_closed_row(&self, row: &ClosedRow, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        let ClosedRow {
+            info,
+            role,
+            subtitle,
+            when: closed,
+            focused,
+        } = row;
+        let (role, focused) = (*role, *focused);
         let id = info.id.clone();
         let kind_color = role_color(role, &t);
         v_flex()
@@ -644,10 +690,10 @@ impl Sidebar {
                             .flex_shrink_0()
                             .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
-                            .child(closed),
+                            .child(closed.clone()),
                     ),
             )
-            .children(subtitle.map(|text| {
+            .children(subtitle.clone().map(|text| {
                 div()
                     .w_full()
                     .min_w_0()

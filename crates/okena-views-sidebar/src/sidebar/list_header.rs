@@ -504,6 +504,14 @@ impl Sidebar {
                     .data()
                     .window(window_id)
                     .is_some_and(|w| w.projects_show_info);
+                // Agent sessions under the worktrees they work in; on unless
+                // turned off.
+                let showing_agents = self
+                    .workspace
+                    .read(cx)
+                    .data()
+                    .window(window_id)
+                    .is_none_or(|w| w.projects_show_agents);
                 panel = panel
                     .child(okena_ui::menu::menu_separator(&t))
                     .child(self.menu_toggle(
@@ -514,6 +522,18 @@ impl Sidebar {
                         move |this, cx| {
                             this.workspace.update(cx, |ws, cx| {
                                 ws.set_projects_show_info(window_id, !showing_info, cx);
+                            });
+                        },
+                        cx,
+                    ))
+                    .child(self.menu_toggle(
+                        "project-show-agents",
+                        "Show agents",
+                        showing_agents,
+                        "icons/bot.svg",
+                        move |this, cx| {
+                            this.workspace.update(cx, |ws, cx| {
+                                ws.set_projects_show_agents(window_id, !showing_agents, cx);
                             });
                         },
                         cx,

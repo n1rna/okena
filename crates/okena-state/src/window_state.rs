@@ -234,6 +234,13 @@ pub struct WindowState {
     /// different habits, and turning one on should not flip the other.
     #[serde(default)]
     pub projects_show_info: bool,
+    /// Whether the sidebar's Projects list shows each worktree's agent
+    /// sessions under it, and a coordinator's under the repos it was given.
+    ///
+    /// On by default, and so on for a window saved before the setting
+    /// existed: seeing which agents work in a repo is what the list is for.
+    #[serde(default = "default_true")]
+    pub projects_show_agents: bool,
     /// Whether the main area is showing every agent session at once.
     ///
     /// The agents-tab counterpart to clearing the folder filter: it is what
@@ -281,6 +288,10 @@ pub struct WindowState {
     pub harness_section: Option<okena_core::harness::HarnessSection>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// A persisted harness section, or `None` for one this build does not know.
 fn lenient_harness_section<'de, D>(
     deserializer: D,
@@ -311,6 +322,7 @@ impl Default for WindowState {
             agents_overview: false,
             agents_show_info: false,
             projects_show_info: false,
+            projects_show_agents: true,
             show_attention_section: false,
             folder_collapsed: HashMap::new(),
             os_bounds: None,
@@ -448,6 +460,7 @@ mod tests {
             agents_overview: true,
             agents_show_info: true,
             projects_show_info: true,
+            projects_show_agents: false,
             show_attention_section: true,
             folder_collapsed: collapsed,
             os_bounds: Some(WindowBounds {
@@ -474,6 +487,7 @@ mod tests {
         assert_eq!(reloaded.project_sort_mode, original.project_sort_mode);
         assert_eq!(reloaded.agents_show_info, original.agents_show_info);
         assert_eq!(reloaded.projects_show_info, original.projects_show_info);
+        assert_eq!(reloaded.projects_show_agents, original.projects_show_agents);
         assert_eq!(
             reloaded.show_attention_section,
             original.show_attention_section
@@ -552,6 +566,13 @@ mod tests {
         s.set_grid_show_info(false);
         assert!(!s.agents_show_info);
         assert!(s.projects_show_info, "and leaves the projects one alone");
+    }
+
+    #[test]
+    fn an_older_window_state_shows_agents_in_the_projects_list() {
+        let s: WindowState = serde_json::from_str(r#"{"projects_show_info":true}"#).unwrap();
+        assert!(s.projects_show_agents);
+        assert!(WindowState::default().projects_show_agents);
     }
 
     #[test]

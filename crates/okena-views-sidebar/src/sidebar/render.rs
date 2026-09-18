@@ -176,6 +176,7 @@ impl Sidebar {
         // Phase 1 — gather owned per-project infos + activity inputs while the
         // workspace borrow and the terminals lock are held, then release both
         // before the &mut self render calls below.
+        let project_agents = self.collect_project_agents(cx);
         let project_services;
         let mut infos: HashMap<String, SidebarProjectInfo>;
         let manual_index: HashMap<String, usize>;
@@ -219,9 +220,9 @@ impl Sidebar {
             let mut m = HashMap::new();
             let mut idx_map = HashMap::new();
             for (idx, project) in workspace.data().projects.iter().enumerate() {
-                // Agent sessions render in their own AGENTS section below, so
-                // they never appear among the repos.
-                if project.is_agent_session() {
+                // Agent sessions render in the Agents list and under their
+                // worktrees, so they never appear among the repos.
+                if project.agent_role().is_some() {
                     continue;
                 }
                 let mut info = SidebarProjectInfo::from_project(project, workspace, self.window_id);
@@ -312,6 +313,14 @@ impl Sidebar {
                 if self.expanded_projects.contains(id) {
                     self.push_activity_group_cursor_items(info, &mut cursor_items);
                 }
+                Self::push_agent_cursor_items(
+                    project_agents.placement.for_worktree(id),
+                    &mut cursor_items,
+                );
+                Self::push_agent_cursor_items(
+                    project_agents.placement.for_repo(id),
+                    &mut cursor_items,
+                );
                 // No tier header falls between a project and its children, so
                 // `headers_before` is constant across this project's run.
                 scroll_indices.extend((first..cursor_items.len()).map(|i| i + headers_before));
@@ -352,6 +361,23 @@ impl Sidebar {
                     20.0,
                     34.0,
                     "",
+                    cursor_index,
+                    &mut flat_idx,
+                    &mut flat_elements,
+                    cx,
+                );
+            }
+            // Every row is a peer here, so a worktree's agents sit under it
+            // and a repo's under it, with no collapse to follow.
+            for agents in [
+                project_agents.placement.for_worktree(&id),
+                project_agents.placement.for_repo(&id),
+            ] {
+                self.render_project_agents(
+                    &project_agents,
+                    agents,
+                    &id,
+                    20.0,
                     cursor_index,
                     &mut flat_idx,
                     &mut flat_elements,
@@ -776,6 +802,9 @@ impl Render for Sidebar {
         // drop the activity-view cursor list from a previous render.
         self.activity_cursor_items.clear();
 
+        // Agent sessions under the worktrees and repos they work in.
+        let project_agents = self.collect_project_agents(cx);
+
         let workspace = self.workspace.read(cx);
 
         // Opt-in "needs attention" section: collect (owned) the attention
@@ -841,6 +870,7 @@ impl Render for Sidebar {
                     .project_ids
                     .iter()
                     .filter_map(|pid| all_projects.get(pid.as_str()))
+                    .filter(|p| p.agent_role().is_none())
                     .filter(|p| {
                         p.worktree_info.is_none()
                             || !all_project_ids.contains(
@@ -893,8 +923,10 @@ impl Render for Sidebar {
                     // This is a worktree child shown under its parent, skip
                     continue;
                 }
-                // Agent sessions have their own section below.
-                if project.is_agent_session() {
+                // Agent sessions of every kind belong to the Agents list, and
+                // under the worktrees and repos they work in — not among the
+                // repos as if they were one.
+                if project.agent_role().is_some() {
                     continue;
                 }
                 let mut wt_children = worktree_children_map
@@ -1140,7 +1172,29 @@ impl Render for Sidebar {
                                         cx,
                                     );
                                 }
+                                self.render_project_agents(
+                                    &project_agents,
+                                    project_agents.placement.for_worktree(&child.id),
+                                    &child.id,
+                                    36.0,
+                                    cursor_index,
+                                    &mut flat_idx,
+                                    &mut flat_elements,
+                                    cx,
+                                );
                             }
+                            // Sessions given this repo with no worktree yet,
+                            // after its worktrees.
+                            self.render_project_agents(
+                                &project_agents,
+                                project_agents.placement.for_repo(&project.id),
+                                &project.id,
+                                20.0,
+                                cursor_index,
+                                &mut flat_idx,
+                                &mut flat_elements,
+                                cx,
+                            );
                         }
                     } else {
                         // No worktrees or orphan — standard rendering
@@ -1187,6 +1241,21 @@ impl Render for Sidebar {
                                 cx,
                             );
                         }
+                        // No worktree collapse here, so its agents always show.
+                        self.render_project_agents(
+                            &project_agents,
+                            if project.is_orphan {
+                                project_agents.placement.for_worktree(&project.id)
+                            } else {
+                                project_agents.placement.for_repo(&project.id)
+                            },
+                            &project.id,
+                            20.0,
+                            cursor_index,
+                            &mut flat_idx,
+                            &mut flat_elements,
+                            cx,
+                        );
                     }
                 }
                 SidebarItem::Folder {
@@ -1334,8 +1403,28 @@ impl Render for Sidebar {
                                                     cx,
                                                 );
                                             }
+                                            self.render_project_agents(
+                                                &project_agents,
+                                                project_agents.placement.for_worktree(&child.id),
+                                                &child.id,
+                                                52.0,
+                                                cursor_index,
+                                                &mut flat_idx,
+                                                &mut flat_elements,
+                                                cx,
+                                            );
                                         }
                                     }
+                                    self.render_project_agents(
+                                        &project_agents,
+                                        project_agents.placement.for_repo(&fp.id),
+                                        &fp.id,
+                                        36.0,
+                                        cursor_index,
+                                        &mut flat_idx,
+                                        &mut flat_elements,
+                                        cx,
+                                    );
                                 }
                             } else {
                                 // No worktrees or orphan — standard folder project rendering
@@ -1383,6 +1472,20 @@ impl Render for Sidebar {
                                         cx,
                                     );
                                 }
+                                self.render_project_agents(
+                                    &project_agents,
+                                    if fp.is_orphan {
+                                        project_agents.placement.for_worktree(&fp.id)
+                                    } else {
+                                        project_agents.placement.for_repo(&fp.id)
+                                    },
+                                    &fp.id,
+                                    36.0,
+                                    cursor_index,
+                                    &mut flat_idx,
+                                    &mut flat_elements,
+                                    cx,
+                                );
                             }
                         }
                     }

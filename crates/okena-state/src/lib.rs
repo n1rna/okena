@@ -7,6 +7,7 @@
 //! metadata, hook terminals, and lifecycle hooks configuration. No GPUI,
 //! no behavior beyond a few pure helpers.
 
+pub mod agent_links;
 pub mod agent_tree;
 mod hooks_config;
 mod toast;
