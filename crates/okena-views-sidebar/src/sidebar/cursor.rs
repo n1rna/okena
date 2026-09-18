@@ -5,6 +5,7 @@ use super::{GroupKind, Sidebar, SidebarCursorItem};
 use crate::{SidebarConfirm, SidebarDown, SidebarEscape, SidebarToggleExpand, SidebarUp};
 use gpui::*;
 use okena_workspace::state::ProjectData;
+use okena_workspace::state::agent_links::SessionPlacement;
 use std::collections::{HashMap, HashSet};
 
 impl Sidebar {
@@ -20,7 +21,8 @@ impl Sidebar {
         if let Some(ref focused_id) = focused_id
             && let Some(pos) = items.iter().position(|item| match item {
                 SidebarCursorItem::Project { project_id }
-                | SidebarCursorItem::WorktreeProject { project_id } => project_id == focused_id,
+                | SidebarCursorItem::WorktreeProject { project_id }
+                | SidebarCursorItem::Agent { project_id } => project_id == focused_id,
                 _ => false,
             })
         {
@@ -42,6 +44,7 @@ impl Sidebar {
         if self.is_activity_sort_mode(cx) {
             return self.activity_cursor_items.clone();
         }
+        let agents = self.agent_placement(cx);
         let workspace = self.workspace.read(cx);
         let all_projects: HashMap<&str, &ProjectData> = workspace
             .data()
@@ -118,6 +121,9 @@ impl Sidebar {
                 if !workspace.is_folder_collapsed(self.window_id, &folder.id) {
                     for pid in &folder.project_ids {
                         if let Some(&project) = all_projects.get(pid.as_str()) {
+                            if project.agent_role().is_some() {
+                                continue;
+                            }
                             // Skip worktree children that have a parent in the project list
                             if project.worktree_info.as_ref().is_some_and(|w| {
                                 all_project_ids.contains(w.parent_project_id.as_str())
@@ -126,6 +132,7 @@ impl Sidebar {
                             }
                             self.push_project_cursor_items(
                                 project,
+                                &agents,
                                 &worktree_children_map,
                                 &service_names,
                                 &hook_terminal_ids,
@@ -146,8 +153,13 @@ impl Sidebar {
                 {
                     continue;
                 }
+                // Agent sessions are not drawn among the repos.
+                if project.agent_role().is_some() {
+                    continue;
+                }
                 self.push_project_cursor_items(
                     project,
+                    &agents,
                     &worktree_children_map,
                     &service_names,
                     &hook_terminal_ids,
@@ -163,6 +175,7 @@ impl Sidebar {
     fn push_project_cursor_items(
         &self,
         project: &ProjectData,
+        agents: &SessionPlacement,
         worktree_children_map: &HashMap<String, Vec<&ProjectData>>,
         service_names: &HashMap<String, Vec<String>>,
         hook_terminal_ids: &HashMap<String, Vec<String>>,
@@ -211,8 +224,10 @@ impl Sidebar {
                                 cursor_items,
                             );
                         }
+                        Self::push_agent_cursor_items(agents.for_worktree(&child.id), cursor_items);
                     }
                 }
+                Self::push_agent_cursor_items(agents.for_repo(&project.id), cursor_items);
             }
         } else {
             // Standard mode: no worktrees
@@ -229,6 +244,14 @@ impl Sidebar {
                     cursor_items,
                 );
             }
+            Self::push_agent_cursor_items(
+                if is_orphan {
+                    agents.for_worktree(&project.id)
+                } else {
+                    agents.for_repo(&project.id)
+                },
+                cursor_items,
+            );
         }
     }
 
@@ -417,7 +440,10 @@ impl Sidebar {
                 }
                 self.saved_focus = None;
             }
-            SidebarCursorItem::WorktreeProject { project_id } => {
+            SidebarCursorItem::WorktreeProject { project_id }
+            | SidebarCursorItem::Agent { project_id } => {
+                // An agent opens its panel, or its history once closed, as a
+                // click on its row does.
                 self.focus_project_from_sidebar(project_id.clone(), true, cx);
                 self.cursor_index = None;
                 if let Some(ref saved) = self.saved_focus {
@@ -555,6 +581,7 @@ impl Sidebar {
                 self.toggle_group(&project_id, group);
             }
             SidebarCursorItem::Terminal { .. }
+            | SidebarCursorItem::Agent { .. }
             | SidebarCursorItem::Service { .. }
             | SidebarCursorItem::Hook { .. } => {}
             SidebarCursorItem::RemoteConnection { connection_id } => {

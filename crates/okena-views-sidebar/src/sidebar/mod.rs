@@ -11,12 +11,15 @@ mod agents_section;
 mod cursor;
 mod harness_nav;
 mod list_header;
+mod project_agents;
 mod renames;
 mod render;
 mod worktree;
 
 #[cfg(test)]
 mod from_project_test;
+#[cfg(test)]
+mod project_agents_test;
 
 pub use harness_nav::harness_nav_entries;
 
@@ -104,6 +107,10 @@ pub enum SidebarCursorItem {
         project_id: String,
     },
     WorktreeProject {
+        project_id: String,
+    },
+    /// An agent session shown under a worktree or repo in the Projects list.
+    Agent {
         project_id: String,
     },
     GroupHeader {

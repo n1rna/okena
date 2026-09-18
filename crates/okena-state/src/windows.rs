@@ -376,6 +376,14 @@ impl WorkspaceData {
         Some(w.projects_show_info)
     }
 
+    /// Show or hide agent sessions in the targeted window's Projects list.
+    /// Unknown extra ids are a silent no-op (`None`).
+    pub fn set_projects_show_agents(&mut self, id: WindowId, on: bool) -> Option<bool> {
+        let w = self.window_mut(id)?;
+        w.projects_show_agents = on;
+        Some(w.projects_show_agents)
+    }
+
     /// Set the info switch of whichever grid the targeted window is showing.
     /// Unknown extra ids are a silent no-op (`None`).
     pub fn set_grid_show_info(&mut self, id: WindowId, on: bool) -> Option<bool> {
@@ -581,6 +589,7 @@ mod agents_overview_tests {
         assert!(data.set_agents_overview(ghost, true).is_none());
         assert!(data.set_agents_show_info(ghost, true).is_none());
         assert!(data.set_projects_show_info(ghost, true).is_none());
+        assert!(data.set_projects_show_agents(ghost, false).is_none());
         assert!(data.set_grid_show_info(ghost, true).is_none());
         assert!(
             data.set_agent_sort_mode(ghost, AgentSortMode::Name)

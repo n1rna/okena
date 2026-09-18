@@ -22,6 +22,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub use okena_layout::{LayoutNode, SplitDirection};
+pub use okena_state::agent_links;
 pub use okena_state::agent_tree;
 pub use okena_state::{
     AgentRole, AgentSortMode, CanvasPoint, CanvasViewport, DropZone, FocusedTerminalState,
@@ -1533,6 +1534,19 @@ impl Workspace {
         cx: &mut impl WorkspaceCx,
     ) {
         if self.data.set_projects_show_info(window_id, on).is_some() {
+            self.notify_data(cx);
+        }
+    }
+
+    /// Show or hide agent sessions in the sidebar's Projects list. Persisted
+    /// via `notify_data`.
+    pub fn set_projects_show_agents(
+        &mut self,
+        window_id: WindowId,
+        on: bool,
+        cx: &mut impl WorkspaceCx,
+    ) {
+        if self.data.set_projects_show_agents(window_id, on).is_some() {
             self.notify_data(cx);
         }
     }
