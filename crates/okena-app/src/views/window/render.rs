@@ -111,7 +111,7 @@ impl WindowView {
             return;
         }
 
-        let visible_projects: Vec<String> = workspace
+        let mut visible_projects: Vec<String> = workspace
             .visible_projects(
                 self.window_id,
                 fm.focused_project_id(),
@@ -120,6 +120,10 @@ impl WindowView {
             .iter()
             .map(|p| p.id.clone())
             .collect();
+        // Positions are the grid's, and the grid is what the search bar left.
+        if let Some(agents) = self.shown_overview(cx) {
+            visible_projects = self.narrow_overview(agents, &visible_projects, cx).shown;
+        }
         let num_projects = visible_projects.len();
         if num_projects <= 1 {
             return;
@@ -217,7 +221,7 @@ impl WindowView {
         Some(canvas)
     }
 
-    pub(super) fn render_projects_grid(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_projects_grid(&mut self, cx: &mut Context<Self>) -> AnyElement {
         // Restore the grid scroll position saved when project focus was entered,
         // deferred from unfocus so the overview can re-expand first. We wait until
         // the scroll handle reports overflow (max_offset > 0), which means the
@@ -264,7 +268,7 @@ impl WindowView {
         // Sync project columns to handle newly added projects
         self.sync_project_columns(cx);
 
-        let visible_projects: Vec<_> = {
+        let visible_projects: Vec<String> = {
             let workspace = self.workspace.read(cx);
             let fm = self.focus_manager.read(cx);
             // When zoomed, show only the zoomed project's column
@@ -283,6 +287,43 @@ impl WindowView {
             }
         };
 
+        // The search bar narrows what the overview was going to show, and
+        // only that: folder filter, hidden projects and focus came first.
+        let Some(agents) = self.shown_overview(cx) else {
+            return self.render_grid(visible_projects, cx);
+        };
+        let narrowed = self.narrow_overview(agents, &visible_projects, cx);
+        self.prune_overview_filter(agents, &narrowed.facets);
+        let bar = self.render_overview_bar(agents, &narrowed, cx);
+        let grid = if narrowed.shown.is_empty() && narrowed.total > 0 {
+            prune_pane_map(self.window_id, &std::collections::HashSet::new());
+            self.render_overview_no_match(agents, cx)
+        } else {
+            self.render_grid(narrowed.shown, cx)
+        };
+        div()
+            .id("overview")
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(bar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(grid),
+            )
+            .into_any_element()
+    }
+
+    /// The grid itself — columns, rows or canvas — over `visible_projects`.
+    fn render_grid(&mut self, visible_projects: Vec<String>, cx: &mut Context<Self>) -> AnyElement {
         let num_projects = visible_projects.len();
 
         // Evict stale pane map entries for projects no longer rendered
@@ -1609,8 +1650,9 @@ impl Render for WindowView {
                                         // second panel repeating the same
                                         // thing. How every column is arranged
                                         // and what it opens on are picked from
-                                        // the footer, so nothing sits between
-                                        // this and the grid.
+                                        // the footer. The one thing above the
+                                        // grid is the overview's search bar:
+                                        // narrowing it is not a setting.
                                         None => d.child(self.render_projects_grid(cx)),
                                     }),
                             ),
