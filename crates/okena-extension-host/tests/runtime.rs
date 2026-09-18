@@ -71,7 +71,7 @@ fn a_component_built_with_the_sdk_loads_describes_and_refreshes() {
 
     let (actions, queries) = p.instance.describe().expect("describe");
     let ids: Vec<_> = actions.iter().map(|a| a.id.as_str()).collect();
-    assert_eq!(ids, ["launch", "wipe"]);
+    assert_eq!(ids, ["launch", "wipe", "undeclared"]);
     assert!(actions[1].destructive && actions[1].agent_callable);
     assert_eq!(queries[0].id, "echo");
 
@@ -79,7 +79,7 @@ fn a_component_built_with_the_sdk_loads_describes_and_refreshes() {
     let ExtNode::Stack { children } = &view.nodes[view.root as usize] else {
         panic!("root is the stack: {view:?}")
     };
-    assert_eq!(children.len(), 2);
+    assert_eq!(children.len(), 3);
     let ExtNode::Table { table } = &view.nodes[children[0] as usize] else {
         panic!("first child is the table")
     };

@@ -22,6 +22,7 @@ impl Extension for Probe {
         Info::new()
             .action(Action::new("launch", "Investigate").launches_agent(AgentMode::Start))
             .action(Action::new("wipe", "Wipe").destructive().agent_callable())
+            .action(Action::new("undeclared", "Run an undeclared command"))
             .query(Query::new("echo", "Runs echo"))
     }
 
@@ -37,7 +38,8 @@ impl Extension for Probe {
                 .build(),
         );
         let count = view.add(ui::text(format!("refresh {}", self.refreshes)));
-        let root = view.stack([table, count]);
+        let actions = view.add(ui::actions(["undeclared"]));
+        let root = view.stack([table, count, actions]);
         Ok(Refresh::new(view.finish(root)).status(format!("{} rows", 1), None))
     }
 
@@ -50,6 +52,8 @@ impl Extension for Probe {
                 ))
             }
             "wipe" => Ok(ActionOutcome::success(format!("wiped {}", request.items.len()))),
+            // `ls` is not in the manifest: okena refuses it.
+            "undeclared" => Command::new("ls").arg("/").run().map(ActionOutcome::success),
             other => Err(format!("unknown action {other}")),
         }
     }
