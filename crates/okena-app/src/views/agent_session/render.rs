@@ -319,13 +319,18 @@ impl AgentSessionPanel {
         if let Some(agent) = &info.agent {
             facts.push(self.chip(agent.clone(), t.text_secondary, cx));
         }
-        facts.push(if info.mcp {
-            self.chip("okena mcp".to_string(), t.success, cx)
+        if let Some(closed_at) = info.closed_at {
+            let ago = okena_ui::ago::format_ago(closed_at, okena_ui::ago::now_millis());
+            facts.push(self.chip(format!("closed {ago}"), t.text_muted, cx));
         } else {
-            // Not an error: an agent started outside okena simply was not
-            // handed the config, so it cannot report back.
-            self.chip("no okena mcp".to_string(), t.text_muted, cx)
-        });
+            facts.push(if info.mcp {
+                self.chip("okena mcp".to_string(), t.success, cx)
+            } else {
+                // Not an error: an agent started outside okena simply was not
+                // handed the config, so it cannot report back.
+                self.chip("no okena mcp".to_string(), t.text_muted, cx)
+            });
+        }
 
         body = body
             .child(self.section_heading("SESSION", None, cx))
@@ -337,7 +342,11 @@ impl AgentSessionPanel {
                     .justify_between()
                     .gap(px(6.0))
                     .child(h_flex().min_w_0().gap(px(4.0)).flex_wrap().children(facts))
-                    .child(self.render_controls(info, cx)),
+                    // A closed session has no agent to act on: bringing it
+                    // back is the closed view's one button, beside this panel.
+                    .when(!info.closed(), |row| {
+                        row.child(self.render_controls(info, cx))
+                    }),
             )
             .child(
                 h_flex()
@@ -376,6 +385,12 @@ impl AgentSessionPanel {
                 );
             }
             body = body.child(attention);
+        }
+
+        // What a closed agent last said, since nothing is running to show it:
+        // where it was when it was closed is what you reopen it to continue.
+        if info.closed() {
+            body = body.child(self.render_last_report(info, cx));
         }
 
         // The agent's own suggested next steps, as one-click instructions.
@@ -484,34 +499,129 @@ impl AgentSessionPanel {
 
         // ── Teardown ─────────────────────────────────────────────────────────
         //
+        // Close beside Delete: both end the session's place in the Agents
+        // list, but Close keeps everything and Delete takes it down.
         if self.density.allows_delete() {
             body = body.child(match self.pending_delete {
                 Some(choice) => self.render_delete_confirm(info, choice, cx),
-                None => div()
-                    .id("agent-panel-delete")
-                    .cursor_pointer()
+                None => h_flex()
                     .mt(px(10.0))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(with_alpha(t.error, 0.1)))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.error))
-                    .child("Delete")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            // Two steps on purpose: this removes checkouts.
-                            // The defaults come back every time it opens.
-                            this.pending_delete = Some(DeleteChoice::default());
-                            cx.notify();
-                        }),
+                    .gap(px(4.0))
+                    .when(!info.closed(), |row| {
+                        row.child(
+                            div()
+                                .id("agent-panel-close")
+                                .cursor_pointer()
+                                .px(px(8.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(rgb(t.bg_hover)))
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_secondary))
+                                .child("Close")
+                                .tooltip(|window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(
+                                        "Stop the agent and move it to closed agents, \
+                                         keeping its worktrees and everything it had",
+                                    )
+                                    .build(window, cx)
+                                })
+                                // No confirm card: nothing is lost, and the
+                                // closed view resumes it.
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _, _window, cx| this.close_session(cx)),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id("agent-panel-delete")
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(px(4.0))
+                            .hover(|s| s.bg(with_alpha(t.error, 0.1)))
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.error))
+                            .child("Delete")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _window, cx| {
+                                    // Two steps on purpose: this removes
+                                    // checkouts. The defaults come back every
+                                    // time it opens.
+                                    this.pending_delete = Some(DeleteChoice::default());
+                                    cx.notify();
+                                }),
+                            ),
                     )
                     .into_any_element(),
             });
         }
 
         body.into_any_element()
+    }
+
+    /// What a closed agent last reported: its state, its status line, its
+    /// question and what it suggested — read-only, with nothing to send them to.
+    fn render_last_report(&self, info: &AgentSessionInfo, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let mut report = v_flex().gap(px(4.0)).child(self.section_heading("LAST REPORT", None, cx));
+        if info.reported.is_none() && info.status.is_none() && info.question.is_none() {
+            return report
+                .child(self.note("It reported nothing before it was closed.", cx))
+                .into_any_element();
+        }
+        let state = info.reported.map(|state| {
+            let color = if state.wants_attention() {
+                t.warning
+            } else {
+                t.text_secondary
+            };
+            self.chip(state.label().to_string(), color, cx)
+        });
+        report = report.child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .items_start()
+                .gap(px(6.0))
+                .children(state)
+                .children(info.status.clone().map(|status| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_secondary))
+                        .child(status)
+                        .into_any_element()
+                })),
+        );
+        if let Some(question) = &info.question {
+            report = report.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .border_l_2()
+                    .border_color(rgb(t.border))
+                    .bg(rgb(t.bg_secondary))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_primary))
+                    .child(question.clone()),
+            );
+        }
+        if !info.suggestions.is_empty() {
+            report = report.child(
+                h_flex().gap(px(4.0)).flex_wrap().children(
+                    info.suggestions
+                        .iter()
+                        .map(|s| self.chip(s.label.clone(), t.text_muted, cx)),
+                ),
+            );
+        }
+        report.into_any_element()
     }
 
     /// The agent's suggested next steps, each a button that sends it.

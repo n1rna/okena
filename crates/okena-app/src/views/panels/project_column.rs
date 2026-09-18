@@ -91,6 +91,9 @@ enum ColumnContent {
     Creating,
     /// Bookmark project with no terminal attached.
     Empty,
+    /// A closed agent session: no terminal, a way to bring it back, and its
+    /// panel beside that.
+    Closed,
 }
 
 /// Pick the content branch for a project column.
@@ -113,6 +116,10 @@ fn column_content(project: &ProjectData, closing: bool) -> ColumnContent {
 
     if closing && !has_terminals {
         ColumnContent::Closing
+    } else if project.is_closed() {
+        // Checked before the layout: a closed session has none, but its column
+        // is its history entry, not an empty bookmark offering a terminal.
+        ColumnContent::Closed
     } else if project.layout.is_some() {
         ColumnContent::Layout
     } else if project.is_creating {
@@ -493,7 +500,10 @@ impl ProjectColumn {
     /// to sit beside nor anything settled to describe.
     fn info_available(&self, content: ColumnContent) -> bool {
         self.info_panel_ctx.is_some()
-            && matches!(content, ColumnContent::Layout | ColumnContent::Empty)
+            && matches!(
+                content,
+                ColumnContent::Layout | ColumnContent::Empty | ColumnContent::Closed
+            )
     }
 
     /// Whether this column is currently showing info rather than its terminal.
@@ -503,6 +513,11 @@ impl ProjectColumn {
     /// flipping it always affects every column.
     fn resolve_show_info(&mut self, content: ColumnContent, cx: &App) -> bool {
         let available = self.info_available(content);
+        // A closed session's panel is all there is to see of it: always shown,
+        // whatever the switch says.
+        if available && content == ColumnContent::Closed {
+            return true;
+        }
         let window_flag = self.workspace.read(cx).grid_show_info(self.window_id);
         reconcile_info(
             available,
@@ -1382,6 +1397,152 @@ impl ProjectColumn {
             )
     }
 
+    /// A closed agent session: where its terminal was, the way to bring it
+    /// back; beside it, its panel with everything it had.
+    ///
+    /// In a column too narrow for both, the way back sits above the panel
+    /// rather than replacing it — neither is any use without the other.
+    fn render_closed(&mut self, project: &ProjectData, cx: &mut Context<Self>) -> AnyElement {
+        if self.info_panel_fits_beside() {
+            return self.render_with_info(
+                project,
+                |this, cx| Some(this.render_closed_state(false, cx)),
+                cx,
+            );
+        }
+        let panel = self.info_panel(project, cx);
+        v_flex()
+            .id("project-column-content")
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .child(self.render_closed_state(true, cx))
+            .children(panel.map(|panel| {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .border_t_1()
+                    .border_color(rgb(theme(cx).border))
+                    .child(panel.view())
+            }))
+            .into_any_element()
+    }
+
+    /// The closed view's main action: resume the conversation, start again
+    /// when okena cannot resume it, or say why neither is possible.
+    fn render_closed_state(&mut self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+        use crate::views::agent_session::{AgentSessionInfo, ReopenChoice};
+        let t = theme(cx);
+        let Some(info) =
+            AgentSessionInfo::collect(self.workspace.read(cx), &self.terminals, &self.project_id)
+        else {
+            return div().into_any_element();
+        };
+        let choice = info.reopen_choice();
+        let panel = match &self.info_panel {
+            Some(InfoPanel::Agent(panel)) => Some(panel.clone()),
+            _ => None,
+        };
+        let busy = panel.as_ref().is_some_and(|p| p.read(cx).reopening());
+        let enabled = choice.enabled() && !busy && panel.is_some();
+        let closed = info
+            .closed_at
+            .map(|at| {
+                format!(
+                    "Closed {}",
+                    okena_ui::ago::format_ago(at, okena_ui::ago::now_millis())
+                )
+            })
+            .unwrap_or_default();
+        let hint = match choice {
+            ReopenChoice::Resume => "Picks the conversation up where it left off.",
+            ReopenChoice::StartAgain => {
+                "okena cannot resume this agent, so this starts a new conversation."
+            }
+            ReopenChoice::WorktreeRemoved => {
+                "The directory it ran in is gone, so it can no longer run there."
+            }
+        };
+        let icon = match choice {
+            ReopenChoice::Resume => "icons/refresh.svg",
+            ReopenChoice::StartAgain => "icons/play.svg",
+            ReopenChoice::WorktreeRemoved => "icons/git-branch.svg",
+        };
+
+        let button = h_flex()
+            .id("closed-agent-reopen")
+            .px(px(16.0))
+            .py(px(8.0))
+            .gap(px(8.0))
+            .items_center()
+            .rounded(px(6.0))
+            .when(enabled, |d| {
+                d.cursor_pointer()
+                    .bg(rgb(t.button_primary_bg))
+                    .hover(|s| s.bg(rgb(t.button_primary_hover)))
+            })
+            .when(!enabled, |d| {
+                d.bg(rgb(t.bg_secondary))
+                    .border_1()
+                    .border_color(rgb(t.border))
+            })
+            .child(svg().path(icon).size(px(14.0)).text_color(rgb(if enabled {
+                t.button_primary_fg
+            } else {
+                t.text_muted
+            })))
+            .child(
+                div()
+                    .text_size(ui_text_md(cx))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(if enabled {
+                        t.button_primary_fg
+                    } else {
+                        t.text_muted
+                    }))
+                    .child(if busy { "Starting…" } else { choice.label() }),
+            )
+            .when_some(panel.filter(|_| enabled), |d, panel| {
+                let fresh = choice.fresh();
+                d.on_click(move |_, _window, cx| {
+                    panel.update(cx, |panel, cx| panel.reopen(fresh, cx));
+                })
+            });
+
+        v_flex()
+            .items_center()
+            .justify_center()
+            .when(compact, |d| d.w_full().py(px(16.0)))
+            .when(!compact, |d| d.size_full())
+            .gap(px(12.0))
+            .bg(rgb(t.bg_primary))
+            .when(!compact, |d| {
+                d.child(
+                    svg()
+                        .path("icons/history.svg")
+                        .size(px(40.0))
+                        .text_color(rgb(t.text_muted)),
+                )
+            })
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(closed),
+            )
+            .child(button)
+            .child(
+                div()
+                    .max_w(px(280.0))
+                    .text_center()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(hint),
+            )
+            .into_any_element()
+    }
+
     /// Placeholder shown while the daemon is still materializing the project's
     /// directory — a worktree checkout, or a clone of a remote repository.
     fn render_creating_state(
@@ -1605,7 +1766,10 @@ impl Render for ProjectColumn {
                 // Reconciled once per frame, before the header reads it, so
                 // the toggle and the body always agree.
                 let show_info = self.resolve_show_info(content_kind, cx);
-                let info_state = self.info_available(content_kind).then_some(show_info);
+                // No info toggle on a closed session: its panel always shows.
+                let info_state = (self.info_available(content_kind)
+                    && content_kind != ColumnContent::Closed)
+                    .then_some(show_info);
 
                 // Soft tinted background based on folder color (when enabled)
                 let bg_color = if crate::settings::settings(cx).color_tinted_background {
@@ -1673,6 +1837,7 @@ impl Render for ProjectColumn {
                         )
                         .into_any_element(),
                     ColumnContent::Empty => self.render_empty_state(cx).into_any_element(),
+                    ColumnContent::Closed => self.render_closed(&project, cx),
                 };
 
                 // Get current branch for commit log popover and update git header.
@@ -1802,6 +1967,7 @@ mod tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
             agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
@@ -2014,6 +2180,19 @@ mod tests {
             ColumnContent::Layout,
             "a fresh worktree's uninitialized slots still render panes, not a placeholder",
         );
+    }
+
+    #[test]
+    fn a_closed_session_shows_its_closed_view_not_an_empty_bookmark() {
+        let mut project = project_with_name("QBL-1");
+        project.custom_session = Some("audit".into());
+        project.closed_at = Some(1);
+        assert_eq!(column_content(&project, false), ColumnContent::Closed);
+
+        // Reopened: the snapshot that clears the mark brings its terminal.
+        project.closed_at = None;
+        project.layout = Some(terminal_layout("t1"));
+        assert_eq!(column_content(&project, false), ColumnContent::Layout);
     }
 
     #[test]

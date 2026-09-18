@@ -158,6 +158,9 @@ pub struct Sidebar {
     /// mint `WindowId::Extra(uuid)` and thread it in here so each `Sidebar`
     /// sees only its own per-window state.
     pub(crate) list: SidebarList,
+    /// Whether the Agents tab shows the closed sessions — its history — in
+    /// place of the live ones. Swapped by the header's history button.
+    pub(crate) show_closed_agents: bool,
     pub(crate) window_id: WindowId,
     pub(crate) workspace: Entity<Workspace>,
     pub(crate) focus_manager: Entity<okena_workspace::focus::FocusManager>,
@@ -286,6 +289,7 @@ impl Sidebar {
 
         Self {
             list: SidebarList::default(),
+            show_closed_agents: false,
             window_id,
             workspace,
             focus_manager,

@@ -849,6 +849,19 @@ pub fn execute_action(
             settings,
             cx,
         ),
+        ActionRequest::AgentClose { project_id } => {
+            terminal::close_agent(ws, focus_manager, project_id, backend, terminals, cx)
+        }
+        ActionRequest::AgentReopen { project_id, fresh } => terminal::reopen_agent(
+            ws,
+            focus_manager,
+            project_id,
+            fresh,
+            backend,
+            terminals,
+            settings,
+            cx,
+        ),
         ActionRequest::TaskDeleteWorkspace {
             project_id,
             force,
@@ -1863,10 +1876,11 @@ mod reconnect_shell_tests {
     }
 
     #[derive(Default)]
-    struct RecordingBackend {
-        created_shells: Mutex<Vec<Option<ShellType>>>,
+    pub(super) struct RecordingBackend {
+        pub(super) created_shells: Mutex<Vec<Option<ShellType>>>,
         reconnected_shells: Mutex<Vec<Option<ShellType>>>,
         plans: Mutex<Vec<TerminalLaunchPlan>>,
+        pub(super) killed: Mutex<Vec<String>>,
     }
 
     impl TerminalBackend for RecordingBackend {
@@ -1929,7 +1943,12 @@ mod reconnect_shell_tests {
             Ok(terminal_id.to_string())
         }
 
-        fn kill(&self, _terminal_id: &str) {}
+        fn kill(&self, terminal_id: &str) {
+            self.killed
+                .lock()
+                .expect("killed lock")
+                .push(terminal_id.to_string());
+        }
         fn capture_buffer(&self, _terminal_id: &str) -> Option<std::path::PathBuf> {
             None
         }
@@ -1947,7 +1966,7 @@ mod reconnect_shell_tests {
         }
     }
 
-    struct TestCx;
+    pub(super) struct TestCx;
 
     impl WorkspaceCx for TestCx {
         fn notify(&mut self) {}
@@ -1991,6 +2010,7 @@ mod reconnect_shell_tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
             agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig::default(),
@@ -2153,5 +2173,252 @@ mod reconnect_shell_tests {
         assert!(plans[0].initial_command.is_some());
         assert_eq!(plans[1].route, wsl);
         assert!(plans[1].initial_command.is_none());
+    }
+}
+
+#[cfg(test)]
+mod agent_close_tests {
+    //! Closing an agent session and reopening it, through the same entry
+    //! point the daemon calls.
+    use super::reconnect_shell_tests::{RecordingBackend, TestCx};
+    use super::{ActionResult, AppSettings, execute_action};
+    use crate::workspace::focus::FocusManager;
+    use crate::workspace::state::{WindowId, Workspace, WorkspaceData};
+    use okena_core::api::ActionRequest;
+    use okena_terminal::TerminalsRegistry;
+    use okena_terminal::shell_config::ShellType;
+    use std::sync::Arc;
+
+    fn task_ref() -> serde_json::Value {
+        serde_json::json!({
+            "id": { "provider": "linear", "external_id": "u1" },
+            "display_key": "QBL-1", "title": "t", "url": "http://x",
+        })
+    }
+
+    /// A repo, its worktree on QBL-1, and a Claude session on QBL-1 running
+    /// in `session_dir` with one terminal, a report and a tracked PR.
+    fn workspace(session_dir: &str, command: &str, launch_args: &[&str]) -> Workspace {
+        let data: WorkspaceData = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "projects": [
+                { "id": "repo", "name": "okena", "path": "/p/okena", "layout": null,
+                  "worktree_ids": ["wt"] },
+                { "id": "wt", "name": "okena (QBL-1)", "path": session_dir, "layout": null,
+                  "worktree_info": {
+                      "parent_project_id": "repo", "main_repo_path": "/p/okena",
+                      "worktree_path": session_dir, "branch_name": "feat/qbl-1",
+                  },
+                  "task_ref": task_ref() },
+                { "id": "s", "name": "QBL-1", "path": session_dir,
+                  "layout": { "type": "terminal", "terminal_id": "t1", "agent": true },
+                  "task_ref": task_ref(),
+                  "default_shell": { "type": "Custom", "path": command, "args": launch_args },
+                  "agent": {
+                      "status": "PR open, waiting on review",
+                      "state": "ready_for_review",
+                      "question": "Merge it?",
+                      "tracked_prs": [{
+                          "project": "okena", "repo_path": "/p/okena", "number": 7,
+                          "url": "https://github.com/o/r/pull/7", "state": "Open",
+                      }],
+                  } },
+            ],
+            "project_order": ["repo", "wt", "s"],
+            "folders": [],
+        }))
+        .expect("workspace fixture");
+        Workspace::new(data)
+    }
+
+    struct Daemon {
+        ws: Workspace,
+        fm: FocusManager,
+        backend: RecordingBackend,
+        terminals: TerminalsRegistry,
+        settings: AppSettings,
+    }
+
+    impl Daemon {
+        fn new(ws: Workspace) -> Self {
+            Self {
+                ws,
+                fm: FocusManager::new(),
+                backend: RecordingBackend::default(),
+                terminals: Arc::new(Default::default()),
+                settings: AppSettings::default(),
+            }
+        }
+
+        fn run(&mut self, action: ActionRequest) -> ActionResult {
+            execute_action(
+                action,
+                &mut self.ws,
+                WindowId::Main,
+                &mut self.fm,
+                &self.backend,
+                &self.terminals,
+                &self.settings,
+                &mut TestCx,
+            )
+        }
+
+        fn close(&mut self) -> ActionResult {
+            self.run(ActionRequest::AgentClose {
+                project_id: "s".into(),
+            })
+        }
+
+        fn reopen(&mut self, fresh: bool) -> ActionResult {
+            self.run(ActionRequest::AgentReopen {
+                project_id: "s".into(),
+                fresh,
+            })
+        }
+
+        fn session(&self) -> &crate::workspace::state::ProjectData {
+            self.ws.project("s").expect("the session is kept")
+        }
+
+        fn last_spawned(&self) -> Option<ShellType> {
+            self.backend
+                .created_shells
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .flatten()
+        }
+    }
+
+    fn ok(result: ActionResult) {
+        if let ActionResult::Err(e) = result {
+            panic!("expected success, got: {e}");
+        }
+    }
+
+    fn err(result: ActionResult) -> String {
+        match result {
+            ActionResult::Err(e) => e,
+            ActionResult::Ok(_) => panic!("expected a refusal"),
+        }
+    }
+
+    #[test]
+    fn closing_stops_the_agent_and_keeps_the_record_and_its_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let mut d = Daemon::new(workspace(path, "claude", &["--session-id", "abc", "Work on QBL-1"]));
+        let before = d.session().clone();
+
+        ok(d.close());
+
+        let s = d.session();
+        assert!(s.is_closed());
+        assert_eq!(s.layout, None, "its terminals are gone");
+        assert_eq!(*d.backend.killed.lock().unwrap(), ["t1"]);
+        // Everything the panel shows stays.
+        assert_eq!(s.agent, before.agent);
+        assert_eq!(s.default_shell, before.default_shell);
+        assert_eq!(s.task_ref, before.task_ref);
+        assert_eq!(s.path, before.path);
+        // And nothing else was touched: the worktree, its branch, its repo.
+        let wt = d.ws.project("wt").expect("the worktree stays");
+        assert_eq!(
+            wt.worktree_info.as_ref().map(|w| w.branch_name.as_str()),
+            Some("feat/qbl-1")
+        );
+        assert_eq!(d.ws.project("repo").unwrap().worktree_ids, ["wt"]);
+        assert!(dir.path().is_dir());
+    }
+
+    #[test]
+    fn stopping_the_agent_does_not_close_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let mut d = Daemon::new(workspace(path, "claude", &["--session-id", "abc"]));
+        // What Stop sends.
+        ok(d.run(ActionRequest::AgentStop {
+            project_id: "s".into(),
+        }));
+        assert_eq!(*d.backend.killed.lock().unwrap(), ["t1"]);
+        assert!(!d.session().is_closed(), "only Close closes");
+    }
+
+    #[test]
+    fn reopening_resumes_the_same_conversation_and_clears_the_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let mut d = Daemon::new(workspace(path, "claude", &["--session-id", "abc", "Work on QBL-1"]));
+        ok(d.close());
+
+        ok(d.reopen(false));
+
+        assert!(!d.session().is_closed());
+        let layout = d.session().layout.as_ref().expect("a pane to run in");
+        assert!(layout.agent_terminal_path().is_some(), "in its own agent pane");
+        match d.last_spawned() {
+            Some(ShellType::Custom { path, args }) => {
+                assert_eq!(path, "claude");
+                assert_eq!(args[..2], ["--resume", "abc"]);
+                assert!(!args.iter().any(|a| a.contains("QBL-1")), "{args:?}");
+            }
+            other => panic!("expected the resume command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_agent_okena_cannot_resume_starts_again_from_its_brief() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let mut d = Daemon::new(workspace(path, "codex", &["Work on QBL-1"]));
+        ok(d.close());
+
+        // Resuming is refused, and leaves it closed.
+        assert!(err(d.reopen(false)).contains("resume"));
+        assert!(d.session().is_closed());
+
+        ok(d.reopen(true));
+        assert!(!d.session().is_closed());
+        let layout = d.session().layout.as_ref().expect("a pane to run in");
+        assert!(layout.agent_terminal_path().is_some(), "in its own agent pane");
+        match d.last_spawned() {
+            Some(ShellType::Custom { path, args }) => {
+                assert_eq!(path, "codex");
+                assert!(args.iter().any(|a| a.contains("QBL-1")), "{args:?}");
+            }
+            other => panic!("expected the launch command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_session_whose_worktree_was_removed_cannot_be_reopened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone");
+        let mut d = Daemon::new(workspace(
+            path.to_str().unwrap(),
+            "claude",
+            &["--session-id", "abc"],
+        ));
+        ok(d.close());
+
+        for fresh in [false, true] {
+            let e = err(d.reopen(fresh));
+            assert!(e.starts_with("Its worktree was removed"), "{e}");
+            assert!(d.session().is_closed(), "a refused reopen leaves it closed");
+        }
+        assert!(d.backend.created_shells.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_an_agent_session_can_be_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let mut d = Daemon::new(workspace(path, "claude", &[]));
+        let e = err(d.run(ActionRequest::AgentClose {
+            project_id: "repo".into(),
+        }));
+        assert!(e.contains("agent session"), "{e}");
+        assert!(!d.ws.project("repo").unwrap().is_closed());
     }
 }

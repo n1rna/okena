@@ -19,8 +19,8 @@ mod render;
 pub use detect::{AGENT_COMMANDS, detect_agent};
 pub use launch::{launch_option, launch_options, launcher_session, no_agent_option};
 pub use model::{
-    AgentSessionInfo, AgentSessionKind, RelatedAgent, RelatedWorkspace, SessionActivity,
-    session_kind,
+    AgentSessionInfo, AgentSessionKind, RelatedAgent, RelatedWorkspace, ReopenChoice,
+    SessionActivity, session_kind,
 };
 
 use crate::workspace::focus::FocusManager;
@@ -496,6 +496,82 @@ impl AgentSessionPanel {
             "Could not stop the agent",
             cx,
         );
+    }
+
+    /// Close the session: stop the agent and move it to the Agents history.
+    ///
+    /// No confirmation: nothing is lost. The record, worktrees and branches
+    /// all stay, and the closed view offers to resume it.
+    fn close_session(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let daemon_id =
+            okena_transport::client::strip_prefix(&self.project_id, client.connection_id());
+        cx.spawn(async move |_this, cx| {
+            let result = smol::unblock(move || {
+                client.post_action(okena_core::api::ActionRequest::AgentClose {
+                    project_id: daemon_id,
+                })
+            })
+            .await;
+            if let Err(error) = result {
+                cx.update(|cx| {
+                    crate::views::panels::toast::ToastManager::error(
+                        format!("Could not close the agent: {error}"),
+                        cx,
+                    );
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Bring a closed session back: resume its conversation, or with `fresh`
+    /// start again from its brief. The session returns to the Agents list,
+    /// and the sidebar goes back to it so the session is found there,
+    /// selected.
+    pub fn reopen(&mut self, fresh: bool, cx: &mut Context<Self>) {
+        if self.sending {
+            return;
+        }
+        self.sending = true;
+        cx.notify();
+        let client = self.client.clone();
+        let daemon_id =
+            okena_transport::client::strip_prefix(&self.project_id, client.connection_id());
+        let broker = self.request_broker.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client.post_action(okena_core::api::ActionRequest::AgentReopen {
+                    project_id: daemon_id,
+                    fresh,
+                })
+            })
+            .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.sending = false;
+                    cx.notify();
+                });
+                match result {
+                    Ok(_) => broker.update(cx, |broker, cx| {
+                        broker.push_sidebar_request(
+                            crate::workspace::requests::SidebarRequest::ShowLiveAgents,
+                            cx,
+                        );
+                    }),
+                    Err(error) => crate::views::panels::toast::ToastManager::error(
+                        format!("Could not reopen the agent: {error}"),
+                        cx,
+                    ),
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Whether a reopen is on its way, so the closed view can hold its button.
+    pub fn reopening(&self) -> bool {
+        self.sending
     }
 
     /// Tear down the session, and with `choice` its worktrees and branches.

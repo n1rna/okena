@@ -35,6 +35,8 @@ pub fn compute_visible_projects<'a>(
             .projects
             .iter()
             .filter(|p| p.is_any_agent_session())
+            // A closed session lives in the Agents history, not the overview.
+            .filter(|p| !p.is_closed())
             .filter(|p| !window.hidden_project_ids.contains(&p.id))
             .collect();
     }
@@ -255,6 +257,7 @@ mod tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
             agent: None,
             folder_color: FolderColor::default(),
             hooks: HooksConfig::default(),
@@ -346,6 +349,32 @@ mod tests {
             visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             ["a1", "s1"],
             "both kinds of session, no repos"
+        );
+    }
+
+    #[test]
+    fn agents_overview_leaves_closed_sessions_out_until_one_is_focused() {
+        let mut data = agents_overview(make_data(
+            vec![
+                make_agent_session("a1", "QBL-1"),
+                make_agent_session("a2", "QBL-2"),
+            ],
+            vec!["a1", "a2"],
+            &[],
+        ));
+        data.projects[0].closed_at = Some(1);
+        let window = data.main_window.clone();
+        let visible = compute_visible_projects(&data, None, false, &window);
+        assert_eq!(
+            visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["a2"]
+        );
+        // Opened from the history, it shows like any focused session.
+        let focused = "a1".to_string();
+        let visible = compute_visible_projects(&data, Some(&focused), true, &window);
+        assert_eq!(
+            visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["a1"]
         );
     }
 

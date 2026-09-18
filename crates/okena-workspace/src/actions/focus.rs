@@ -304,6 +304,7 @@ mod gpui_tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
             agent: None,
             folder_color: FolderColor::default(),
             hooks: Default::default(),

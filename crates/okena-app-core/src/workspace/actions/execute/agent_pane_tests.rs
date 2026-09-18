@@ -151,6 +151,7 @@ fn project(session: bool, default_shell: Option<ShellType>, layout: LayoutNode) 
         custom_session: session.then(|| "Session".to_string()),
         agent_purpose: None,
         context_projects: Vec::new(),
+        closed_at: None,
         agent: None,
         folder_color: Default::default(),
         hooks: HooksConfig::default(),

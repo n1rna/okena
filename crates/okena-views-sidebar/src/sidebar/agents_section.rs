@@ -94,7 +94,62 @@ struct SessionRow {
     status: Option<String>,
 }
 
+/// The closed agent sessions, most recently closed first.
+fn closed_sessions(
+    projects: &[okena_workspace::state::ProjectData],
+) -> Vec<&okena_workspace::state::ProjectData> {
+    let mut closed: Vec<_> = projects
+        .iter()
+        .filter(|p| p.is_closed() && p.agent_role().is_some())
+        .collect();
+    closed.sort_by(|a, b| {
+        b.closed_at
+            .cmp(&a.closed_at)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    closed
+}
+
 impl Sidebar {
+    /// How a session row names itself: its project info with a tidied name,
+    /// and what it is working on when that is not already the name.
+    ///
+    /// One place for both lists, so a closed session reads exactly as it did
+    /// while it was live.
+    fn session_identity(
+        &self,
+        p: &okena_workspace::state::ProjectData,
+        role: AgentRole,
+        workspace: &okena_workspace::state::Workspace,
+    ) -> (SidebarProjectInfo, Option<String>) {
+        // The subtitle used to repeat the name — a row read "add-login (spec)"
+        // over "add-login" — which cost a line to say nothing.
+        let subtitle = match role {
+            // A session refining a spec document has no change; its goal
+            // names the document instead.
+            AgentRole::Spec => p.spec_change.clone().or_else(|| p.custom_session.clone()),
+            AgentRole::Knowledge => p.custom_session.clone(),
+            AgentRole::Task | AgentRole::Implement => {
+                p.task_ref.as_ref().map(|t| t.display_key.clone())
+            }
+            AgentRole::Custom => p.custom_session.clone(),
+            // The repository it maps, or the repositories it links.
+            AgentRole::Scan => p.project_scan.clone(),
+        };
+        let mut info = SidebarProjectInfo::from_project(p, workspace, self.window_id);
+        // The badge says "spec"; the name saying "(spec)" as well says it
+        // twice. Stripped at display rather than left to a migration: the
+        // name is the user's to rename, and rewriting it under them would be
+        // worse than showing it tidily.
+        if let Some(suffix) = role.legacy_name_suffix()
+            && let Some(trimmed) = info.name.strip_suffix(suffix)
+        {
+            info.name = trimmed.to_string();
+        }
+        let subtitle = subtitle.filter(|s| s != &info.name);
+        (info, subtitle)
+    }
+
     /// Colour for a card state: the attention states stand out, the rest
     /// recede so the ones that need you are the ones you see.
     fn card_color(state: CardState, t: &okena_ui::theme::ThemeColors) -> u32 {
@@ -332,37 +387,14 @@ impl Sidebar {
 
         let mut sessions: Vec<SessionRow> = Vec::new();
         for p in workspace.data().projects.iter() {
-            // Spec first: a session can only be one kind, and checking the
-            // narrower marker first keeps that obvious.
             let Some(role) = p.agent_role() else {
                 continue;
             };
-            // What it is working on, when that is not already the name. The
-            // subtitle used to repeat it — a row read "add-login (spec)" over
-            // "add-login" — which cost a line to say nothing.
-            let subtitle = match role {
-                // A session refining a spec document has no change; its goal
-                // names the document instead.
-                AgentRole::Spec => p.spec_change.clone().or_else(|| p.custom_session.clone()),
-                AgentRole::Knowledge => p.custom_session.clone(),
-                AgentRole::Task | AgentRole::Implement => {
-                    p.task_ref.as_ref().map(|t| t.display_key.clone())
-                }
-                AgentRole::Custom => p.custom_session.clone(),
-                // The repository it maps, or the repositories it links.
-                AgentRole::Scan => p.project_scan.clone(),
-            };
-            let mut info = SidebarProjectInfo::from_project(p, workspace, self.window_id);
-            // The badge says "spec"; the name saying "(spec)" as well says it
-            // twice. Stripped at display rather than left to a migration: the
-            // name is the user's to rename, and rewriting it under them would
-            // be worse than showing it tidily.
-            if let Some(suffix) = role.legacy_name_suffix()
-                && let Some(trimmed) = info.name.strip_suffix(suffix)
-            {
-                info.name = trimmed.to_string();
+            // Closed sessions are the history's, behind the header's button.
+            if p.is_closed() {
+                continue;
             }
-            let subtitle = subtitle.filter(|s| s != &info.name);
+            let (info, subtitle) = self.session_identity(p, role, workspace);
             // Whether anything runs, live from the registry like the project
             // rows; what the agent is doing, from the daemon.
             let (running, activity) = {
@@ -451,5 +483,220 @@ impl Sidebar {
             .py(px(4.0))
             .children(groups)
             .into_any_element()
+    }
+
+    /// The closed agents: the history the header's button swaps in.
+    ///
+    /// Newest closed first, each row named as it was while live and saying
+    /// when it was closed. A row opens the session like a live one does,
+    /// where it can be resumed.
+    pub(super) fn render_closed_agents_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx);
+        let workspace = self.workspace.read(cx);
+        let focused_id = self.focus_manager.read(cx).focused_project_id().cloned();
+        let now = okena_ui::ago::now_millis();
+
+        let closed: Vec<_> = closed_sessions(&workspace.data().projects)
+            .into_iter()
+            .filter_map(|p| {
+                let role = p.agent_role()?;
+                let (info, subtitle) = self.session_identity(p, role, workspace);
+                let when = p
+                    .closed_at
+                    .map(|at| format!("closed {}", okena_ui::ago::format_ago(at, now)))
+                    .unwrap_or_default();
+                let focused = focused_id.as_deref() == Some(p.id.as_str());
+                Some((info, role, subtitle, when, focused))
+            })
+            .collect();
+        let rows: Vec<AnyElement> = closed
+            .into_iter()
+            .map(|(info, role, subtitle, when, focused)| {
+                self.render_closed_row(info, role, subtitle, when, focused, cx)
+            })
+            .collect();
+
+        // The way back, at the top of the list it replaced.
+        let back = h_flex()
+            .id("closed-agents-back")
+            .cursor_pointer()
+            .mx(px(8.0))
+            .px(px(6.0))
+            .py(px(4.0))
+            .gap(px(6.0))
+            .items_center()
+            .rounded(px(4.0))
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .child(
+                svg()
+                    .path("icons/arrow-left.svg")
+                    .size(px(12.0))
+                    .text_color(rgb(t.text_secondary)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(ui_text_ms(cx))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(t.text_secondary))
+                    .child("Closed agents"),
+            )
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(format!("{}", rows.len())),
+            )
+            .on_click(cx.listener(|this, _, _window, cx| this.toggle_closed_agents(cx)));
+
+        let body = if rows.is_empty() {
+            div()
+                .px(px(12.0))
+                .py(px(10.0))
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(t.text_muted))
+                .child(
+                    "No closed agents. Close one with Close on its session panel; \
+                     it stays here, ready to resume, until you delete it.",
+                )
+                .into_any_element()
+        } else {
+            v_flex()
+                .w_full()
+                .gap(px(6.0))
+                .px(px(8.0))
+                .children(rows)
+                .into_any_element()
+        };
+        v_flex()
+            .w_full()
+            .gap(px(4.0))
+            .py(px(4.0))
+            .child(back)
+            .child(body)
+            .into_any_element()
+    }
+
+    /// One closed session: kind, name and when it was closed, then what it
+    /// worked on.
+    fn render_closed_row(
+        &self,
+        info: SidebarProjectInfo,
+        role: AgentRole,
+        subtitle: Option<String>,
+        closed: String,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let id = info.id.clone();
+        let kind_color = role_color(role, &t);
+        v_flex()
+            .id(SharedString::from(format!("closed-agent-{id}")))
+            .cursor_pointer()
+            .w_full()
+            .min_w_0()
+            .gap(px(3.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(if focused {
+                okena_ui::theme::with_alpha(t.button_primary_bg, 0.7)
+            } else {
+                okena_ui::theme::with_alpha(t.border, 0.7)
+            })
+            .bg(if focused {
+                okena_ui::theme::with_alpha(t.button_primary_bg, 0.06)
+            } else {
+                okena_ui::theme::with_alpha(t.bg_secondary, 1.0)
+            })
+            .when(!focused, |d| {
+                d.hover(|s| s.bg(okena_ui::theme::with_alpha(t.bg_hover, 1.0)))
+            })
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(5.0))
+                            .rounded(px(3.0))
+                            .bg(okena_ui::theme::with_alpha(kind_color, 0.15))
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(kind_color))
+                            .child(role.badge()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(okena_ui::tokens::ui_text(13.0, cx))
+                            .text_color(rgb(t.text_secondary))
+                            .child(info.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(closed),
+                    ),
+            )
+            .children(subtitle.map(|text| {
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(text)
+                    .into_any_element()
+            }))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.focus_project_from_sidebar(id.clone(), true, cx);
+            }))
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod closed_tests {
+    use super::closed_sessions;
+    use okena_workspace::state::ProjectData;
+
+    fn session(id: &str, closed_at: Option<u64>) -> ProjectData {
+        let mut p: ProjectData = serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "path": "/p", "custom_session": "goal",
+        }))
+        .unwrap();
+        p.closed_at = closed_at;
+        p
+    }
+
+    #[test]
+    fn the_history_lists_closed_sessions_newest_closed_first() {
+        let repo: ProjectData = serde_json::from_value(serde_json::json!({
+            "id": "repo", "name": "repo", "path": "/p/repo", "closed_at": 9,
+        }))
+        .unwrap();
+        let projects = vec![
+            session("old", Some(100)),
+            session("live", None),
+            session("new", Some(300)),
+            repo,
+            session("mid", Some(200)),
+        ];
+        let ids: Vec<&str> = closed_sessions(&projects)
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        // Live sessions stay in the Agents list; a project that is not an
+        // agent session has no place in either.
+        assert_eq!(ids, ["new", "mid", "old"]);
     }
 }

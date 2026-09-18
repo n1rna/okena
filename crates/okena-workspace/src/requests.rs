@@ -211,6 +211,9 @@ pub enum SidebarRequest {
     QuickCreateWorktree {
         project_id: String,
     },
+    /// Show the live Agents list, leaving the closed agents' history: a
+    /// closed session was reopened, and belongs there again.
+    ShowLiveAgents,
 }
 
 /// Requests from the sidebar to the window's main content area.

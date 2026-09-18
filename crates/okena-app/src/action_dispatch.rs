@@ -1102,6 +1102,13 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::AgentStop { project_id } => ActionRequest::AgentStop {
             project_id: s(&project_id),
         },
+        ActionRequest::AgentClose { project_id } => ActionRequest::AgentClose {
+            project_id: s(&project_id),
+        },
+        ActionRequest::AgentReopen { project_id, fresh } => ActionRequest::AgentReopen {
+            project_id: s(&project_id),
+            fresh,
+        },
         ActionRequest::TaskDeleteWorkspace {
             project_id,
             force,

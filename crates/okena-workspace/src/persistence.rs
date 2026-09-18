@@ -1322,6 +1322,7 @@ pub fn default_workspace() -> WorkspaceData {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
             agent: None,
             folder_color: FolderColor::default(),
             hooks: super::settings::HooksConfig::default(),
@@ -1760,6 +1761,7 @@ mod tests {
             custom_session: None,
             agent_purpose: None,
             context_projects: Vec::new(),
+            closed_at: None,
             agent: None,
             folder_color: FolderColor::default(),
             hooks: super::super::settings::HooksConfig::default(),
@@ -2598,6 +2600,30 @@ mod tests {
             deserialized.main_window.project_widths.get("p1"),
             Some(&60.0)
         );
+    }
+
+    #[test]
+    fn a_closed_session_stays_closed_across_a_save_and_reload() {
+        let mut closed = make_project("closed");
+        closed.custom_session = Some("audit unwraps".to_string());
+        closed.closed_at = Some(1_700_000_000_000);
+        let mut open = make_project("open");
+        open.custom_session = Some("write docs".to_string());
+        let data = make_workspace(vec![closed, open], vec!["closed", "open"], vec![]);
+
+        // What save writes, through what load runs.
+        let saved = encode_workspace(&data).expect("encode");
+        let migrated = migrate_legacy_json(&saved).expect("legacy migration succeeds");
+        let mut reloaded = migrate_workspace(serde_json::from_str(&migrated).expect("parse"));
+        validate_workspace_data(&mut reloaded, false, SessionBackend::None);
+
+        let by_id = |id: &str| reloaded.projects.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(by_id("closed").closed_at, Some(1_700_000_000_000));
+        assert!(by_id("closed").is_closed());
+        assert_eq!(by_id("open").closed_at, None);
+        // An open session writes no mark at all, so older builds read it as
+        // they always did.
+        assert!(!saved.contains("\"closed_at\": null"), "{saved}");
     }
 
     #[test]

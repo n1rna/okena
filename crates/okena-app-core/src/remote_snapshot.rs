@@ -89,6 +89,10 @@ pub fn build_api_project(
         custom_session: p.custom_session.clone(),
         agent_purpose: p.agent_purpose.clone(),
         context_projects: p.context_projects.clone(),
+        closed_at: p.closed_at,
+        // Only a closed session asks: a live one is running in its directory,
+        // and a stat for every project on every snapshot would buy nothing.
+        cwd_missing: p.is_closed() && !std::path::Path::new(&p.path).is_dir(),
         agent: p.agent.clone(),
         verification_runs: p.verification_runs.clone(),
         pinned: p.pinned,
@@ -266,5 +270,33 @@ mod worktree_wire_tests {
             api.worktree_info.expect("worktree info").branch_name,
             "feat/x"
         );
+    }
+
+    #[test]
+    fn a_closed_session_says_whether_its_directory_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = |path: &std::path::Path, closed_at: Option<u64>| {
+            let mut p: ProjectData = serde_json::from_value(serde_json::json!({
+                "id": "s", "name": "session", "path": path, "custom_session": "audit",
+            }))
+            .unwrap();
+            p.closed_at = closed_at;
+            super::build_api_project(
+                &p,
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+            )
+        };
+        let gone = dir.path().join("removed-worktree");
+
+        let closed_gone = api(&gone, Some(5));
+        assert_eq!(closed_gone.closed_at, Some(5));
+        assert!(closed_gone.cwd_missing);
+        assert!(!api(dir.path(), Some(5)).cwd_missing);
+        // An open session is not asked: nothing reopens it.
+        assert!(!api(&gone, None).cwd_missing);
     }
 }
