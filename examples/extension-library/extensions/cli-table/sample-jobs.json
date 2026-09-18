@@ -1,0 +1,82 @@
+[
+  {
+    "id": "job-101",
+    "tenant": "acme",
+    "status": "running",
+    "attempts": 1,
+    "message": "importing invoices",
+    "minutes_ago": 5
+  },
+  {
+    "id": "job-102",
+    "tenant": "acme",
+    "status": "blocked",
+    "attempts": 4,
+    "message": "waiting on lock orders#7",
+    "minutes_ago": 95
+  },
+  {
+    "id": "job-103",
+    "tenant": "acme",
+    "status": "done",
+    "attempts": 1,
+    "message": "",
+    "minutes_ago": 300
+  },
+  {
+    "id": "job-201",
+    "tenant": "globex",
+    "status": "running",
+    "attempts": 3,
+    "message": "retrying: upstream 503",
+    "minutes_ago": 62
+  },
+  {
+    "id": "job-202",
+    "tenant": "globex",
+    "status": "queued",
+    "attempts": 0,
+    "message": "",
+    "minutes_ago": 2
+  },
+  {
+    "id": "job-203",
+    "tenant": "globex",
+    "status": "blocked",
+    "attempts": 6,
+    "message": "schema mismatch on table tenants",
+    "minutes_ago": 240
+  },
+  {
+    "id": "job-301",
+    "tenant": "initech",
+    "status": "running",
+    "attempts": 1,
+    "message": "exporting TPS reports",
+    "minutes_ago": 12
+  },
+  {
+    "id": "job-302",
+    "tenant": "initech",
+    "status": "done",
+    "attempts": 2,
+    "message": "",
+    "minutes_ago": 600
+  },
+  {
+    "id": "job-303",
+    "tenant": "initech",
+    "status": "blocked",
+    "attempts": 2,
+    "message": "credentials expired",
+    "minutes_ago": 45
+  },
+  {
+    "id": "job-401",
+    "tenant": "umbrella",
+    "status": "running",
+    "attempts": 5,
+    "message": "stuck in phase 2",
+    "minutes_ago": 180
+  }
+]

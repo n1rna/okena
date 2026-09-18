@@ -34,6 +34,7 @@ pub mod command_loop;
 mod context;
 pub mod daemon;
 pub mod daemon_config;
+pub mod extensions;
 pub mod git_poll;
 pub mod observers;
 pub mod pty_loop;

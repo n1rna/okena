@@ -1,0 +1,21 @@
+[package]
+name = "my-extension"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The SDK, from the okena repo. Pin a tag or commit your okena understands.
+okena-extension-api = { git = "https://github.com/n1rna/okena", branch = "main" }
+serde = { version = "1.0", features = ["derive"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+# Its own workspace, so it builds on its own wherever it is copied.
+[workspace]

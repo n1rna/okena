@@ -219,6 +219,7 @@ pub struct DaemonCore {
     /// Receiving end of the command bridge — the remote server sends commands,
     /// the command loop consumes them.
     bridge_rx: BridgeReceiver,
+    self_bridge: bridge::BridgeSender,
     /// Terminal backend over the PTY manager, threaded into the command loop's
     /// `execute_action` / `ensure_terminal`.
     backend: Arc<dyn TerminalBackend>,
@@ -442,6 +443,9 @@ impl DaemonCore {
         let active_connections = Arc::new(AtomicU64::new(0));
         let shutdown_requested = Arc::new(tokio::sync::Notify::new());
         let (bridge_tx, bridge_rx) = bridge::bridge_channel();
+        // The daemon's own way into its command loop, for extension actions
+        // that start agent sessions.
+        let self_bridge = bridge_tx.clone();
         let (git_poll_trigger_tx, git_poll_trigger_rx) = mpsc::unbounded_channel();
 
         // ── 6. Start the remote server ───────────────────────────────────────
@@ -488,6 +492,7 @@ impl DaemonCore {
             reactor,
             remote_server,
             bridge_rx,
+            self_bridge,
             backend,
             terminals,
             pty_manager,
@@ -519,6 +524,7 @@ impl DaemonCore {
             reactor,
             mut remote_server,
             bridge_rx,
+            self_bridge,
             backend,
             terminals,
             pty_manager,
@@ -548,6 +554,13 @@ impl DaemonCore {
         // notifications) and the command loop (native hook events), resolved by
         // its own poll, read by `GetState`.
         let agent_activity = Arc::new(crate::agent_activity::AgentActivityTracker::default());
+        // Extensions installed from git. Starting one loads and compiles its
+        // component, so the host does it on each extension's own thread.
+        let extension_host = crate::extensions::start_host(
+            reactor.workspace.clone(),
+            &settings,
+            state_version.clone(),
+        );
         local.block_on(&runtime, async move {
             // Observers MUST be spawned inside the LocalSet (they `spawn_local`).
             reactor.spawn_observers();
@@ -606,6 +619,13 @@ impl DaemonCore {
                 (*toast_tx).clone(),
                 reactor.state_version.clone(),
             ));
+
+            if let Some(host) = &extension_host {
+                tokio::task::spawn_local(crate::extensions::run_update_checks(
+                    host.clone(),
+                    handle.clone(),
+                ));
+            }
 
             // Materialize PTYs for every restored project's uninitialized
             // terminal slots BEFORE the command loop starts serving clients.
@@ -681,6 +701,8 @@ impl DaemonCore {
                 soft_close_deadlines,
                 git_poll_trigger_tx,
                 agent_activity,
+                extension_host,
+                Some(self_bridge),
             );
             tokio::pin!(cmd);
             let interrupted = tokio::select! {

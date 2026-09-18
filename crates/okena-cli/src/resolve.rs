@@ -377,6 +377,7 @@ mod tests {
             folders: vec![],
             windows,
             hooks: Vec::new(),
+            extensions: Vec::new(),
         }
     }
 

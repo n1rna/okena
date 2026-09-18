@@ -680,6 +680,19 @@ fn main() {
             harness_state,
         ));
 
+        // Extensions every connected daemon runs, filled from their snapshots.
+        let extensions_state =
+            cx.new(|_| okena_workspace::extensions_state::ExtensionsState::default());
+        // Agents' destructive calls to an extension wait on the user: ask once
+        // each, whichever window is open.
+        cx.observe(&extensions_state, |state, cx| {
+            okena_app::views::extension_agents::ask_pending_confirmations(&state, cx);
+        })
+        .detach();
+        cx.set_global(okena_workspace::extensions_state::GlobalExtensions(
+            extensions_state,
+        ));
+
         // Register theme provider for okena-files crate
         cx.set_global(okena_files::theme::GlobalThemeProvider(|cx| {
             okena_app::theme::theme(cx)

@@ -45,3 +45,7 @@ Architecture and build rules live next to the code, not here:
   repository's project info panel, and linked to each other on both sides
   ([ADR-0006](decisions/0006-project-links-on-both-sides.md)), and seen
   together on the projects overview's [canvas](reference/project-map.md#the-canvas).
+- **Extensions from git** — WASM components installed from a team's git repo,
+  run sandboxed in the daemon, drawn natively in every client, and able to
+  launch agent sessions ([ADR-0007](decisions/0007-wasm-extensions.md),
+  [reference](reference/extensions.md), examples in `examples/extension-library`).

@@ -663,6 +663,7 @@ mod tests {
             folders,
             windows: vec![],
             hooks: Vec::new(),
+            extensions: Vec::new(),
         }
     }
 

@@ -6,7 +6,9 @@ license = "MIT"
 
 [features]
 default = ["gpui"]
-gpui = ["dep:gpui", "okena-hooks/gpui"]
+# `blocking-http`: the extension views reach each connection's daemon through
+# the action clients `extensions_state` keeps.
+gpui = ["dep:gpui", "okena-hooks/gpui", "okena-transport/blocking-http"]
 
 [dependencies]
 okena-core = { path = "../okena-core" }

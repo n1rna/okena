@@ -15,6 +15,7 @@ behaviour.
 - [`hooks.md`](hooks.md) — lifecycle hooks: events, config shape, execution.
 - [`services.md`](services.md) — Docker Compose integration and port detection.
 - [`worktrees.md`](worktrees.md) — git worktree projects: create, close, parent linkage.
+- [`extensions.md`](extensions.md) — extensions from git: manifest, permissions, dependency check, UI components, actions, agent launch, MCP, building, library layout.
 - [`knowledge.md`](knowledge.md) — knowledge stores: layout, frontmatter, registry, project config, sync.
 - [`project-map.md`](project-map.md) — project maps: docs layout, the `project-map.yaml` manifest, validation, the `project-map` skill.
 - [`remote.md`](remote.md) — remote control server: pairing, HTTP/WS API, TLS.

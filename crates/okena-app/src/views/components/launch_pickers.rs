@@ -166,6 +166,22 @@ impl LaunchPickers {
             .collect()
     }
 
+    /// Pick `refs` without asking — a launcher filled in by an extension.
+    pub fn preset_context(&mut self, refs: &[ContextRef], cx: &mut Context<Self>) {
+        let chips: Vec<ChipItem> = refs
+            .iter()
+            .map(|reference| {
+                let id = SharedString::from(format!("preset:{:?}:{}", reference.kind, reference.locator));
+                self.refs.insert(id.clone(), reference.clone());
+                ChipItem::new(id.to_string(), reference.locator.clone())
+                    .icon(kind_icon(reference.kind))
+            })
+            .collect();
+        self.context
+            .update(cx, |search, cx| search.set_chips(chips, cx));
+        cx.notify();
+    }
+
     /// Forget the picked context — after a launch, which used it.
     pub fn clear_context(&mut self, cx: &mut Context<Self>) {
         self.context

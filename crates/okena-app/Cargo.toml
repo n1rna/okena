@@ -26,6 +26,7 @@ okena-views-terminal = { path = "../okena-views-terminal" }
 okena-views-services = { path = "../okena-views-services" }
 okena-views-sidebar = { path = "../okena-views-sidebar" }
 okena-views-remote = { path = "../okena-views-remote" }
+okena-views-extensions = { path = "../okena-views-extensions" }
 
 # Extension system
 okena-extensions = { path = "../okena-extensions" }

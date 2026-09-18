@@ -228,6 +228,8 @@ pub fn build_state_response(
         folders,
         windows,
         hooks,
+        // The daemon fills these in from its extension host.
+        extensions: Vec::new(),
     }
 }
 

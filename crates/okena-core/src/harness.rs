@@ -354,6 +354,15 @@ pub enum AgentPurpose {
     KnowledgeDraft { root: String },
     /// Changing one file of a knowledge root, by path relative to the root.
     KnowledgeEdit { root: String, path: String },
+    /// Started by an action of an extension installed from git, about one of
+    /// its items (a row's id) when it names one.
+    Extension {
+        extension: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_label: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -371,6 +380,11 @@ mod purpose_tests {
             },
             AgentPurpose::KnowledgeDraft {
                 root: "store:eng".into(),
+            },
+            AgentPurpose::Extension {
+                extension: "cli-table".into(),
+                item: Some("job-7".into()),
+                item_label: Some("job-7 (acme)".into()),
             },
         ] {
             let json = serde_json::to_value(&purpose).expect("encode");

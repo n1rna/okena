@@ -1,3 +1,4 @@
+mod extension_views;
 mod handlers;
 mod overview_bar;
 mod overview_filter;
@@ -238,6 +239,8 @@ pub struct WindowView {
     /// has been reopened. Waits for the local daemon connection, which every
     /// pane needs; a view the user picks first replaces it.
     pending_harness_restore: Option<okena_core::harness::HarnessSection>,
+    /// Extensions' own views, by extension key, kept like the harness panes.
+    extension_panes: std::collections::HashMap<String, Entity<okena_views_extensions::ExtensionPane>>,
     /// Grid scroll offset captured when entering project focus, restored on exit
     /// so the project stays in the same place rather than jumping to center.
     /// (The offset is otherwise clamped to 0 while a single project is zoomed.)
@@ -328,11 +331,13 @@ impl WindowView {
         // Create status bar entity (sync initial sidebar state)
         let workspace_for_status = workspace.clone();
         let focus_manager_for_status = focus_manager.clone();
+        let broker_for_status = request_broker.clone();
         let status_bar = cx.new(|cx| {
             let mut sb = StatusBar::new(
                 window_id,
                 workspace_for_status,
                 focus_manager_for_status,
+                broker_for_status,
                 cx,
             );
             sb.set_sidebar_open(sidebar_initially_open, cx);
@@ -467,6 +472,7 @@ impl WindowView {
             focus_handle,
             projects_scroll_handle: ScrollHandle::new(),
             harness_panes: Vec::new(),
+            extension_panes: std::collections::HashMap::new(),
             pending_harness_restore,
             projects_grid_bounds: Rc::new(RefCell::new(Bounds {
                 origin: Point::default(),
@@ -831,6 +837,13 @@ impl WindowView {
                 ws.apply_remote_snapshot(&snapshots, window_id, fm, cx)
             });
         });
+
+        // Every daemon's extensions, for the nav, the status bar and the views.
+        let extension_sources: Vec<_> = snapshots
+            .iter()
+            .map(|s| (s.config.clone(), s.state.clone()))
+            .collect();
+        extension_views::sync_extensions(&extension_sources, cx);
 
         // Mirror the local daemon's hook execution history into the client-side
         // `HookMonitor` global so the Hook Log overlay reflects hooks that ran on

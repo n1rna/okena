@@ -13,7 +13,7 @@
 
 mod detect;
 mod launch;
-mod model;
+pub(crate) mod model;
 mod render;
 
 pub use detect::{AGENT_COMMANDS, detect_agent};

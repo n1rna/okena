@@ -135,6 +135,10 @@ pub struct SettingsPanel {
     pub(super) paired_devices: PairedDevices,
     /// Cached extension settings views (lazily created on first access).
     extension_views: HashMap<String, AnyView>,
+    /// Extensions installed from git, made when the Extensions page first shows.
+    pub(super) git_extensions: Option<Entity<okena_views_extensions::ExtensionsManager>>,
+    /// The extension (by key) to open on the Extensions page.
+    pub(super) git_extension_to_open: Option<String>,
     /// Scroll position of the content pane, shared with its overlay scrollbar.
     pub(super) content_scroll: ScrollHandle,
 }
@@ -177,6 +181,11 @@ impl SettingsPanel {
     ) -> Self {
         let category = page.and_then(SettingsCategory::from_slug);
         let mut panel = Self::new_with_options(workspace, None, category, daemon_endpoint, cx);
+        if page == Some(okena_views_extensions::SETTINGS_PAGE)
+            && let Some(key) = section
+        {
+            panel.git_extension_to_open = Some(key.to_string());
+        }
         if section == Some(Self::SECTION_ADD) {
             // The form sits below the list of stores, and the panel has no
             // scroll-to-element machinery. Arriving here means the caller sent
@@ -1103,6 +1112,8 @@ impl SettingsPanel {
             tasks_busy: false,
             tasks_error: None,
             extension_views: HashMap::new(),
+            git_extensions: None,
+            git_extension_to_open: None,
             content_scroll: ScrollHandle::new(),
         };
 

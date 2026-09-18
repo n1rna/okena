@@ -17,13 +17,39 @@ use std::collections::HashMap;
 /// in one window must not yank another window off its terminals.
 pub struct HarnessState {
     active: HashMap<WindowId, HarnessSection>,
+    /// An extension's view showing instead, by
+    /// [`extension_key`](crate::extensions_state::extension_key). A window
+    /// shows at most one of the two.
+    extension: HashMap<WindowId, String>,
 }
 
 impl HarnessState {
     pub fn new() -> Self {
         Self {
             active: HashMap::new(),
+            extension: HashMap::new(),
         }
+    }
+
+    pub fn active_extension(&self, window: WindowId) -> Option<&str> {
+        self.extension.get(&window).map(String::as_str)
+    }
+
+    /// Show an extension's view in `window`, leaving any harness view.
+    pub fn set_extension(&mut self, window: WindowId, key: Option<String>, cx: &mut Context<Self>) {
+        if self.extension.get(&window) == key.as_ref() && (key.is_none() || self.active(window).is_none()) {
+            return;
+        }
+        self.active.remove(&window);
+        match key {
+            Some(key) => {
+                self.extension.insert(window, key);
+            }
+            None => {
+                self.extension.remove(&window);
+            }
+        }
+        cx.notify();
     }
 
     pub fn active(&self, window: WindowId) -> Option<HarnessSection> {
@@ -33,7 +59,7 @@ impl HarnessState {
     /// Whether setting `section` would actually change anything. Split out so
     /// the no-churn rule is testable without a GPUI context.
     pub fn is_change(&self, window: WindowId, section: Option<HarnessSection>) -> bool {
-        self.active(window) != section
+        self.active(window) != section || self.extension.contains_key(&window)
     }
 
     /// Replace the active view for `window`, notifying observers only on a real
@@ -47,6 +73,8 @@ impl HarnessState {
         if !self.is_change(window, section) {
             return;
         }
+        // A harness view, or none, replaces an extension's view.
+        self.extension.remove(&window);
         match section {
             Some(s) => {
                 self.active.insert(window, s);
@@ -80,6 +108,20 @@ pub fn active_harness(window: WindowId, cx: &App) -> Option<HarnessSection> {
 /// Handle to the shared state, when it has been registered.
 pub fn harness_state_entity(cx: &App) -> Option<Entity<HarnessState>> {
     cx.try_global::<GlobalHarnessState>().map(|g| g.0.clone())
+}
+
+/// The extension view showing in `window`, by key.
+pub fn active_extension(window: WindowId, cx: &App) -> Option<String> {
+    cx.try_global::<GlobalHarnessState>()
+        .and_then(|g| g.0.read(cx).active_extension(window).map(str::to_string))
+}
+
+/// Show an extension's view in `window` (or leave it with `None`).
+pub fn set_active_extension(window: WindowId, key: Option<String>, cx: &mut App) {
+    let Some(entity) = harness_state_entity(cx) else {
+        return;
+    };
+    entity.update(cx, |state, cx| state.set_extension(window, key, cx));
 }
 
 /// Publish the active harness view. A no-op when the global has not been
@@ -127,6 +169,15 @@ mod tests {
         let state = with(HarnessSection::Specs);
         assert!(state.is_change(WindowId::Main, None));
         assert!(!HarnessState::new().is_change(WindowId::Main, None));
+    }
+
+    #[test]
+    fn leaving_an_extension_view_is_a_change() {
+        // Opening the terminals (section `None`) while an extension's view
+        // shows must clear it, even though no harness section was active.
+        let mut state = HarnessState::new();
+        state.extension.insert(WindowId::Main, "local/x".into());
+        assert!(state.is_change(WindowId::Main, None));
     }
 
     #[test]

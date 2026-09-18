@@ -1,0 +1,52 @@
+id = "git-tree"
+name = "Git tree"
+version = "0.1.0"
+description = "A repository's files as a tree, with a detail pane and charts: from a local clone, or a GitHub remote read through gh."
+api = "0.1"
+refresh_interval_secs = 300
+
+[view]
+title = "Repo tree"
+
+[permissions]
+# Reading a GitHub remote.
+commands = ["gh"]
+# Reading a local clone: only the folder configured.
+paths = ["{config.local_path}"]
+
+[[requires]]
+name = "gh"
+check = ["gh", "--version"]
+min_version = "2.0"
+install_hint = "brew install gh, then gh auth login"
+
+[[config]]
+key = "source"
+label = "Read from"
+type = "select"
+options = ["local", "remote"]
+default = "local"
+
+[[config]]
+key = "local_path"
+label = "Local clone"
+type = "path"
+description = "Used when reading from a local clone."
+
+[[config]]
+key = "remote_repo"
+label = "GitHub repository"
+type = "string"
+description = "owner/name, used when reading from a remote."
+
+[[config]]
+key = "remote_ref"
+label = "Branch or tag"
+type = "string"
+description = "Empty reads the default branch."
+
+[[config]]
+key = "max_depth"
+label = "Folder depth"
+type = "number"
+default = 4

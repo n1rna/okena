@@ -1791,7 +1791,22 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::SetSystemAppearance { .. }
         | ActionRequest::SaveCustomTheme { .. }
         | ActionRequest::ListActions
-        | ActionRequest::InvokeAction { .. }) => a,
+        | ActionRequest::InvokeAction { .. }
+        // Extension ids and row ids are the extension's own, not okena's.
+        | ActionRequest::ExtensionPreview { .. }
+        | ActionRequest::ExtensionInstall { .. }
+        | ActionRequest::ExtensionPreviewUpdate { .. }
+        | ActionRequest::ExtensionUpdate { .. }
+        | ActionRequest::ExtensionCheckUpdates
+        | ActionRequest::ExtensionReload { .. }
+        | ActionRequest::ExtensionRemove { .. }
+        | ActionRequest::ExtensionRefresh { .. }
+        | ActionRequest::ExtensionRecheck { .. }
+        | ActionRequest::ExtensionRunAction { .. }
+        | ActionRequest::ExtensionQuery { .. }
+        | ActionRequest::ExtensionAgentCall { .. }
+        | ActionRequest::ExtensionAgentTools { .. }
+        | ActionRequest::ExtensionConfirm { .. }) => a,
     }
 }
 

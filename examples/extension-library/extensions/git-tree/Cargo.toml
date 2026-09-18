@@ -1,0 +1,12 @@
+[package]
+name = "okena-ext-git-tree"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+okena-extension-api = { path = "../../../../crates/okena-extension-api" }
+serde = { version = "1.0", features = ["derive"] }

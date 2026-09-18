@@ -193,6 +193,26 @@ Precedence (highest to lowest):
 
 If the configured directory does not exist, Okena logs a warning and falls back to the next tier.
 
+#### Extensions installed from git
+
+Extensions installed from a git repository (see [extensions.md](extensions.md))
+use the same two settings as the built-in ones: their ids join
+`enabled_extensions` when installed, and each one's configuration lives under
+`extension_settings.<id>`, keyed by its manifest's `[[config]]` keys:
+
+```json
+{
+  "enabled_extensions": ["claude-code", "cli-table"],
+  "extension_settings": {
+    "cli-table": { "jobs_file": "~/jobs.json", "stuck_after_minutes": 45 }
+  }
+}
+```
+
+Both are edited from Settings → Extensions and apply without a restart.
+Removing an extension drops its entries. Its files and data live under
+`<profile>/extensions/`.
+
 #### Hooks
 
 Global lifecycle hooks run shell commands on project events. Each hook value is a shell command string (or `null` to disable).

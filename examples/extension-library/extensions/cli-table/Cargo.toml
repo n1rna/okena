@@ -1,0 +1,14 @@
+[package]
+name = "okena-ext-cli-table"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Inside the okena repo the SDK is a path away; in a library of your own,
+# depend on it by git: { git = "https://github.com/n1rna/okena", tag = "…" }.
+okena-extension-api = { path = "../../../../crates/okena-extension-api" }
+serde = { version = "1.0", features = ["derive"] }

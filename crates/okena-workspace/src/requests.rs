@@ -155,6 +155,16 @@ pub struct NewAgentPrefill {
     pub name: String,
     /// Task the session is about, carried through to the start.
     pub task: Option<okena_core::tasks::TaskRef>,
+    /// Where the agent works; empty leaves it to the daemon.
+    pub root: String,
+    /// Projects to pick, as the daemon names them.
+    pub project_ids: Vec<String>,
+    /// Context to hand the agent.
+    pub context: Vec<okena_core::context::ContextRef>,
+    /// Which card started it, carried through to the start.
+    pub purpose: Option<okena_core::harness::AgentPurpose>,
+    /// The daemon to start it on; `None` is this machine's.
+    pub connection_id: Option<String>,
 }
 
 /// Requests consumed by WindowView::process_pending_requests().
@@ -226,6 +236,9 @@ pub enum WorkbenchRequest {
     /// Open the harness view as a tab in the main area (or focus it if the tab
     /// is already open).
     OpenHarnessView(okena_core::harness::HarnessSection),
+    /// Open an extension's view, by its
+    /// [`extension_key`](crate::extensions_state::extension_key).
+    OpenExtensionView { key: String },
     /// Open Harness → Knowledge on one document: `path` inside the knowledge
     /// root discovery keyed `root_key`. How the project info panel opens a
     /// project map's docs.

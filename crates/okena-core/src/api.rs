@@ -41,6 +41,10 @@ pub struct StateResponse {
     /// older servers (which omit the field) deserializable.
     #[serde(default)]
     pub hooks: Vec<ApiHookExecution>,
+    /// Extensions installed from git and run in the daemon, with what each
+    /// one last drew.
+    #[serde(default)]
+    pub extensions: Vec<crate::extension::ApiExtension>,
 }
 
 /// OS window bounds in screen pixels.
@@ -2183,6 +2187,96 @@ pub enum ActionRequest {
     /// Match links across every repository with a map. Replies with a
     /// [`crate::project_map::ProjectLinks`].
     ProjectLinks,
+    // ─── Extensions installed from git, run as WASM in the daemon ───
+    /// Fetch an extension's source and read its manifest, for the user to
+    /// approve. Replies with a [`crate::extension::ExtInstallPreview`].
+    ExtensionPreview {
+        source: crate::extension::ExtSource,
+    },
+    /// Install what a preview showed. `commit` is the preview's resolved
+    /// commit (none for a local folder); `approved` must be exactly the
+    /// permissions it listed. The extension is enabled once installed.
+    ExtensionInstall {
+        source: crate::extension::ExtSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+        approved: crate::extension::ExtPermissions,
+    },
+    /// Fetch the newest commit of an installed extension's ref (or read its
+    /// local folder) and reply with what updating would change, including
+    /// permissions it adds, as an [`crate::extension::ExtInstallPreview`].
+    ExtensionPreviewUpdate {
+        id: String,
+    },
+    /// Update to `commit` from the update preview. `approved` is needed when
+    /// the update asks for more permissions.
+    ExtensionUpdate {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved: Option<crate::extension::ExtPermissions>,
+    },
+    /// Ask each git-installed extension's remote whether its ref moved on.
+    ExtensionCheckUpdates,
+    /// Rebuild a locally installed extension from its folder and reload it.
+    ExtensionReload {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved: Option<crate::extension::ExtPermissions>,
+    },
+    /// Delete an extension, its files, data and settings.
+    ExtensionRemove {
+        id: String,
+    },
+    /// Refresh an extension's view now.
+    ExtensionRefresh {
+        id: String,
+    },
+    /// Run the dependency check again; the extension starts if it passes.
+    ExtensionRecheck {
+        id: String,
+    },
+    /// Run an extension action on `items` (row ids; empty for a view action)
+    /// with its form's `inputs`. Replies with a
+    /// [`crate::extension::ExtActionOutcome`]. The client asks the user to
+    /// confirm a destructive action before sending this.
+    ExtensionRunAction {
+        id: String,
+        /// The action's id (`action` names the request itself).
+        action_id: String,
+        #[serde(default)]
+        items: Vec<String>,
+        #[serde(default)]
+        inputs: Vec<(String, String)>,
+    },
+    /// Answer an extension query; `args` and the reply are JSON.
+    ExtensionQuery {
+        id: String,
+        query: String,
+        #[serde(default)]
+        args: serde_json::Value,
+    },
+    /// An agent's call, through okena's MCP, to the extension that started
+    /// its session: the session holding `terminal_id` must have been started
+    /// by that extension. Actions must be marked agent-callable; a
+    /// destructive one waits until the user confirms it in okena.
+    ExtensionAgentCall {
+        terminal_id: String,
+        call: crate::extension::ExtAgentCall,
+    },
+    /// What the agent in `terminal_id` may call, as an
+    /// [`crate::extension::ExtAgentTools`]; an error when no extension
+    /// started its session.
+    ExtensionAgentTools {
+        terminal_id: String,
+    },
+    /// The user's answer to a destructive action an agent asked for.
+    ExtensionConfirm {
+        id: String,
+        confirmation: String,
+        approve: bool,
+    },
     // ─── Agent reporting (written by agents through okena's MCP server) ───
     /// Record something an agent produced against its session project.
     ///
@@ -2712,6 +2806,7 @@ mod tests {
                 sidebar_open: Some(true),
             }],
             hooks: Vec::new(),
+            extensions: Vec::new(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();

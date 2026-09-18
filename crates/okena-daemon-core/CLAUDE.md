@@ -57,6 +57,7 @@ The two reactor trait families are what make the logic crates reactor-agnostic:
 | `agent_activity.rs` | What each agent terminal is doing (`ApiProject::agent_activity`). Collects native hook events (command loop), bells/OSC notifications (PTY loop) and terminal input/output, resolves them with `okena_core::agent_activity::resolve`, clears a report's question once input answers it, and bumps `state_version` only on change. Clients never compute this. |
 | `workspace_cx.rs` / `service_cx.rs` | Tokio impls of the reactor traits. |
 | `daemon_config.rs` | Gpui-free settings/theme handlers. |
+| `extensions.rs` | The extension host (`okena-extension-host`): starts it over the profile's `extensions/` folder, runs `Extension*` actions on the blocking pool, fills `StateResponse::extensions`, re-applies `enabled_extensions` / `extension_settings` after `SetSettings`, and checks for updates every six hours. |
 | `soft_close.rs` | Soft-close deadline poll (grace window before killing a session). |
 | `toast_poll.rs` | Drains `HookMonitor` toasts onto the stream. |
 | `worktree_close_watchdog.rs` | Watches pending worktree closes. |

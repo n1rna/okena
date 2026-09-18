@@ -1,0 +1,342 @@
+package okena:extension@0.1.0;
+
+/// Types shared by the host functions and the extension's exports.
+interface types {
+    /// How a piece of text, a badge or a stat is coloured.
+    enum tone { neutral, info, success, warning, danger }
+
+    enum log-level { trace, debug, info, warn, error }
+
+    /// A program to run. There is no shell: `program` is looked up on the
+    /// PATH and must be one the manifest declares and the user approved.
+    record command {
+        program: string,
+        args: list<string>,
+        cwd: option<string>,
+        env: list<tuple<string, string>>,
+        stdin: option<string>,
+        /// Killed after this long. The host caps it at five minutes.
+        timeout-ms: option<u32>,
+    }
+
+    record command-output {
+        /// `none` when the program was killed by a signal or the timeout.
+        exit-code: option<s32>,
+        stdout: string,
+        stderr: string,
+    }
+
+    record dir-entry {
+        name: string,
+        is-dir: bool,
+        size: u64,
+    }
+
+    /// An okena project, for choosing which projects an agent works in.
+    record project {
+        id: string,
+        name: string,
+        path: string,
+    }
+}
+
+/// What the host offers. Every call that touches the machine is checked
+/// against the permissions the user approved at install.
+interface host {
+    use types.{command, command-output, dir-entry, log-level, project};
+
+    run-command: func(command: command) -> result<command-output, string>;
+    read-file: func(path: string) -> result<list<u8>, string>;
+    read-dir: func(path: string) -> result<list<dir-entry>, string>;
+
+    /// A string store private to this extension, kept across restarts and
+    /// deleted with it.
+    kv-get: func(key: string) -> option<string>;
+    kv-set: func(key: string, value: string) -> result<_, string>;
+    kv-delete: func(key: string);
+    kv-keys: func() -> list<string>;
+
+    log: func(level: log-level, message: string);
+
+    /// The extension's configuration, as a JSON object keyed by the
+    /// manifest's `[[config]]` keys.
+    config: func() -> string;
+
+    projects: func() -> list<project>;
+}
+
+/// Version 1 of the components okena draws. WIT types cannot be recursive,
+/// so a view is a flat list of nodes that refer to their children by index.
+///
+/// New components come in a new interface (`ui-v2`) and a new world version;
+/// an extension built against this one keeps working unchanged.
+interface ui-v1 {
+    use types.{tone};
+
+    enum text-style { body, heading, muted, code }
+
+    record text {
+        text: string,
+        style: text-style,
+        tone: option<tone>,
+    }
+
+    record badge {
+        label: string,
+        tone: tone,
+    }
+
+    enum column-kind { text, number, badge, date }
+
+    record column {
+        key: string,
+        label: string,
+        kind: column-kind,
+        /// Offered in the group-by menu.
+        groupable: bool,
+        sortable: bool,
+    }
+
+    record cell {
+        /// What is shown.
+        text: string,
+        /// Sorts numerically when set (numbers, timestamps).
+        number: option<f64>,
+        /// Colours the cell; a `badge` column draws it as a badge.
+        tone: option<tone>,
+    }
+
+    record field {
+        label: string,
+        value: string,
+        tone: option<tone>,
+    }
+
+    record row {
+        /// Stable across refreshes: actions and agent sessions are keyed by it.
+        id: string,
+        /// One per column, in column order.
+        cells: list<cell>,
+        /// Shown in a detail pane when the row is selected.
+        detail: list<field>,
+    }
+
+    record sort {
+        column: string,
+        descending: bool,
+    }
+
+    record table {
+        id: string,
+        columns: list<column>,
+        rows: list<row>,
+        group-by: option<string>,
+        sort: option<sort>,
+        /// Actions (by id) offered on each row.
+        row-actions: list<string>,
+        /// Actions (by id) offered on the selected rows.
+        bulk-actions: list<string>,
+        filter-placeholder: option<string>,
+        empty-text: option<string>,
+    }
+
+    record detail {
+        title: option<string>,
+        fields: list<field>,
+    }
+
+    record tree-item {
+        id: string,
+        label: string,
+        /// Muted text after the label.
+        hint: option<string>,
+        badge: option<badge>,
+        /// Indices into the tree's `items`.
+        children: list<u32>,
+        expanded: bool,
+        /// Shown in the detail pane when the item is selected.
+        detail: list<field>,
+    }
+
+    record tree {
+        id: string,
+        items: list<tree-item>,
+        /// Indices into `items`.
+        roots: list<u32>,
+        /// Draws a detail pane beside the tree for the selected item.
+        show-detail: bool,
+        empty-text: option<string>,
+    }
+
+    record point {
+        label: string,
+        value: f64,
+    }
+
+    record series {
+        label: string,
+        points: list<point>,
+    }
+
+    record chart {
+        title: option<string>,
+        series: list<series>,
+    }
+
+    record stat {
+        label: string,
+        value: string,
+        hint: option<string>,
+        tone: option<tone>,
+    }
+
+    record section {
+        title: string,
+        /// Indices into the view's `nodes`.
+        children: list<u32>,
+        collapsible: bool,
+        collapsed: bool,
+    }
+
+    variant node {
+        text(text),
+        badge(badge),
+        badges(list<badge>),
+        table(table),
+        detail(detail),
+        tree(tree),
+        bar-chart(chart),
+        line-chart(chart),
+        stats(list<stat>),
+        /// View-level action buttons, by action id.
+        actions(list<string>),
+        loading(string),
+        empty(string),
+        error(string),
+        /// Children stacked vertically (indices into `nodes`).
+        stack(list<u32>),
+        /// Children side by side (indices into `nodes`).
+        columns(list<u32>),
+        section(section),
+    }
+
+    record view {
+        nodes: list<node>,
+        root: u32,
+    }
+
+    record status {
+        label: string,
+        tone: option<tone>,
+        tooltip: option<string>,
+    }
+}
+
+/// What the extension offers okena.
+interface guest {
+    use types.{tone};
+    use ui-v1.{view, status};
+
+    enum input-kind { text, multiline, number, toggle, select }
+
+    record input {
+        key: string,
+        label: string,
+        kind: input-kind,
+        required: bool,
+        default: option<string>,
+        placeholder: option<string>,
+        /// The choices of a `select`.
+        options: list<string>,
+    }
+
+    enum agent-mode {
+        /// okena's agent launcher opens filled in; the user starts it.
+        prefill,
+        /// The session starts at once with the default agent. Needs the
+        /// `start_agents` permission.
+        start,
+    }
+
+    record action-def {
+        id: string,
+        label: string,
+        description: string,
+        /// okena asks the user to confirm before running it, whoever calls it.
+        destructive: bool,
+        /// A small form okena shows before running the action.
+        inputs: list<input>,
+        /// Set when the action launches an agent session.
+        agent: option<agent-mode>,
+        /// Offered to agents this extension started, through okena's MCP.
+        agent-callable: bool,
+    }
+
+    record query-def {
+        id: string,
+        description: string,
+        params: list<input>,
+    }
+
+    record info {
+        actions: list<action-def>,
+        queries: list<query-def>,
+    }
+
+    record refresh-output {
+        view: view,
+        status: option<status>,
+    }
+
+    enum invoker { user, agent }
+
+    record action-request {
+        action: string,
+        /// The ids of the rows or items it runs on; empty for a view action.
+        items: list<string>,
+        inputs: list<tuple<string, string>>,
+        invoker: invoker,
+    }
+
+    enum context-kind { map-entry, spec, doc, skill, agent }
+
+    record context-ref {
+        kind: context-kind,
+        /// Exactly one of `project-id` and `store` is set.
+        project-id: option<string>,
+        store: option<string>,
+        locator: string,
+    }
+
+    record agent-launch {
+        /// The brief, written by the extension.
+        goal: string,
+        name: option<string>,
+        root: option<string>,
+        project-ids: list<string>,
+        context: list<context-ref>,
+        /// The row or item the session is about; its agent badge follows the session.
+        item: option<string>,
+        item-label: option<string>,
+    }
+
+    record action-outcome {
+        message: option<string>,
+        tone: option<tone>,
+        /// Set by agent actions.
+        agent: option<agent-launch>,
+        /// Refresh the view after the action.
+        refresh: bool,
+    }
+
+    describe: func() -> info;
+    refresh: func() -> result<refresh-output, string>;
+    run-action: func(request: action-request) -> result<action-outcome, string>;
+    /// Answers a query by id; `args` and the result are JSON.
+    query: func(id: string, args: string) -> result<string, string>;
+}
+
+world extension {
+    import host;
+    export guest;
+}

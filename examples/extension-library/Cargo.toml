@@ -1,0 +1,15 @@
+# A library of okena extensions: one folder per extension under extensions/,
+# each with its own extension.toml. Install one by this repo's URL and the
+# folder's path. See docs/reference/extensions.md in the okena repo.
+[workspace]
+members = ["extensions/*"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

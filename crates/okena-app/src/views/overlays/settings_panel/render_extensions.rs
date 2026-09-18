@@ -39,8 +39,17 @@ impl SettingsPanel {
             ));
         }
 
+        let git_extensions = self
+            .git_extensions
+            .get_or_insert_with(|| {
+                let open = self.git_extension_to_open.take();
+                cx.new(|cx| okena_views_extensions::ExtensionsManager::new(open, cx))
+            })
+            .clone();
+
         div()
-            .child(section_header("Extensions", &t, cx))
+            .child(section_header("Built in", &t, cx))
             .child(section)
+            .child(div().pt(px(16.0)).child(git_extensions))
     }
 }
