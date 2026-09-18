@@ -246,15 +246,9 @@ fn start(
         p.context_projects = super::context::scope_projects(&[], &context_items);
         p.default_shell = Some(shell);
     }
-    if let ActionResult::Err(e) = super::spawn_uninitialized_terminals(
-        ws,
-        &project_id,
-        backend,
-        terminals,
-        settings,
-        None,
-        cx,
-    ) {
+    if let ActionResult::Err(e) =
+        super::spawn_session_terminals(ws, &project_id, backend, terminals, settings, cx)
+    {
         log::warn!("[harness] document session terminal failed to spawn: {e}");
     }
     ws.notify_data(cx);

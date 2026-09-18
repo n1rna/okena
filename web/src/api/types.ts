@@ -253,6 +253,8 @@ export type ApiLayoutNode =
       detached: boolean;
       cols?: number | null;
       rows?: number | null;
+      /** The agent session's agent pane; absent on ordinary panes. */
+      agent?: boolean;
     }
   | { type: "split"; direction: SplitDirection; sizes: number[]; children: ApiLayoutNode[] }
   | { type: "tabs"; children: ApiLayoutNode[]; active_tab: number };

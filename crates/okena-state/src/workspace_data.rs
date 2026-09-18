@@ -157,10 +157,24 @@ impl ProjectData {
             || self.is_task_draft_session()
     }
 
-    /// The shell `terminal_id` runs: its pane's own, or the project's default
-    /// for a pane that inherits — resolved the way the spawn resolves it.
+    /// The shell a pane that inherits (`ShellType::Default`) takes from this
+    /// project, before the global setting.
+    ///
+    /// An agent session's `default_shell` is its agent's launch, and only the
+    /// agent's own pane runs it: every other pane there — a split, a new tab,
+    /// one opened after the agent stopped — is an ordinary terminal on the
+    /// global default shell.
+    pub fn inherited_shell(&self, agent_pane: bool) -> Option<&ShellType> {
+        if self.is_any_agent_session() && !agent_pane {
+            return None;
+        }
+        self.default_shell.as_ref()
+    }
+
+    /// The shell `terminal_id` runs: its pane's own, or the one it inherits —
+    /// resolved the way the spawn resolves it.
     pub fn terminal_shell(&self, terminal_id: &str) -> ShellType {
-        let node_shell = self
+        let (node_shell, agent_pane) = self
             .layout
             .as_ref()
             .and_then(|layout| {
@@ -168,14 +182,34 @@ impl ProjectData {
                 layout.get_at_path(&path).cloned()
             })
             .and_then(|node| match node {
-                LayoutNode::Terminal { shell_type, .. } => Some(shell_type),
+                LayoutNode::Terminal {
+                    shell_type, agent, ..
+                } => Some((shell_type, agent)),
                 _ => None,
             })
             .unwrap_or_default();
         match node_shell {
-            ShellType::Default => self.default_shell.clone().unwrap_or_default(),
+            ShellType::Default => self
+                .inherited_shell(agent_pane)
+                .cloned()
+                .unwrap_or_default(),
             explicit => explicit,
         }
+    }
+
+    /// The agent this session's agent pane runs, by the command okena
+    /// launches there — known whether the agent is running or stopped.
+    pub fn agent_pane_agent(&self) -> Option<String> {
+        let layout = self.layout.as_ref()?;
+        let path = layout.agent_terminal_path()?;
+        let LayoutNode::Terminal { shell_type, .. } = layout.get_at_path(&path)? else {
+            return None;
+        };
+        let shell = match shell_type {
+            ShellType::Default => self.inherited_shell(true)?.clone(),
+            explicit => explicit.clone(),
+        };
+        okena_core::agents::detect_session_agent(&shell, None, true)
     }
 
     /// The agent `terminal_id` runs, if okena can tell: a known agent by its

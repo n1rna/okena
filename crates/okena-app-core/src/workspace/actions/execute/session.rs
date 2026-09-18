@@ -153,7 +153,10 @@ fn prepare_layout_terminals(
     node: &mut LayoutNode,
     project_id: &str,
     cwd: &str,
+    // What an ordinary pane and the agent's pane inherit: in an agent session
+    // only the agent's pane runs the session's launch.
     project_default_shell: Option<&okena_terminal::shell_config::ShellType>,
+    agent_shell: Option<&okena_terminal::shell_config::ShellType>,
     settings: &AppSettings,
     shell_wrapper: Option<&str>,
     on_create: Option<&str>,
@@ -162,11 +165,23 @@ fn prepare_layout_terminals(
     launches: &mut Vec<PreparedTerminalLaunch>,
 ) {
     match node {
+        // A stopped agent stays stopped until its session starts it again.
+        LayoutNode::Terminal {
+            terminal_id: None,
+            agent: true,
+            ..
+        } => {}
         LayoutNode::Terminal {
             terminal_id,
             shell_type,
+            agent,
             ..
         } => {
+            let project_default_shell = if *agent {
+                agent_shell
+            } else {
+                project_default_shell
+            };
             let persisted = terminal_id.is_some();
             let id = terminal_id
                 .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
@@ -203,6 +218,7 @@ fn prepare_layout_terminals(
                     project_id,
                     cwd,
                     project_default_shell,
+                    agent_shell,
                     settings,
                     shell_wrapper,
                     on_create,
@@ -264,12 +280,15 @@ pub fn prepare_workspace_replacement(
             folder.map(|folder| folder.id.as_str()),
             folder.map(|folder| folder.name.as_str()),
         );
+        let session_shell = project.inherited_shell(false).cloned();
+        let agent_shell = project.inherited_shell(true).cloned();
         if let Some(layout) = &mut project.layout {
             prepare_layout_terminals(
                 layout,
                 &project.id,
                 &project.path,
-                project.default_shell.as_ref(),
+                session_shell.as_ref(),
+                agent_shell.as_ref(),
                 settings,
                 shell_wrapper.as_deref(),
                 on_create.as_deref(),
@@ -1028,6 +1047,79 @@ mod tests {
         }
     }
 
+    fn session_pane(terminal_id: Option<&str>, agent: bool) -> LayoutNode {
+        LayoutNode::Terminal {
+            terminal_id: terminal_id.map(str::to_string),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+            agent,
+        }
+    }
+
+    fn agent_session(layout: LayoutNode) -> ProjectData {
+        let mut session = project("session", "hook", None);
+        session.hook_terminals.clear();
+        session.custom_session = Some("Session".to_string());
+        session.default_shell = Some(ShellType::Custom {
+            path: "claude".to_string(),
+            args: vec!["Do the task".to_string()],
+        });
+        session.layout = Some(layout);
+        session
+    }
+
+    #[test]
+    fn loading_a_session_runs_the_agent_only_in_its_own_pane() {
+        let layout = LayoutNode::Tabs {
+            children: vec![session_pane(Some("a"), true), session_pane(None, false)],
+            active_tab: 0,
+        };
+        let prepared =
+            prepare_workspace_replacement(data(agent_session(layout)), &AppSettings::default());
+        let routes: Vec<(Vec<usize>, ShellType)> = prepared
+            .ordinary
+            .iter()
+            .map(|launch| (launch.layout_path.clone(), launch.launch_plan.route.clone()))
+            .collect();
+        assert_eq!(
+            routes,
+            vec![
+                (
+                    vec![0],
+                    ShellType::Custom {
+                        path: "claude".to_string(),
+                        args: vec!["Do the task".to_string()],
+                    }
+                ),
+                (vec![1], ShellType::Default),
+            ]
+        );
+    }
+
+    #[test]
+    fn loading_a_session_leaves_a_stopped_agent_stopped() {
+        let layout = LayoutNode::Tabs {
+            children: vec![session_pane(None, true), session_pane(Some("b"), false)],
+            active_tab: 0,
+        };
+        let prepared =
+            prepare_workspace_replacement(data(agent_session(layout)), &AppSettings::default());
+        let paths: Vec<Vec<usize>> = prepared
+            .ordinary
+            .iter()
+            .map(|launch| launch.layout_path.clone())
+            .collect();
+        assert_eq!(paths, vec![vec![1]]);
+        let agent = prepared.data.projects[0]
+            .layout
+            .as_ref()
+            .expect("layout")
+            .agent_terminal_id();
+        assert_eq!(agent, None);
+    }
+
     #[test]
     fn prepared_replacement_publishes_reserved_ordinary_and_hook_owners_before_launch() {
         let workspace = Arc::new(Mutex::new(Workspace::new(data(project(
@@ -1214,6 +1306,7 @@ mod tests {
             minimized: false,
             detached: false,
             zoom_level: 1.0,
+            agent: false,
         };
 
         let mut outgoing = project("old", "outgoing-hook", None);
@@ -1313,6 +1406,7 @@ mod tests {
             minimized: false,
             detached: false,
             zoom_level: 1.0,
+            agent: false,
         });
         let mut successful = project(
             "successful",
@@ -1326,6 +1420,7 @@ mod tests {
             minimized: false,
             detached: false,
             zoom_level: 1.0,
+            agent: false,
         });
 
         let result = replace_workspace_with(

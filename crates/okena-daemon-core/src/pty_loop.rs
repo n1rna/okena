@@ -547,6 +547,7 @@ struct ExitHandlingContext<'a> {
 /// 3. Fire `terminal.on_close` for plain user terminals (non-service, non-hook).
 /// 4. Kill + remove the UI Terminal for every non-service, non-hook terminal.
 /// 5. Drop stale soft-close records for any exited terminal.
+/// 6. Leave an exited agent's pane in place as a stopped agent.
 ///
 /// Mirrors the GUI's PTY-exit handling, adapted: the GUI is a thin client and
 /// dispatched a remote action + ran the worktree removal locally; the daemon owns
@@ -644,6 +645,12 @@ fn handle_exits(
         for (tid, _, _) in exit_events {
             let _stale_toast = ws.cancel_pending_close(tid);
             ws.reap_restored_close(tid, &mut cx);
+            // ── 6. A session's agent stopped (Ctrl+C, `/exit`, a crash): its
+            // pane stays, marked stopped, and only the session's Start /
+            // Resume / Restart bring it back — never a keystroke into it.
+            if !service_tids.contains(tid) && !hook_tids.contains(tid) {
+                ws.stop_exited_agent(tid, &mut cx);
+            }
         }
     }
 }
@@ -1167,6 +1174,7 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
+                agent: false,
             }),
             terminal_names: HashMap::from([(terminal_id.into(), "Build shell".into())]),
             hidden_terminals: Default::default(),
@@ -1196,6 +1204,75 @@ mod tests {
             creating_progress: None,
             verification_runs: Vec::new(),
         }
+    }
+
+    /// An agent session: its agent in `agent-t`, a shell beside it in `shell-t`.
+    fn agent_session_workspace() -> Workspace {
+        let pane = |id: &str, agent: bool| LayoutNode::Terminal {
+            terminal_id: Some(id.into()),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+            agent,
+        };
+        let mut project = plain_project("agent-t");
+        project.custom_session = Some("Session".into());
+        project.default_shell = Some(ShellType::for_command("claude 'Do the task'".into()));
+        project.layout = Some(LayoutNode::Split {
+            direction: okena_core::types::SplitDirection::Horizontal,
+            sizes: vec![50.0, 50.0],
+            children: vec![pane("agent-t", true), pane("shell-t", false)],
+        });
+        Workspace::new(WorkspaceData {
+            version: 1,
+            projects: vec![project],
+            project_order: vec!["project-1".into()],
+            folders: Vec::new(),
+            service_panel_heights: Default::default(),
+            hook_panel_heights: Default::default(),
+            main_window: Default::default(),
+            extra_windows: Vec::new(),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_exited_agent_stays_in_its_pane_as_a_stopped_agent() {
+        let reactor = test_reactor(agent_session_workspace(), AppSettings::default());
+        let workspace = reactor.workspace.clone();
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+
+        drive_hook_exit_through_pty_loop(reactor, terminals, "agent-t", Some(0)).await;
+
+        let workspace = workspace.lock();
+        let layout = workspace
+            .project("project-1")
+            .and_then(|p| p.layout.as_ref())
+            .expect("session layout");
+        // The pane is still there and still the agent, with nothing left for
+        // a keystroke or reconnect to revive.
+        assert_eq!(layout.agent_terminal_path(), Some(vec![0]));
+        assert_eq!(layout.agent_terminal_id(), None);
+        assert_eq!(layout.collect_terminal_ids(), vec!["shell-t".to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_exited_shell_beside_the_agent_is_left_as_before() {
+        let reactor = test_reactor(agent_session_workspace(), AppSettings::default());
+        let workspace = reactor.workspace.clone();
+        let terminals: TerminalsRegistry = Arc::new(Mutex::new(Default::default()));
+
+        drive_hook_exit_through_pty_loop(reactor, terminals, "shell-t", Some(0)).await;
+
+        let workspace = workspace.lock();
+        let layout = workspace
+            .project("project-1")
+            .and_then(|p| p.layout.as_ref())
+            .expect("session layout");
+        assert_eq!(
+            layout.collect_terminal_ids(),
+            vec!["agent-t".to_string(), "shell-t".to_string()]
+        );
     }
 
     #[test]

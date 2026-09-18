@@ -443,7 +443,14 @@ impl AgentSessionInfo {
         };
         let registry = terminals.lock();
 
-        for id in layout.collect_terminal_ids() {
+        // The agent's own pane when the session has one: its other panes are
+        // shells, whatever someone runs in them.
+        let candidates = if layout.agent_terminal_path().is_some() {
+            layout.agent_terminal_id().into_iter().collect()
+        } else {
+            layout.collect_terminal_ids()
+        };
+        for id in candidates {
             let terminal = registry.get(&id);
             let title = terminal.and_then(|t| t.title());
             let Some(agent) = project.terminal_agent(&id, title.as_deref()) else {
@@ -491,12 +498,15 @@ impl AgentSessionInfo {
         })
     }
 
-    /// The terminal to show for this session, if any.
+    /// The terminal to show for this session, if any: its agent's, or none
+    /// while the agent is stopped. A session started without an agent shows
+    /// whatever terminal is in front.
     pub fn visible_terminal_id(ws: &Workspace, project_id: &str) -> Option<String> {
-        ws.project(project_id)?
-            .layout
-            .as_ref()
-            .and_then(|l| l.visible_terminal_id())
+        let layout = ws.project(project_id)?.layout.as_ref()?;
+        if layout.agent_terminal_path().is_some() {
+            return layout.agent_terminal_id();
+        }
+        layout.visible_terminal_id()
     }
 }
 

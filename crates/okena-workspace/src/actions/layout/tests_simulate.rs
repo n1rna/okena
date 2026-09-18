@@ -11,6 +11,7 @@ fn terminal_node(id: &str) -> LayoutNode {
         detached: false,
         shell_type: ShellType::Default,
         zoom_level: 1.0,
+        agent: false,
     }
 }
 

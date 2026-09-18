@@ -1790,6 +1790,7 @@ mod tests {
                     detached: false,
                     shell_type: Default::default(),
                     zoom_level: 1.0,
+                    agent: false,
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("stale-hook".to_string()),
@@ -1797,6 +1798,7 @@ mod tests {
                     detached: true,
                     shell_type: Default::default(),
                     zoom_level: 1.0,
+                    agent: false,
                 },
             ],
         });
@@ -1841,6 +1843,7 @@ mod tests {
             detached: false,
             shell_type: Default::default(),
             zoom_level: 1.0,
+            agent: false,
         });
         project.hook_terminals.insert(
             "stale-hook".to_string(),

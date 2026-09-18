@@ -430,51 +430,35 @@ impl AgentSessionPanel {
         cx.notify();
     }
 
-    /// Restart the agent for this session.
+    /// Start the agent again from its brief, in its own pane.
     ///
-    /// Closes whatever is running first, then creates a fresh terminal. Closing
-    /// matters: session persistence keeps a tmux session per terminal id and
-    /// re-attaches to it, so reusing an id would reattach to the old process
-    /// instead of launching the agent. A new terminal means a new session.
-    ///
-    /// The new terminal carries no shell override, so the daemon resolves the
-    /// project's own `default_shell` — the agent command, prompt and MCP config
-    /// chosen when the session was started.
+    /// The daemon replaces whatever the agent's pane runs with the session's
+    /// launch — the agent command, prompt and MCP config chosen when the
+    /// session was started. The session's other terminals are left alone.
     fn restart_agent(&mut self, cx: &mut Context<Self>) {
+        self.post_agent_action(
+            |project_id| okena_core::api::ActionRequest::AgentStart { project_id },
+            "Could not start the agent",
+            cx,
+        );
+    }
+
+    /// Send one of the agent controls, toasting the error when it fails.
+    fn post_agent_action(
+        &mut self,
+        action: fn(String) -> okena_core::api::ActionRequest,
+        failure: &'static str,
+        cx: &mut Context<Self>,
+    ) {
         let client = self.client.clone();
         let daemon_id =
             okena_transport::client::strip_prefix(&self.project_id, client.connection_id());
-        let existing: Vec<String> = self
-            .workspace
-            .read(cx)
-            .project(&self.project_id)
-            .and_then(|p| p.layout.as_ref())
-            .map(|l| l.collect_terminal_ids())
-            .unwrap_or_default()
-            .iter()
-            .map(|id| okena_transport::client::strip_prefix(id, client.connection_id()))
-            .collect();
-
         cx.spawn(async move |_this, cx| {
-            let result = smol::unblock(move || {
-                if !existing.is_empty() {
-                    // Best-effort: a terminal that has already gone should not
-                    // block the restart the user asked for.
-                    let _ = client.post_action(okena_core::api::ActionRequest::CloseTerminals {
-                        project_id: daemon_id.clone(),
-                        terminal_ids: existing,
-                    });
-                }
-                client.post_action(okena_core::api::ActionRequest::CreateTerminal {
-                    project_id: daemon_id,
-                })
-            })
-            .await;
-
+            let result = smol::unblock(move || client.post_action(action(daemon_id))).await;
             if let Err(error) = result {
                 cx.update(|cx| {
                     crate::views::panels::toast::ToastManager::error(
-                        format!("Could not restart the agent: {error}"),
+                        format!("{failure}: {error}"),
                         cx,
                     );
                 });
@@ -490,74 +474,28 @@ impl AgentSessionPanel {
     /// and been told. It is also how an agent picks up a rebuilt okena: the
     /// restarted process reconnects okena's tools on the current build.
     fn resume_agent(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        let daemon_id =
-            okena_transport::client::strip_prefix(&self.project_id, client.connection_id());
-        cx.spawn(async move |_this, cx| {
-            let result = smol::unblock(move || {
-                client.post_action(okena_core::api::ActionRequest::AgentRestart {
-                    project_id: daemon_id,
-                })
-            })
-            .await;
-            if let Err(error) = result {
-                cx.update(|cx| {
-                    crate::views::panels::toast::ToastManager::error(
-                        format!("Could not restart the agent: {error}"),
-                        cx,
-                    );
-                });
-            }
-        })
-        .detach();
+        self.post_agent_action(
+            |project_id| okena_core::api::ActionRequest::AgentRestart { project_id },
+            "Could not restart the agent",
+            cx,
+        );
     }
 
     /// Stop the agent without tearing anything down.
     ///
-    /// Closes the session's terminals, which ends their tmux sessions and with
-    /// them the agent processes. The session project, its worktrees and any
-    /// work on disk all stay — "Start agent" brings it back.
+    /// Ends the agent's process only; its pane stays, marked stopped, and the
+    /// session's other terminals keep running. The session project, its
+    /// worktrees and any work on disk all stay — "Start agent" brings it back.
     ///
     /// Separate from deleting because they are different intents that were
     /// previously only reachable as one: stopping a runaway agent should not
     /// require destroying the checkouts it was working in.
     fn stop_agent(&mut self, cx: &mut Context<Self>) {
-        let client = self.client.clone();
-        let daemon_id =
-            okena_transport::client::strip_prefix(&self.project_id, client.connection_id());
-        let terminals: Vec<String> = self
-            .workspace
-            .read(cx)
-            .project(&self.project_id)
-            .and_then(|p| p.layout.as_ref())
-            .map(|l| l.collect_terminal_ids())
-            .unwrap_or_default()
-            .iter()
-            .map(|id| okena_transport::client::strip_prefix(id, client.connection_id()))
-            .collect();
-        if terminals.is_empty() {
-            return;
-        }
-
-        cx.spawn(async move |_this, cx| {
-            let result = smol::unblock(move || {
-                client.post_action(okena_core::api::ActionRequest::CloseTerminals {
-                    project_id: daemon_id,
-                    terminal_ids: terminals,
-                })
-            })
-            .await;
-
-            if let Err(error) = result {
-                cx.update(|cx| {
-                    crate::views::panels::toast::ToastManager::error(
-                        format!("Could not stop the agent: {error}"),
-                        cx,
-                    );
-                });
-            }
-        })
-        .detach();
+        self.post_agent_action(
+            |project_id| okena_core::api::ActionRequest::AgentStop { project_id },
+            "Could not stop the agent",
+            cx,
+        );
     }
 
     /// Tear down the session, and with `choice` its worktrees and branches.

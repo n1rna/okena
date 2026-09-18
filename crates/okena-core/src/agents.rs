@@ -93,9 +93,26 @@ pub fn detect_session_agent(
     }
 }
 
+/// How to name an agent to a reader: "Claude" for `claude`, and an agent
+/// okena does not know by its command, capitalised.
+pub fn display_name(command: &str) -> String {
+    match command {
+        "claude" => "Claude".to_string(),
+        "codex" => "Codex".to_string(),
+        "copilot" => "Copilot".to_string(),
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AGENT_COMMANDS, command_name, detect_agent, detect_session_agent};
+    use super::{AGENT_COMMANDS, command_name, detect_agent, detect_session_agent, display_name};
     use crate::shell::ShellType;
 
     fn custom(path: &str) -> ShellType {
@@ -194,5 +211,13 @@ mod tests {
     fn command_names_drop_directory_and_extension() {
         assert_eq!(command_name("/opt/bin/Claude"), "claude");
         assert_eq!(command_name(r"C:\x\codex.EXE"), "codex");
+    }
+
+    #[test]
+    fn agents_are_named_for_a_reader() {
+        assert_eq!(display_name("claude"), "Claude");
+        assert_eq!(display_name("codex"), "Codex");
+        assert_eq!(display_name("aider"), "Aider");
+        assert_eq!(display_name(""), "");
     }
 }

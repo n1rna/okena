@@ -981,13 +981,12 @@ pub(super) fn start_work(
                 {
                     p.default_shell = Some(shell);
                 }
-                let result = super::spawn_uninitialized_terminals(
+                let result = super::spawn_session_terminals(
                     ws,
                     &session_id,
                     backend,
                     terminals,
                     settings,
-                    None,
                     cx,
                 );
                 if let ActionResult::Err(e) = result {
@@ -2386,13 +2385,25 @@ pub(super) fn send_instruction(
     let Some(project) = ws.project(&project_id) else {
         return ActionResult::Err(format!("project not found: {project_id}"));
     };
-    // A session runs its agent in its one terminal; the visible one is the
-    // right choice if a session ever grows more.
-    let Some(terminal_id) = project.layout.as_ref().and_then(|l| {
-        l.visible_terminal_id()
-            .or_else(|| l.collect_terminal_ids().into_iter().next())
-    }) else {
+    // The agent's own pane: the session's other panes are shells, and typing
+    // an instruction into one would run it as a command.
+    let Some(layout) = project.layout.as_ref() else {
         return ActionResult::Err("this session has no terminal to send to".into());
+    };
+    let terminal_id = if layout.agent_terminal_path().is_some() {
+        match layout.agent_terminal_id() {
+            Some(id) => id,
+            None => return ActionResult::Err("the agent is stopped — start it first".into()),
+        }
+    } else {
+        // A session started without an agent: whatever it runs is visible.
+        match layout
+            .visible_terminal_id()
+            .or_else(|| layout.collect_terminal_ids().into_iter().next())
+        {
+            Some(id) => id,
+            None => return ActionResult::Err("this session has no terminal to send to".into()),
+        }
     };
     let Some(terminal) = super::ensure_terminal(&terminal_id, terminals, backend, ws, settings)
     else {
@@ -2645,15 +2656,9 @@ pub(super) fn start_custom_session(
         p.default_shell = Some(shell);
     }
 
-    if let ActionResult::Err(e) = super::spawn_uninitialized_terminals(
-        ws,
-        &session_id,
-        backend,
-        terminals,
-        settings,
-        None,
-        cx,
-    ) {
+    if let ActionResult::Err(e) =
+        super::spawn_session_terminals(ws, &session_id, backend, terminals, settings, cx)
+    {
         log::warn!("[agents] session terminal failed to spawn: {e}");
     }
 

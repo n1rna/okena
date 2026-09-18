@@ -239,6 +239,7 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
+                agent: false,
             }),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),

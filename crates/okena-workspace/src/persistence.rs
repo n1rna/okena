@@ -170,6 +170,52 @@ impl Drop for LockGuard {
     }
 }
 
+/// Give a session saved before agent panes were recorded its agent pane.
+///
+/// Such a session ran its agent in every pane that inherited the session's
+/// launch. The one that stays the agent is the pane already running an agent
+/// command of its own — where a resume put it — or else the first pane that
+/// inherits; every other pane is an ordinary terminal from now on.
+fn mark_legacy_agent_panes(data: &mut WorkspaceData) {
+    fn panes(node: &LayoutNode, path: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, ShellType)>) {
+        match node {
+            LayoutNode::Terminal { shell_type, .. } => out.push((path.clone(), shell_type.clone())),
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                for (i, child) in children.iter().enumerate() {
+                    path.push(i);
+                    panes(child, path, out);
+                    path.pop();
+                }
+            }
+        }
+    }
+
+    for project in &mut data.projects {
+        if project.default_shell.is_none() || !project.is_any_agent_session() {
+            continue;
+        }
+        let Some(layout) = project.layout.as_mut() else {
+            continue;
+        };
+        if layout.agent_terminal_path().is_some() {
+            continue;
+        }
+        let mut all = Vec::new();
+        panes(layout, &mut Vec::new(), &mut all);
+        let running_agent = all.iter().find(|(_, shell)| {
+            *shell != ShellType::Default
+                && okena_core::agents::detect_session_agent(shell, None, true).is_some()
+        });
+        let inherits = all.iter().find(|(_, shell)| *shell == ShellType::Default);
+        let Some((path, _)) = running_agent.or(inherits) else {
+            continue;
+        };
+        if let Some(LayoutNode::Terminal { agent, .. }) = layout.get_at_path_mut(path) {
+            *agent = true;
+        }
+    }
+}
+
 /// Validate and fix workspace data consistency.
 /// Called after deserialization in all load paths.
 pub(crate) fn validate_workspace_data(
@@ -235,6 +281,8 @@ pub(crate) fn validate_workspace_data(
             layout.normalize();
         }
     }
+
+    mark_legacy_agent_panes(data);
 
     // Clean up orphaned terminal metadata (terminal_names/hidden_terminals entries
     // for terminals no longer in the layout tree)
@@ -1348,6 +1396,7 @@ mod tests {
             detached: false,
             shell_type: Default::default(),
             zoom_level: 1.25,
+            agent: false,
         };
         let layout = ClientWindowLayout {
             version: WINDOW_LAYOUT_VERSION,
@@ -1470,6 +1519,7 @@ mod tests {
                     detached: false,
                     shell_type: Default::default(),
                     zoom_level: 1.5,
+                    agent: false,
                 },
             )]),
             service_panel_heights: HashMap::from([("p1".to_string(), 200.0)]),
@@ -1839,6 +1889,89 @@ mod tests {
 
     // === validate_workspace_data ===
 
+    fn legacy_pane(id: &str, shell_type: ShellType) -> LayoutNode {
+        LayoutNode::Terminal {
+            terminal_id: Some(id.to_string()),
+            minimized: false,
+            detached: false,
+            shell_type,
+            zoom_level: 1.0,
+            agent: false,
+        }
+    }
+
+    fn legacy_session(children: Vec<LayoutNode>) -> ProjectData {
+        let mut session = make_project("s");
+        session.custom_session = Some("Session".to_string());
+        session.default_shell = Some(ShellType::Custom {
+            path: "claude".to_string(),
+            args: vec!["Do the task".to_string()],
+        });
+        session.layout = Some(LayoutNode::Split {
+            direction: crate::state::SplitDirection::Horizontal,
+            sizes: vec![50.0; children.len()],
+            children,
+        });
+        session
+    }
+
+    fn agent_of(data: &WorkspaceData) -> Option<String> {
+        data.projects[0].layout.as_ref()?.agent_terminal_id()
+    }
+
+    #[test]
+    fn a_session_saved_before_agent_panes_gets_its_first_pane_as_the_agent() {
+        let mut data = make_workspace(
+            vec![legacy_session(vec![
+                legacy_pane("a", ShellType::Default),
+                legacy_pane("b", ShellType::Default),
+            ])],
+            vec!["s"],
+            vec![],
+        );
+        validate_workspace_data(&mut data, false, SessionBackend::None);
+        assert_eq!(agent_of(&data).as_deref(), Some("a"));
+        // Exactly one: the other pane is an ordinary terminal from now on.
+        let session = &data.projects[0];
+        assert_eq!(session.terminal_shell("b"), ShellType::Default);
+    }
+
+    #[test]
+    fn a_resumed_legacy_session_keeps_the_pane_its_agent_was_resumed_in() {
+        let resumed = ShellType::Custom {
+            path: "claude".to_string(),
+            args: vec!["--resume".to_string(), "abc".to_string()],
+        };
+        let mut data = make_workspace(
+            vec![legacy_session(vec![
+                legacy_pane("a", ShellType::Default),
+                legacy_pane("b", resumed),
+            ])],
+            vec!["s"],
+            vec![],
+        );
+        validate_workspace_data(&mut data, false, SessionBackend::None);
+        assert_eq!(agent_of(&data).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn ordinary_projects_are_not_given_an_agent_pane() {
+        let mut project = make_project("p");
+        project.default_shell = Some(ShellType::Custom {
+            path: "/bin/fish".to_string(),
+            args: Vec::new(),
+        });
+        let mut data = make_workspace(vec![project], vec!["p"], vec![]);
+        validate_workspace_data(&mut data, false, SessionBackend::None);
+        assert_eq!(
+            data.projects[0]
+                .layout
+                .as_ref()
+                .and_then(LayoutNode::agent_terminal_path),
+            None
+        );
+    }
+
     #[test]
     fn validate_orphaned_project_added_to_order() {
         let mut data = make_workspace(
@@ -1891,6 +2024,7 @@ mod tests {
             detached: true,
             shell_type: okena_terminal::shell_config::ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         });
         project
             .service_terminals
@@ -1930,6 +2064,7 @@ mod tests {
                     detached: false,
                     shell_type: okena_terminal::shell_config::ShellType::Default,
                     zoom_level: 1.0,
+                    agent: false,
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("hook-term".to_string()),
@@ -1937,6 +2072,7 @@ mod tests {
                     detached: false,
                     shell_type: okena_terminal::shell_config::ShellType::Default,
                     zoom_level: 1.0,
+                    agent: false,
                 },
             ],
         });
@@ -2473,6 +2609,7 @@ mod tests {
             detached: false,
             shell_type: okena_terminal::shell_config::ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         });
         // t1 is in layout, t2 and t3 are orphaned
         project
@@ -2946,6 +3083,7 @@ mod tests {
             detached: false,
             shell_type: Default::default(),
             zoom_level: 1.0,
+            agent: false,
         });
         wt.service_terminals
             .insert("service".to_string(), "stale-service".to_string());
@@ -3026,6 +3164,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         });
         worktree
             .service_terminals
@@ -3080,6 +3219,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         });
         let mut data = make_workspace(
             vec![make_project("p1"), worktree],

@@ -776,13 +776,27 @@ impl Render for TerminalContent {
             .update_matches(&self.terminal, validate_paths_locally);
 
         let Some(ref terminal) = self.terminal else {
+            // An agent pane with nothing running is a stopped agent, not a
+            // terminal on its way: it comes back only when asked to.
+            let stopped_agent = self
+                .workspace
+                .read(cx)
+                .project(&self.project_id)
+                .and_then(|p| p.layout.as_ref())
+                .and_then(|l| l.get_at_path(&self.layout_path))
+                .is_some_and(|node| node.is_agent());
+            let message = if stopped_agent {
+                "The agent stopped. Start or resume it from the agent panel."
+            } else {
+                "Starting terminal\u{2026}"
+            };
             return div()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(rgb(t.text_muted))
-                .child("Starting terminal\u{2026}")
+                .child(message)
                 .into_any_element();
         };
 

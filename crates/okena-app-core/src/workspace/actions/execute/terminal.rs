@@ -21,6 +21,7 @@ use okena_terminal::shell_config::ShellType;
 use okena_terminal::terminal::Terminal;
 use okena_terminal::terminal::TerminalSize;
 use okena_workspace::context::WorkspaceCx;
+use okena_workspace::state::LayoutNode;
 
 fn with_ensured_terminal(
     ws: &Workspace,
@@ -129,9 +130,11 @@ pub(super) fn switch_shell(
 
 /// Restart a session's agent, resuming its conversation.
 ///
-/// The agent's terminal is torn down — its tmux session with it, so the old
-/// process cannot keep running beside the resumed one — and respawned as the
-/// agent's resume command. A stopped session, with no terminal, gets one.
+/// The agent's own pane is torn down — its tmux session with it, so the old
+/// process cannot keep running beside the resumed one — and respawned in
+/// place as the agent's resume command. A stopped agent is resumed in its
+/// pane. The session's other terminals, and whichever pane has focus, are
+/// not touched.
 ///
 /// The session's own `default_shell` is left as the original launch: it still
 /// carries the conversation id every later restart resumes by, and "Start
@@ -170,40 +173,149 @@ pub(super) fn restart_agent(
     let Some(resume) = super::agent_resume::resume_shell(&launch, settings) else {
         return ActionResult::Err("okena does not know how to resume this agent".into());
     };
-    let current = project.layout.as_ref().and_then(|l| {
-        l.visible_terminal_id()
-            .or_else(|| l.collect_terminal_ids().into_iter().next())
-    });
+    respawn_agent(
+        ws,
+        focus_manager,
+        &project_id,
+        resume,
+        backend,
+        terminals,
+        settings,
+        cx,
+    )
+}
 
-    let path = match current {
-        Some(terminal_id) => {
-            let Some(path) = find_terminal_path(ws, &project_id, &terminal_id) else {
-                return ActionResult::Err(format!("terminal not found: {terminal_id}"));
-            };
-            if terminals.lock().contains_key(&terminal_id) {
-                ws.remember_closing_terminal_owner(&project_id, &terminal_id);
-            }
-            backend.kill(&terminal_id);
-            terminals.lock().remove(&terminal_id);
-            // A new id means a new tmux session: reusing the old one would
-            // reattach to whatever it was running instead of resuming.
-            ws.clear_terminal_id(&project_id, &path, cx);
+/// Start a session's agent again from its brief, in its own pane.
+///
+/// A running agent is replaced: a new terminal id means a new tmux session,
+/// where reusing the old one would reattach to the old process. The pane
+/// inherits the session's launch — the agent command, brief and MCP config
+/// chosen when the session was started.
+pub(super) fn start_agent(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    project_id: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    match ws.project(&project_id) {
+        None => return ActionResult::Err(format!("project not found: {project_id}")),
+        Some(project) if project.default_shell.is_none() => {
+            return ActionResult::Err("this session was not started with an agent".into());
+        }
+        Some(_) => {}
+    }
+    respawn_agent(
+        ws,
+        focus_manager,
+        &project_id,
+        ShellType::Default,
+        backend,
+        terminals,
+        settings,
+        cx,
+    )
+}
+
+/// Stop a session's agent, leaving its pane in place as a stopped agent.
+///
+/// Only the agent's process ends — its tmux session with it. The session's
+/// other terminals keep running, and Start or Resume bring the agent back in
+/// the same pane.
+pub(super) fn stop_agent(
+    ws: &mut Workspace,
+    project_id: String,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let Some(path) = agent_pane(ws, &project_id) else {
+        return ActionResult::Err("this session has no agent terminal".into());
+    };
+    stop_agent_process(ws, &project_id, &path, backend, terminals, cx);
+    ActionResult::Ok(None)
+}
+
+/// The path to a session's agent pane.
+fn agent_pane(ws: &Workspace, project_id: &str) -> Option<Vec<usize>> {
+    ws.project(project_id)?
+        .layout
+        .as_ref()?
+        .agent_terminal_path()
+}
+
+/// End the agent running in the pane at `path`, if one is.
+fn stop_agent_process(
+    ws: &mut Workspace,
+    project_id: &str,
+    path: &[usize],
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    cx: &mut impl WorkspaceCx,
+) {
+    let running = ws
+        .project(project_id)
+        .and_then(|p| p.layout.as_ref())
+        .and_then(|l| l.get_at_path(path))
+        .and_then(|node| match node {
+            LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+            _ => None,
+        });
+    let Some(terminal_id) = running else {
+        return;
+    };
+    if terminals.lock().contains_key(&terminal_id) {
+        ws.remember_closing_terminal_owner(project_id, &terminal_id);
+    }
+    backend.kill(&terminal_id);
+    terminals.lock().remove(&terminal_id);
+    ws.clear_terminal_id(project_id, path, cx);
+}
+
+/// Run `shell` as the session's agent, in the agent's own pane.
+///
+/// Whatever the pane runs now is ended first. A session whose agent pane was
+/// closed gets a new one.
+#[allow(clippy::too_many_arguments)]
+fn respawn_agent(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    project_id: &str,
+    shell: ShellType,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let path = match agent_pane(ws, project_id) {
+        Some(path) => {
+            stop_agent_process(ws, project_id, &path, backend, terminals, cx);
             path
         }
         None => {
-            ws.add_terminal(focus_manager, &project_id, cx);
-            match ws
-                .project(&project_id)
-                .and_then(|p| p.layout.as_ref())
-                .and_then(|l| l.find_uninitialized_terminal_path())
-            {
-                Some(path) => path,
-                None => return ActionResult::Err("could not add a terminal to resume in".into()),
+            ws.add_terminal(focus_manager, project_id, cx);
+            let Some(layout) = ws
+                .data
+                .projects
+                .iter_mut()
+                .find(|p| p.id == project_id)
+                .and_then(|p| p.layout.as_mut())
+            else {
+                return ActionResult::Err("could not add a terminal for the agent".into());
+            };
+            let Some(path) = layout.find_uninitialized_terminal_path() else {
+                return ActionResult::Err("could not add a terminal for the agent".into());
+            };
+            if let Some(LayoutNode::Terminal { agent, .. }) = layout.get_at_path_mut(&path) {
+                *agent = true;
             }
+            path
         }
     };
-    ws.set_terminal_shell(&project_id, &path, resume, cx);
-    spawn_uninitialized_terminals(ws, &project_id, backend, terminals, settings, None, cx)
+    ws.set_terminal_shell(project_id, &path, shell, cx);
+    super::spawn_agent_terminal(ws, project_id, backend, terminals, settings, cx)
 }
 
 pub(super) fn close(

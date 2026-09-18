@@ -31,6 +31,15 @@ pub enum LayoutNode {
         shell_type: ShellType,
         #[serde(default = "default_zoom_level")]
         zoom_level: f32,
+        /// This pane is its agent session's agent: it runs the session's
+        /// launch, and every other pane in the session is an ordinary shell.
+        ///
+        /// A stopped agent keeps its pane with no `terminal_id`, so nothing
+        /// that spawns or revives terminals may treat such a pane as waiting
+        /// to start — only the session's Start, Resume and Restart bring it
+        /// back.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        agent: bool,
     },
     Split {
         direction: SplitDirection,
@@ -133,6 +142,7 @@ impl LayoutNode {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         }
     }
 
@@ -158,6 +168,7 @@ impl LayoutNode {
             detached: false,
             shell_type: ShellType::for_command(full_cmd),
             zoom_level: 1.0,
+            agent: false,
         }
     }
 
@@ -603,7 +614,46 @@ impl LayoutNode {
         }
     }
 
+    /// Whether this node is an agent session's agent pane.
+    pub fn is_agent(&self) -> bool {
+        matches!(self, LayoutNode::Terminal { agent: true, .. })
+    }
+
+    /// The path to the agent pane in this subtree, if it has one.
+    pub fn agent_terminal_path(&self) -> Option<Vec<usize>> {
+        match self {
+            LayoutNode::Terminal { agent: true, .. } => Some(Vec::new()),
+            LayoutNode::Terminal { .. } => None,
+            LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
+                children.iter().enumerate().find_map(|(i, child)| {
+                    let mut path = child.agent_terminal_path()?;
+                    path.insert(0, i);
+                    Some(path)
+                })
+            }
+        }
+    }
+
+    /// The agent pane's terminal id, while its agent runs.
+    pub fn agent_terminal_id(&self) -> Option<String> {
+        let path = self.agent_terminal_path()?;
+        match self.get_at_path(&path)? {
+            LayoutNode::Terminal { terminal_id, .. } => terminal_id.clone(),
+            _ => None,
+        }
+    }
+
+    /// Whether `terminal_id` is this layout's agent pane.
+    pub fn is_agent_terminal(&self, terminal_id: &str) -> bool {
+        self.find_terminal_path(terminal_id)
+            .and_then(|path| self.get_at_path(&path))
+            .is_some_and(LayoutNode::is_agent)
+    }
+
     /// Find the path to the first uninitialized terminal (terminal_id: None) in this subtree.
+    ///
+    /// A stopped agent pane has no id either, but it is not waiting to start:
+    /// it is skipped.
     pub fn find_uninitialized_terminal_path(&self) -> Option<Vec<usize>> {
         self.find_uninitialized_terminal_path_recursive(vec![])
     }
@@ -614,7 +664,9 @@ impl LayoutNode {
     ) -> Option<Vec<usize>> {
         match self {
             LayoutNode::Terminal {
-                terminal_id: None, ..
+                terminal_id: None,
+                agent: false,
+                ..
             } => Some(current_path),
             LayoutNode::Terminal { .. } => None,
             LayoutNode::Split { children, .. } | LayoutNode::Tabs { children, .. } => {
@@ -870,6 +922,7 @@ impl LayoutNode {
                 detached: false,
                 shell_type: shell_type.clone(),
                 zoom_level: *zoom_level,
+                agent: false,
             },
             LayoutNode::Split {
                 direction,
@@ -1102,6 +1155,7 @@ impl LayoutNode {
                 minimized,
                 detached,
                 shell_type,
+                agent,
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.clone(),
@@ -1109,6 +1163,7 @@ impl LayoutNode {
                 detached: *detached,
                 shell_type: shell_type.clone(),
                 zoom_level: 1.0,
+                agent: *agent,
             },
             okena_core::api::ApiLayoutNode::Split {
                 direction,
@@ -1138,6 +1193,7 @@ impl LayoutNode {
                 minimized,
                 detached,
                 shell_type,
+                agent,
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.as_ref().map(|id| format!("{}:{}", prefix, id)),
@@ -1145,6 +1201,7 @@ impl LayoutNode {
                 detached: *detached,
                 shell_type: shell_type.clone(),
                 zoom_level: 1.0,
+                agent: *agent,
             },
             okena_core::api::ApiLayoutNode::Split {
                 direction,
@@ -1187,6 +1244,7 @@ impl LayoutNode {
                 minimized,
                 detached,
                 shell_type,
+                agent,
                 ..
             } => {
                 let (cols, rows) = terminal_id
@@ -1201,6 +1259,7 @@ impl LayoutNode {
                     shell_type: shell_type.clone(),
                     cols,
                     rows,
+                    agent: *agent,
                 }
             }
             LayoutNode::Split {
@@ -1242,6 +1301,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         }
     }
 
@@ -1252,6 +1312,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         }
     }
 
@@ -1262,6 +1323,7 @@ mod tests {
             detached: true,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         }
     }
 
@@ -1314,6 +1376,7 @@ mod tests {
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 2.5,
+                agent: false,
             },
         ]);
         let node = tree.find_terminal_node("b").expect("b present");
@@ -2164,6 +2227,7 @@ mod tests {
                 args: Vec::new(),
             },
             zoom_level: 1.0,
+            agent: false,
         };
         let local = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
@@ -2171,6 +2235,7 @@ mod tests {
             detached: true,
             shell_type: ShellType::Default,
             zoom_level: 1.75,
+            agent: false,
         };
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match merged {
@@ -2180,6 +2245,7 @@ mod tests {
                 terminal_id,
                 shell_type,
                 zoom_level,
+                ..
             } => {
                 assert_eq!(terminal_id.as_deref(), Some("t1"));
                 assert!(minimized, "local minimized should be preserved");
@@ -2209,6 +2275,7 @@ mod tests {
                 args: vec!["--private".to_string()],
             },
             zoom_level: 2.0,
+            agent: false,
         };
 
         let restored = LayoutNode::from_api(&node.to_api());
@@ -2336,6 +2403,7 @@ mod tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.75,
+                    agent: false,
                 },
                 terminal_minimized("t2"),
             ],
@@ -2443,6 +2511,7 @@ mod tests {
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
+                    agent: false,
                 },
                 LayoutNode::Tabs {
                     children: vec![terminal("t2"), terminal("t3")],
@@ -2479,6 +2548,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.5,
+            agent: false,
         };
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match &merged {
@@ -2578,6 +2648,7 @@ mod tests {
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
+            agent: false,
         };
         assert_eq!(empty.single_terminal(), None);
 
@@ -2605,5 +2676,58 @@ mod tests {
             sizes: vec![0.5, 0.5],
         };
         assert!(!split.is_in_tab_group(&[1]));
+    }
+
+    fn agent(id: Option<&str>) -> LayoutNode {
+        LayoutNode::Terminal {
+            terminal_id: id.map(str::to_string),
+            minimized: false,
+            detached: false,
+            shell_type: ShellType::Default,
+            zoom_level: 1.0,
+            agent: true,
+        }
+    }
+
+    #[test]
+    fn the_agent_mark_survives_saving_and_the_wire() {
+        let layout = LayoutNode::Split {
+            direction: SplitDirection::Horizontal,
+            sizes: vec![50.0, 50.0],
+            children: vec![agent(Some("a")), terminal("b")],
+        };
+        let json = serde_json::to_string(&layout).expect("serialize");
+        let back: LayoutNode = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, layout);
+        // Only the agent pane carries the field on disk.
+        assert_eq!(json.matches("\"agent\"").count(), 1);
+
+        let remote = LayoutNode::from_api_prefixed(&layout.to_api(), "remote:c");
+        assert_eq!(remote.agent_terminal_id().as_deref(), Some("remote:c:a"));
+        assert!(!remote.is_agent_terminal("remote:c:b"));
+    }
+
+    #[test]
+    fn a_layout_saved_before_agent_panes_loads_without_one() {
+        let json = r#"{"type":"terminal","terminal_id":"t","minimized":false,"detached":false}"#;
+        let layout: LayoutNode = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(layout.agent_terminal_path(), None);
+        let api: okena_core::api::ApiLayoutNode = serde_json::from_str(
+            r#"{"type":"terminal","terminal_id":"t","minimized":false,"detached":false}"#,
+        )
+        .expect("deserialize api");
+        assert!(!LayoutNode::from_api(&api).is_agent());
+    }
+
+    #[test]
+    fn a_stopped_agent_pane_is_not_waiting_to_start() {
+        let layout = LayoutNode::Tabs {
+            children: vec![agent(None), LayoutNode::new_terminal()],
+            active_tab: 0,
+        };
+        // The new tab is the pane waiting to spawn, not the stopped agent.
+        assert_eq!(layout.find_uninitialized_terminal_path(), Some(vec![1]));
+        assert_eq!(layout.agent_terminal_path(), Some(vec![0]));
+        assert_eq!(layout.agent_terminal_id(), None);
     }
 }

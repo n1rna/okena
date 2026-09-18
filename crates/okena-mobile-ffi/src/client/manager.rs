@@ -811,6 +811,7 @@ mod tests {
             shell_type,
             cols: None,
             rows: None,
+            agent: false,
         }
     }
 

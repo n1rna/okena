@@ -21,6 +21,7 @@ pub use okena_app_core::{settings, workspace};
 mod macros;
 
 pub mod action_dispatch;
+pub mod agent_close;
 pub mod app;
 pub mod app_menu;
 pub mod elements;
