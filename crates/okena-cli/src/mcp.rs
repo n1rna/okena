@@ -510,12 +510,12 @@ fn tool_definitions() -> Value {
             "description":
                 "Plan how you will verify your work, before you run anything: submit \
                  the ordered steps of this session's test run, each with a title and \
-                 what passing it proves. okena shows the plan in Harness → Testing as \
-                 soon as you send it, then every step as it advances, so plan first \
-                 and report as you go. Until a step starts you can call this again to \
-                 replace the plan. Once one has started it is rejected, so the steps \
-                 already run keep their results — finish the run with \
-                 `okena_test_run_finish` and plan a new one instead.",
+                 what passing it proves. okena shows the plan on your agent panel, in \
+                 its Testing tab, as soon as you send it, then every step as it \
+                 advances, so plan first and report as you go. Until a step starts you \
+                 can call this again to replace the plan. Once one has started it is \
+                 rejected, so the steps already run keep their results — finish the \
+                 run with `okena_test_run_finish` and plan a new one instead.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

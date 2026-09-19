@@ -349,8 +349,6 @@ pub struct HarnessPane {
     pub(crate) spec_files: file_ops::FileOps,
     /// Creating, renaming and deleting files in the Knowledge tree.
     pub(crate) knowledge_files: file_ops::FileOps,
-    /// The Testing view's canvas. Built only for that section's pane.
-    pub(crate) testing: Option<Entity<testing_view::TestingView>>,
     /// The projects-and-context dialog a Specs or Knowledge launcher opened.
     pub(crate) context_dialog: Option<context_dialog::ContextTarget>,
 }
@@ -424,14 +422,6 @@ impl HarnessPane {
         let knowledge_refine = doc_agents::DocRefine::new();
         let spec_files = file_ops::FileOps::new(cx);
         let knowledge_files = file_ops::FileOps::new(cx);
-        let testing = (section == HarnessSection::Testing).then(|| {
-            let (workspace, focus_manager, window_id) = (
-                ctx.workspace.clone(),
-                ctx.focus_manager.clone(),
-                ctx.window_id,
-            );
-            cx.new(|cx| testing_view::TestingView::new(workspace, focus_manager, window_id, cx))
-        });
         let mut pane = Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -505,7 +495,6 @@ impl HarnessPane {
             knowledge_refine,
             spec_files,
             knowledge_files,
-            testing,
             context_dialog: None,
         };
         match section {

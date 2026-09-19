@@ -15,6 +15,7 @@ mod detect;
 mod launch;
 pub(crate) mod model;
 mod render;
+mod testing;
 
 pub use detect::{AGENT_COMMANDS, detect_agent};
 pub use launch::{launch_option, launch_options, launcher_session, no_agent_option};
@@ -113,12 +114,16 @@ fn teardown_notes(result: &serde_json::Value) -> Vec<String> {
     notes
 }
 
-/// What a compact panel is showing.
+/// What the panel is showing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PanelTab {
     #[default]
     Info,
+    /// The live terminal. Only offered at compact density: the full sidebar
+    /// sits beside a terminal already.
     Terminal,
+    /// The agent's verification runs. Only offered once it has one.
+    Testing,
 }
 
 /// Everything an info panel needs from its host — an agent session's, or a
@@ -149,9 +154,12 @@ pub struct AgentSessionPanel {
     /// The session this panel describes.
     project_id: String,
     density: PanelDensity,
-    /// Info or the live terminal. Only meaningful at compact density; the full
-    /// sidebar sits beside a terminal already.
+    /// The tab the user picked. Only ever changed by a click: a run starting
+    /// or a step moving never pulls the user off what they were reading.
     tab: PanelTab,
+    /// Log tails shown in full on the Testing tab, by run id and step index.
+    /// Shut by default: a wall of output per step would bury the plan.
+    open_logs: std::collections::HashSet<(String, usize)>,
     /// Two-step delete: the first click arms, the second confirms. The choices
     /// on the card while armed, fresh each time it opens.
     pending_delete: Option<DeleteChoice>,
@@ -220,6 +228,7 @@ impl AgentSessionPanel {
             project_id,
             density,
             tab: PanelTab::default(),
+            open_logs: Default::default(),
             pending_delete: None,
             terminal: None,
             remote_manager: None,
@@ -258,6 +267,9 @@ impl AgentSessionPanel {
         self.pending_delete = None;
         self.terminal = None;
         self.sending = false;
+        // Another agent opens on Info, like any panel does, with its logs shut.
+        self.tab = PanelTab::default();
+        self.open_logs.clear();
         // Showing a session again reads its tasks' states afresh, starting
         // now rather than at the next frame.
         self.task_states_requested.clear();
