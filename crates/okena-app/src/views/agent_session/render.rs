@@ -895,8 +895,87 @@ impl AgentSessionPanel {
             .into_any_element()
     }
 
+    /// One tab of the strip. `live` adds a dot after the label, so a user on
+    /// another tab can see something is happening in this one.
+    fn tab_button(
+        &self,
+        label: &'static str,
+        value: PanelTab,
+        shown: PanelTab,
+        live: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let selected = shown == value;
+        h_flex()
+            .id(ElementId::Name(
+                format!("agent-tab-{}-{label}", self.project_id).into(),
+            ))
+            .items_center()
+            .gap(px(5.0))
+            .cursor_pointer()
+            .px(px(8.0))
+            .py(px(2.0))
+            .rounded(px(4.0))
+            .when(selected, |d| {
+                d.bg(with_alpha(t.button_primary_bg, 0.2))
+                    .text_color(rgb(t.text_primary))
+            })
+            .when(!selected, |d| {
+                d.text_color(rgb(t.text_muted))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+            })
+            .text_size(ui_text_ms(cx))
+            .child(label)
+            .when(live, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(rgb(t.term_blue)),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.tab = value;
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// Info and Testing, for a panel without a header of its own. Only drawn
+    /// once the agent has a run: until then the panel is Info alone and looks
+    /// as it always has.
+    fn render_tab_strip(
+        &self,
+        tab: PanelTab,
+        testing_live: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        h_flex()
+            .flex_shrink_0()
+            .gap(px(2.0))
+            .px(px(10.0))
+            .py(px(6.0))
+            .border_b_1()
+            .border_color(rgb(t.border))
+            .child(self.tab_button("Info", PanelTab::Info, tab, false, cx))
+            .child(self.tab_button("Testing", PanelTab::Testing, tab, testing_live, cx))
+            .into_any_element()
+    }
+
     /// Header: who this session is, how it is doing, and the way into it.
-    fn render_header(&self, info: &AgentSessionInfo, cx: &mut Context<Self>) -> AnyElement {
+    fn render_header(
+        &self,
+        info: &AgentSessionInfo,
+        tab: PanelTab,
+        testing: Option<bool>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
         let open_id = info.project_id.clone();
 
@@ -925,50 +1004,25 @@ impl AgentSessionPanel {
         // The tab strip only exists where the terminal isn't already on screen,
         // which is exactly where the panel draws its own header.
         {
-            let tab = |this: &Self,
-                       label: &'static str,
-                       value: PanelTab,
-                       cx: &mut Context<Self>|
-             -> AnyElement {
-                let selected = this.tab == value;
-                div()
-                    .id(ElementId::Name(
-                        format!("agent-tab-{}-{label}", this.project_id).into(),
-                    ))
-                    .cursor_pointer()
-                    .px(px(8.0))
-                    .py(px(2.0))
-                    .rounded(px(4.0))
-                    .when(selected, |d| {
-                        d.bg(with_alpha(t.button_primary_bg, 0.2))
-                            .text_color(rgb(t.text_primary))
-                    })
-                    .when(!selected, |d| {
-                        d.text_color(rgb(t.text_muted))
-                            .hover(|s| s.bg(rgb(t.bg_hover)))
-                    })
-                    .text_size(ui_text_ms(cx))
-                    .child(label)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _window, cx| {
-                            this.tab = value;
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element()
-            };
+            let mut tabs = h_flex()
+                .gap(px(2.0))
+                .child(self.tab_button("Info", PanelTab::Info, tab, false, cx))
+                .child(self.tab_button("Terminal", PanelTab::Terminal, tab, false, cx));
+            if let Some(testing_live) = testing {
+                tabs = tabs.child(self.tab_button(
+                    "Testing",
+                    PanelTab::Testing,
+                    tab,
+                    testing_live,
+                    cx,
+                ));
+            }
             header = header.child(
                 h_flex()
                     .items_center()
                     .justify_between()
                     .gap(px(6.0))
-                    .child(
-                        h_flex()
-                            .gap(px(2.0))
-                            .child(tab(self, "Info", PanelTab::Info, cx))
-                            .child(tab(self, "Terminal", PanelTab::Terminal, cx)),
-                    )
+                    .child(tabs)
                     .child(
                         div()
                             .id(ElementId::Name(
@@ -1013,22 +1067,29 @@ impl Render for AgentSessionPanel {
         };
         self.fetch_task_states(&info.assets, cx);
 
+        let runs = self.verification_runs(cx);
+        let tab = super::testing::visible_tab(self.tab, !runs.is_empty());
+        // Whether the Testing tab is offered, and if so whether it is live.
+        let testing = (!runs.is_empty()).then(|| super::testing::any_run_in_progress(&runs));
+
         // Bind the terminal here rather than only on the tab switch: a session
         // that has just restarted has no terminal in the snapshot yet, and its
         // layout arrives a frame or two later.
-        if self.density.has_header() && self.tab == PanelTab::Terminal {
+        if self.density.has_header() && tab == PanelTab::Terminal {
             self.sync_terminal(cx);
         }
 
-        let body = if self.density.has_header() && self.tab == PanelTab::Terminal {
-            self.render_terminal(cx)
-        } else {
-            self.render_info(&info, cx)
+        let body = match tab {
+            PanelTab::Terminal if self.density.has_header() => self.render_terminal(cx),
+            PanelTab::Testing => self.render_testing(&runs, cx),
+            _ => self.render_info(&info, cx),
         };
 
         let mut root = v_flex().size_full().bg(rgb(t.bg_primary));
         if self.density.has_header() {
-            root = root.child(self.render_header(&info, cx));
+            root = root.child(self.render_header(&info, tab, testing, cx));
+        } else if let Some(testing_live) = testing {
+            root = root.child(self.render_tab_strip(tab, testing_live, cx));
         }
         root.child(body)
     }
