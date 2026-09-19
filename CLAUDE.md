@@ -66,13 +66,12 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-services` | Docker Compose, port detection |
 | `okena-openspec` | OpenSpec on disk, CLI-compatible: store registry (with the CLI's lock), store identity, root discovery, planning tree, store setup. GPUI-free. |
 | `okena-knowledge` | Knowledge stores on disk (ADR-0003): store identity, project `.okena/knowledge.yaml`, okena's per-profile store registry, discovery, the entry tree (docs/skills/agents/templates), clone/fetch/fast-forward sync and store setup over `okena-git`, launch prompts and built-in skills, and project maps (`project-map.yaml`, ADR-0005) read and validated. GPUI-free. |
-| `okena-extensions` | Built-in (in-process, GPUI) extension system: claude, codex, github, updater |
+| `okena-extensions` | Built-in (in-process, GPUI) extension system: usage, status, updater |
 | `okena-extension-api` | Rust SDK for extensions installed from git; holds the `okena:extension` WIT (`wit/extension.wit`) |
 | `okena-extension-host` | Runs extensions from git as WASM (wasmtime) for the daemon: manifest, permissions, dependency check, install/update/remove. GPUI-free. See `docs/reference/extensions.md`. |
 | `okena-views-extensions` | Native views for extensions from git: their own view, table/tree/chart components, Settings → Extensions install and config |
-| `okena-ext-claude` | Claude AI extension |
-| `okena-ext-codex` | Codex extension |
-| `okena-ext-github` | GitHub status extension |
+| `okena-ext-usage` | Usage extension: Claude, Codex and Copilot limits on the status bar, which agents chosen in its settings |
+| `okena-ext-status` | Status extension: Claude, Codex, GitHub and GitLab status pages on the status bar, which services chosen in its settings |
 | `okena-ext-updater` | Self-update system |
 | `okena-core` | Shared data types only (no networking): wire schema (`api`), WS message types (`ws`), profiles, theme colors, process bus, key handling. Depended on by every crate. |
 | `okena-transport` | Networking/transport over the `okena-core` schema: async client engine (WS connection + TLS pinning, `client` feature) and blocking HTTP + `remote_action` (`blocking-http` feature). Holds the heavy optional deps (tokio/reqwest/tungstenite/rustls) split out of `okena-core`. |

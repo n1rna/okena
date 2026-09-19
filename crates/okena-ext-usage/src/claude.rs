@@ -1,4 +1,4 @@
-use crate::ui_helpers::capitalize_first;
+use crate::util::capitalize_first;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -508,13 +508,6 @@ fn parse_iso8601_to_epoch(ts: &str) -> Option<f64> {
     Some(timestamp.as_millisecond() as f64 / 1_000.0)
 }
 
-/// Parse an ISO 8601 timestamp to a local Zoned datetime.
-/// Returns `None` if parsing fails.
-pub(crate) fn parse_iso8601_to_local(ts: &str) -> Option<jiff::Zoned> {
-    let timestamp: jiff::Timestamp = ts.parse().ok()?;
-    Some(timestamp.to_zoned(jiff::tz::TimeZone::system()))
-}
-
 impl ClaudeUsageData {
     /// Get the shared data entity, creating it (and starting the poller) on first use.
     fn shared(cx: &mut App) -> Entity<Self> {
@@ -1021,6 +1014,7 @@ impl Render for ClaudeUsage {
                     .py(px(1.0))
                     .rounded(px(3.0))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .child(crate::bar::agent_icon(crate::selection::Agent::Claude, t.text_muted))
                     .children(usage_trigger_items(&t, cx, &items))
                     .child(
                         canvas(
@@ -1148,19 +1142,6 @@ mod tests {
     #[test]
     fn test_parse_iso8601_to_epoch_invalid() {
         assert!(parse_iso8601_to_epoch("not-a-date").is_none());
-    }
-
-    #[test]
-    fn test_parse_iso8601_to_local() {
-        let zoned = parse_iso8601_to_local("2025-06-15T14:00:00.000Z").unwrap();
-        // The local time depends on the system timezone, but should be a valid datetime
-        let tz_abbr = zoned.strftime("%Z").to_string();
-        assert!(!tz_abbr.is_empty(), "Expected non-empty tz abbreviation");
-    }
-
-    #[test]
-    fn test_parse_iso8601_to_local_invalid() {
-        assert!(parse_iso8601_to_local("garbage").is_none());
     }
 
     #[test]

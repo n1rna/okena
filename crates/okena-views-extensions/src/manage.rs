@@ -1,4 +1,4 @@
-//! Settings → Extensions for extensions installed from git: install from a
+//! The Extensions page for extensions installed from git: install from a
 //! URL (or a local folder), approve what an extension asks for, turn it on
 //! and off, configure it, update it, reload it, remove it.
 
@@ -14,7 +14,6 @@ use okena_core::extension::{
 };
 use okena_ui::button::{button, button_primary};
 use okena_ui::input::input_container;
-use okena_ui::settings::{section_container, section_header, section_note};
 use okena_ui::simple_input::{SimpleInput, SimpleInputState};
 use okena_ui::theme::{ThemeColors, theme, with_alpha};
 use okena_ui::toggle::toggle_switch;
@@ -64,6 +63,9 @@ pub struct ExtensionsManager {
     expanded: Option<String>,
     configs: HashMap<String, ConfigForm>,
     confirm_remove: Option<String>,
+    /// Horizontal space kept on each side. Settings lays sections out edge
+    /// to edge and wants its gutter; the Extensions page pads its own column.
+    inset: Pixels,
     _extensions: Option<Subscription>,
 }
 
@@ -88,6 +90,7 @@ impl ExtensionsManager {
             expanded: None,
             configs: HashMap::new(),
             confirm_remove: None,
+            inset: px(16.0),
             _extensions: subscription,
         };
         if let Some(key) = open {
@@ -240,6 +243,20 @@ impl ExtensionsManager {
     }
 
     // ─── Installed extensions ───────────────────────────────────────────────
+
+    /// Set the horizontal space kept on each side.
+    pub fn set_inset(&mut self, inset: Pixels, cx: &mut Context<Self>) {
+        self.inset = inset;
+        cx.notify();
+    }
+
+    /// Show the extension `key` with its details open, whatever was open
+    /// before. How an extension's own view sends you to its settings.
+    pub fn open(&mut self, key: String, cx: &mut Context<Self>) {
+        if self.expanded.as_deref() != Some(key.as_str()) {
+            self.expand(key, cx);
+        }
+    }
 
     fn expand(&mut self, key: String, cx: &mut Context<Self>) {
         if self.expanded.as_deref() == Some(key.as_str()) {
@@ -456,35 +473,51 @@ impl ExtensionsManager {
         let list: Vec<Arc<ClientExtension>> = extensions_entity(cx)
             .map(|e| e.read(cx).list().to_vec())
             .unwrap_or_default();
-        let mut section = section_container(&t);
+        let updates = list.iter().filter(|e| e.ext.update.is_some()).count();
+        let caption = match (list.len(), updates) {
+            (0, _) => "None yet — install one below.".to_string(),
+            (n, 0) => format!("{n} installed"),
+            (n, u) => format!("{n} installed · {u} with an update"),
+        };
+        let mut cards = v_flex().gap(px(8.0));
         if list.is_empty() {
-            section = section.child(
-                div()
-                    .p(px(12.0))
-                    .text_size(ui_text_md(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child("No extensions are installed from git yet."),
+            cards = cards.child(
+                card(&t)
+                    .p(px(20.0))
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(icon_tile("icons/puzzle.svg", t.text_muted))
+                    .child(
+                        div()
+                            .text_size(ui_text_md(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child("No extensions are installed from git yet."),
+                    ),
             );
         }
-        let count = list.len();
-        for (i, ext) in list.iter().enumerate() {
-            section = section.child(self.render_row(ext, i + 1 < count, cx));
+        for ext in &list {
+            cards = cards.child(self.render_row(ext, cx));
         }
         v_flex()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(section_header("Installed from git", &t, cx))
-                    .child(
-                        button("ext-check-updates", "Check for updates", &t)
-                            .on_click(cx.listener(|this, _, _, cx| this.check_updates(cx))),
-                    ),
-            )
-            .child(section)
+            .gap(px(10.0))
+            .child(heading(
+                "Installed from git",
+                caption,
+                Some(
+                    button("ext-check-updates", "Check for updates", &t)
+                        .border_1()
+                        .border_color(rgb(t.border))
+                        .on_click(cx.listener(|this, _, _, cx| this.check_updates(cx)))
+                        .into_any_element(),
+                ),
+                &t,
+                cx,
+            ))
+            .child(cards)
             .into_any_element()
     }
 
-    fn render_row(&mut self, ext: &ClientExtension, border: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn render_row(&mut self, ext: &ClientExtension, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let key = ext.key();
         let e = &ext.ext;
@@ -502,57 +535,113 @@ impl ExtensionsManager {
         let toggle_key = key.clone();
         let enabled = e.enabled;
         let expand_key = key.clone();
-        let mut header = h_flex()
+        let tile_color = if enabled { t.border_active } else { t.text_muted };
+
+        let mut badges = h_flex().gap(px(6.0)).items_center().child(badge(
+            &okena_core::extension::ExtBadge {
+                label: state_label.into(),
+                tone: state_tone,
+            },
+            &t,
+            cx,
+        ));
+        if !ext.local {
+            badges = badges.child(badge(
+                &okena_core::extension::ExtBadge {
+                    label: format!("on {}", ext.connection_name),
+                    tone: okena_core::extension::Tone::Info,
+                },
+                &t,
+                cx,
+            ));
+        }
+
+        let mut actions = h_flex().flex_shrink_0().items_center().gap(px(8.0));
+        if let Some(update) = &e.update {
+            let key = key.clone();
+            let label = if update.version.is_empty() {
+                "Update".to_string()
+            } else if update.added_permissions.is_empty() {
+                format!("Update to {}", update.version)
+            } else {
+                format!("Update to {} (asks for more)", update.version)
+            };
+            actions = actions.child(
+                button_primary(SharedString::from(format!("ext-update-{key}")), label, &t)
+                    .text_size(ui_text_ms(cx))
+                    .py(px(4.0))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.update(&key, cx)
+                    })),
+            );
+        }
+        if matches!(e.source, ExtSource::Local { .. }) {
+            let key = key.clone();
+            actions = actions.child(
+                button(SharedString::from(format!("ext-reload-{key}")), "Rebuild & reload", &t)
+                    .text_size(ui_text_ms(cx))
+                    .py(px(4.0))
+                    .border_1()
+                    .border_color(rgb(t.border))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.update(&key, cx)
+                    })),
+            );
+        }
+        actions = actions
+            .child(
+                toggle_switch(SharedString::from(format!("ext-enabled-{key}")), enabled, &t).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.set_enabled(&toggle_key, !enabled, cx)
+                    }),
+                ),
+            )
+            .child(
+                svg()
+                    .path(if expanded {
+                        "icons/chevron-down.svg"
+                    } else {
+                        "icons/chevron-right.svg"
+                    })
+                    .size(px(12.0))
+                    .text_color(rgb(t.text_muted)),
+            );
+
+        let header = h_flex()
             .id(SharedString::from(format!("ext-row-{key}")))
             .cursor_pointer()
-            .px(px(12.0))
-            .py(px(8.0))
-            .gap(px(10.0))
+            .px(px(14.0))
+            .py(px(12.0))
+            .gap(px(12.0))
+            .items_center()
+            .hover(|s| s.bg(rgb(t.bg_hover)))
+            .child(icon_tile("icons/puzzle.svg", tile_color))
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
+                    .gap(px(3.0))
                     .child(
                         h_flex()
-                            .gap(px(6.0))
+                            .gap(px(8.0))
+                            .items_center()
                             .child(
                                 div()
-                                    .text_size(ui_text_md(cx))
+                                    .text_size(ui_text(13.0, cx))
+                                    .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(t.text_primary))
-                                    .child(format!("{} {}", e.name, e.version)),
+                                    .child(e.name.clone()),
                             )
-                            .child(badge(
-                                &okena_core::extension::ExtBadge {
-                                    label: state_label.into(),
-                                    tone: state_tone,
-                                },
-                                &t,
-                                cx,
-                            ))
-                            .when(!ext.local, |d| {
-                                d.child(badge(
-                                    &okena_core::extension::ExtBadge {
-                                        label: format!("on {}", ext.connection_name),
-                                        tone: okena_core::extension::Tone::Info,
-                                    },
-                                    &t,
-                                    cx,
-                                ))
-                            })
-                            .when_some(e.update.as_ref(), |d, update| {
-                                d.child(badge(
-                                    &okena_core::extension::ExtBadge {
-                                        label: if update.version.is_empty() {
-                                            "update available".into()
-                                        } else {
-                                            format!("{} available", update.version)
-                                        },
-                                        tone: okena_core::extension::Tone::Info,
-                                    },
-                                    &t,
-                                    cx,
-                                ))
-                            }),
+                            .child(
+                                div()
+                                    .text_size(ui_text_sm(cx))
+                                    .text_color(rgb(t.text_muted))
+                                    .child(e.version.clone()),
+                            )
+                            .child(badges),
                     )
                     .child(
                         div()
@@ -562,48 +651,20 @@ impl ExtensionsManager {
                             .child(source),
                     ),
             )
+            .child(actions)
             .on_click(cx.listener(move |this, _, _, cx| this.expand(expand_key.clone(), cx)));
-        if let Some(update) = &e.update {
-            let key = key.clone();
-            let label = if update.added_permissions.is_empty() {
-                "Update".to_string()
-            } else {
-                "Update (asks for more)".to_string()
-            };
-            header = header.child(
-                button_primary(SharedString::from(format!("ext-update-{key}")), label, &t).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.update(&key, cx)
-                    }),
-                ),
-            );
-        }
-        if matches!(e.source, ExtSource::Local { .. }) {
-            let key = key.clone();
-            header = header.child(
-                button(SharedString::from(format!("ext-reload-{key}")), "Rebuild & reload", &t).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.update(&key, cx)
-                    }),
-                ),
-            );
-        }
-        header = header.child(
-            toggle_switch(SharedString::from(format!("ext-enabled-{key}")), enabled, &t).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.set_enabled(&toggle_key, !enabled, cx)
-                }),
-            ),
-        );
 
-        let mut row = v_flex()
-            .when(border, |d| d.border_b_1().border_color(rgb(t.border)))
+        let mut row = card(&t)
+            .when(expanded, |d| d.border_color(with_alpha(t.border_active, 0.5)))
             .child(header);
         if expanded {
-            row = row.child(self.render_details(ext, cx));
+            row = row.child(
+                div()
+                    .border_t_1()
+                    .border_color(rgb(t.border))
+                    .pt(px(12.0))
+                    .child(self.render_details(ext, cx)),
+            );
         }
         row.into_any_element()
     }
@@ -612,7 +673,7 @@ impl ExtensionsManager {
         let t = theme(cx);
         let key = ext.key();
         let e = &ext.ext;
-        let mut body = v_flex().px(px(12.0)).pb(px(12.0)).gap(px(10.0));
+        let mut body = v_flex().pl(px(58.0)).pr(px(14.0)).pb(px(14.0)).gap(px(12.0));
         if !e.description.is_empty() {
             body = body.child(note(e.description.clone(), &t, cx));
         }
@@ -771,74 +832,91 @@ impl ExtensionsManager {
             .unwrap_or_default();
         let target = self.target_connection(cx);
         let kind = self.source_kind;
-        let mut form = v_flex().p(px(12.0)).gap(px(10.0));
-        let choice = |id: &'static str, text: &'static str, active: bool| {
+        let segment = |id: &'static str, text: &'static str, active: bool| {
             div()
                 .id(id)
                 .cursor_pointer()
-                .px(px(10.0))
+                .px(px(12.0))
                 .py(px(4.0))
-                .rounded(px(4.0))
-                .border_1()
-                .border_color(rgb(if active { t.border_active } else { t.border }))
-                .when(active, |d| d.bg(rgb(t.bg_selection)))
+                .rounded(px(6.0))
                 .text_size(ui_text_ms(cx))
-                .text_color(rgb(t.text_primary))
+                .map(|d| {
+                    if active {
+                        d.bg(rgb(t.bg_secondary))
+                            .shadow_sm()
+                            .text_color(rgb(t.text_primary))
+                    } else {
+                        d.text_color(rgb(t.text_muted))
+                            .hover(|s| s.text_color(rgb(t.text_secondary)))
+                    }
+                })
                 .child(text)
         };
-        form = form.child(
-            h_flex()
-                .gap(px(6.0))
-                .child(choice("ext-src-git", "From a git repository", kind == SourceKind::Git).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.source_kind = SourceKind::Git;
-                        cx.notify();
-                    }),
-                ))
-                .child(choice("ext-src-local", "From a local folder (development)", kind == SourceKind::Local).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.source_kind = SourceKind::Local;
-                        cx.notify();
-                    }),
-                )),
-        );
+        let tabs = h_flex()
+            .p(px(3.0))
+            .gap(px(2.0))
+            .rounded(px(8.0))
+            .bg(rgb(t.bg_primary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .child(segment("ext-src-git", "Git repository", kind == SourceKind::Git).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.source_kind = SourceKind::Git;
+                    cx.notify();
+                }),
+            ))
+            .child(segment("ext-src-local", "Local folder", kind == SourceKind::Local).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.source_kind = SourceKind::Local;
+                    cx.notify();
+                }),
+            ));
         let field = |caption: &str, input: &Entity<SimpleInputState>| {
             v_flex()
-                .gap(px(3.0))
+                .flex_1()
+                .min_w_0()
+                .gap(px(5.0))
                 .child(label(caption.to_string(), &t, cx))
                 .child(
                     input_container(&t, None)
-                        .px(px(8.0))
-                        .py(px(4.0))
+                        .bg(rgb(t.bg_primary))
+                        .rounded(px(6.0))
+                        .px(px(10.0))
+                        .py(px(6.0))
                         .child(SimpleInput::new(input).text_size(ui_text_md(cx))),
                 )
         };
+        let mut form = v_flex().p(px(16.0)).gap(px(14.0)).child(tabs);
         form = match kind {
-            SourceKind::Git => form
-                .child(field("Repository URL", &self.url))
-                .child(field("Ref", &self.git_ref))
-                .child(field("Folder in the repository", &self.path)),
+            SourceKind::Git => form.child(field("Repository URL", &self.url)).child(
+                h_flex()
+                    .gap(px(12.0))
+                    .items_start()
+                    .child(field("Ref", &self.git_ref))
+                    .child(field("Folder in the repository", &self.path)),
+            ),
             SourceKind::Local => form.child(field("Folder", &self.local_path)).child(note(
                 "Built from source here. Rebuild & reload picks up your changes without reinstalling.",
                 &t,
                 cx,
             )),
         };
+        let mut targets = h_flex().gap(px(6.0)).items_center();
         if connections.len() > 1 {
-            let mut row = h_flex().gap(px(6.0)).child(label("Install on".to_string(), &t, cx));
+            targets = targets.child(label("Install on".to_string(), &t, cx));
             for (id, name) in connections {
                 let active = target.as_deref() == Some(id.as_str());
                 let pick = id.clone();
-                row = row.child(
+                targets = targets.child(
                     div()
                         .id(SharedString::from(format!("ext-target-{id}")))
                         .cursor_pointer()
                         .px(px(8.0))
                         .py(px(3.0))
-                        .rounded(px(4.0))
+                        .rounded(px(10.0))
                         .border_1()
                         .border_color(rgb(if active { t.border_active } else { t.border }))
-                        .when(active, |d| d.bg(rgb(t.bg_selection)))
+                        .when(active, |d| d.bg(with_alpha(t.border_active, 0.12)))
                         .text_size(ui_text_ms(cx))
                         .text_color(rgb(t.text_primary))
                         .child(name)
@@ -848,22 +926,33 @@ impl ExtensionsManager {
                         })),
                 );
             }
-            form = form.child(row);
         }
         form = form.child(
-            h_flex().child(
-                button_primary("ext-review", "Review…", &t)
-                    .when(self.busy.is_some(), |b| b.opacity(0.5))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.busy.is_none() {
-                            this.review_install(cx)
-                        }
-                    })),
-            ),
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(targets)
+                .child(
+                    button_primary("ext-review", "Review…", &t)
+                        .px(px(16.0))
+                        .when(self.busy.is_some(), |b| b.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.busy.is_none() {
+                                this.review_install(cx)
+                            }
+                        })),
+                ),
         );
         v_flex()
-            .child(section_header("Install an extension", &t, cx))
-            .child(section_container(&t).child(form))
+            .gap(px(10.0))
+            .child(heading(
+                "Install an extension",
+                "From a git repository, or a local folder while you develop one. You approve what it may do before it installs.",
+                None,
+                &t,
+                cx,
+            ))
+            .child(card(&t).child(form))
             .into_any_element()
     }
 
@@ -961,6 +1050,65 @@ impl ExtensionsManager {
     }
 }
 
+/// A section's title, a line saying what is in it, and what acts on all of it.
+pub fn heading(
+    title: impl Into<SharedString>,
+    caption: impl Into<SharedString>,
+    trailing: Option<AnyElement>,
+    t: &ThemeColors,
+    cx: &App,
+) -> Div {
+    h_flex()
+        .w_full()
+        .items_end()
+        .justify_between()
+        .gap(px(12.0))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(ui_text(14.0, cx))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(t.text_primary))
+                        .child(title.into()),
+                )
+                .child(
+                    div()
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child(caption.into()),
+                ),
+        )
+        .children(trailing)
+}
+
+/// A rounded card, the frame every extension and form sits in.
+pub fn card(t: &ThemeColors) -> Div {
+    v_flex()
+        .w_full()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(rgb(t.border))
+        .bg(rgb(t.bg_secondary))
+        .overflow_hidden()
+}
+
+/// An extension's icon on a tinted square.
+pub fn icon_tile(icon: impl Into<SharedString>, color: u32) -> Div {
+    div()
+        .flex_shrink_0()
+        .size(px(32.0))
+        .rounded(px(8.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(with_alpha(color, 0.14))
+        .child(svg().path(icon.into()).size(px(16.0)).text_color(rgb(color)))
+}
+
 fn label(text: impl Into<SharedString>, t: &ThemeColors, cx: &App) -> Div {
     div()
         .text_size(ui_text_ms(cx))
@@ -1029,7 +1177,8 @@ impl Render for ExtensionsManager {
         let installed = self.render_installed(cx);
         let install = self.render_install(cx);
         v_flex()
-            .gap(px(12.0))
+            .px(self.inset)
+            .gap(px(24.0))
             .when_some(self.busy.clone(), |d, busy| {
                 d.child(
                     div()
@@ -1067,7 +1216,7 @@ impl Render for ExtensionsManager {
             .children(review)
             .child(installed)
             .child(install)
-            .child(section_note(
+            .child(note(
                 "Extensions run sandboxed in okena's daemon. They reach your machine only through the commands and paths you approve.",
                 &t,
                 cx,

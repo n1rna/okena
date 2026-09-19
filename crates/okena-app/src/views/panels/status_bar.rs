@@ -53,6 +53,107 @@ struct SystemMetric {
     /// Recent values as 0.0..=1.0, oldest first, for the graph.
     history: Vec<f32>,
     color: u32,
+    /// Shown on hover in place of the one-line tooltip.
+    panel: Option<MemoryPanel>,
+}
+
+/// What MEM's hover panel shows: the system's memory, then what okena and
+/// its terminals hold of it, and the projects holding the most.
+#[derive(Clone)]
+struct MemoryPanel {
+    percent: u64,
+    color: u32,
+    used_gb: f32,
+    total_gb: f32,
+    /// This window, the local daemon and every terminal's tree, when the
+    /// daemon has reported them.
+    okena: Option<OkenaMemory>,
+    /// Name and bytes, most first.
+    top_projects: Vec<(String, u64)>,
+}
+
+#[derive(Clone)]
+struct OkenaMemory {
+    window: u64,
+    daemon: u64,
+    terminals: u64,
+}
+
+/// How many projects the panel names.
+const TOP_PROJECTS: usize = 5;
+
+impl MemoryPanel {
+    /// The panel, in the same frame as the Claude and Codex usage panels.
+    fn render(&self, t: &okena_core::theme::ThemeColors, cx: &App) -> Div {
+        use okena_ui::popover::{
+            status_panel, status_panel_body, status_panel_divider, status_panel_header,
+            status_panel_row,
+        };
+        let secondary = t.text_secondary;
+        let primary = t.text_primary;
+        let mut body = status_panel_body()
+            .child(metric_bar(self.percent.min(100) as f32 / 100.0, self.color, t))
+            .child(status_panel_row(
+                "System in use",
+                format!("{:.1} of {:.1} GB", self.used_gb, self.total_gb),
+                primary,
+                t,
+                cx,
+            ));
+        if let Some(okena) = &self.okena {
+            let own = okena.window + okena.daemon;
+            let sub = |label: &'static str, bytes: u64| {
+                status_panel_row(label, format_memory(bytes), secondary, t, cx)
+                    .pl(px(10.0))
+                    .text_size(ui_text_sm(cx))
+            };
+            body = body
+                .child(status_panel_divider(t))
+                .child(status_panel_row("okena", format_memory(own), primary, t, cx))
+                .child(sub("window", okena.window))
+                .child(sub("daemon", okena.daemon))
+                .child(status_panel_row(
+                    "Terminals",
+                    format_memory(okena.terminals),
+                    primary,
+                    t,
+                    cx,
+                ))
+                .child(status_panel_row(
+                    "okena + terminals",
+                    format_memory(own + okena.terminals),
+                    self.color,
+                    t,
+                    cx,
+                ));
+        }
+        if !self.top_projects.is_empty() {
+            body = body.child(status_panel_divider(t)).child(
+                div()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("Using the most"),
+            );
+            for (name, bytes) in &self.top_projects {
+                body = body.child(status_panel_row(
+                    name.clone(),
+                    format_memory(*bytes),
+                    secondary,
+                    t,
+                    cx,
+                ));
+            }
+        }
+        let percent = div()
+            .text_size(ui_text_sm(cx))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(self.color))
+            .child(format!("{}%", self.percent))
+            .into_any_element();
+        status_panel(t)
+            .child(status_panel_header("MEMORY", Some(percent), t, cx))
+            .child(body)
+    }
 }
 
 #[derive(Clone)]
@@ -179,6 +280,12 @@ pub struct StatusBar {
     /// later reading can cancel, the menu would shut under the pointer on its
     /// way in.
     grid_hover_token: Arc<AtomicU64>,
+    /// MEM's breakdown panel: whether it shows, where MEM ended up so it can
+    /// hang above it, and a token so crossing from MEM onto the panel does not
+    /// close it on the way.
+    memory_panel_visible: bool,
+    memory_trigger_bounds: Bounds<Pixels>,
+    memory_hover_token: Arc<AtomicU64>,
 }
 
 /// How long a hover has to settle before a menu opens.
@@ -391,6 +498,9 @@ impl StatusBar {
             grid_hover_button: None,
             grid_hover_panel: false,
             grid_hover_token: Arc::new(AtomicU64::new(0)),
+            memory_panel_visible: false,
+            memory_trigger_bounds: Bounds::default(),
+            memory_hover_token: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -985,6 +1095,7 @@ impl StatusBar {
             fraction,
             history,
             color,
+            panel,
         } = metric;
 
         let label_el = div().text_color(rgb(t.text_muted)).child(label);
@@ -1026,59 +1137,127 @@ impl StatusBar {
         div()
             .id(id)
             .child(body)
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            // A metric with a panel shows that on hover instead; the caller
+            // hangs it.
+            .when(panel.is_none(), |d| {
+                d.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            })
             .into_any_element()
     }
 
-    /// A memory figure beside the CPU and MEM metrics: label and value, the
-    /// breakdown in the tooltip. Drawn the same in every bar style — there is
-    /// no fraction for a bar or history for a graph, only the amount.
-    fn render_memory_figure(
-        id: &'static str,
-        label: &'static str,
-        bytes: u64,
-        tooltip: String,
+    /// Pointer over MEM or its panel. Opens after the same settle as the grid
+    /// menus, so sweeping across the footer does not flash it.
+    fn hover_memory(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        let token = self.memory_hover_token.fetch_add(1, Ordering::SeqCst) + 1;
+        if hovered == self.memory_panel_visible {
+            return;
+        }
+        let delay = if hovered { GRID_MENU_OPEN_MS } else { GRID_MENU_CLOSE_MS };
+        let hover_token = self.memory_hover_token.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            smol::Timer::after(Duration::from_millis(delay)).await;
+            if hover_token.load(Ordering::SeqCst) != token {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.memory_panel_visible = hovered;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// MEM with its panel hanging above it while hovered.
+    fn render_memory_metric(
+        &self,
+        metric: SystemMetric,
+        style: StatusBarStyle,
+        graphs: bool,
         t: &okena_core::theme::ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        h_flex()
-            .id(id)
-            .gap(px(3.0))
-            .text_size(ui_text_sm(cx))
-            .child(div().text_color(rgb(t.text_muted)).child(label))
+        let panel = metric.panel.clone().filter(|_| self.memory_panel_visible);
+        let entity = cx.entity().downgrade();
+        let position = point(
+            self.memory_trigger_bounds.origin.x,
+            self.memory_trigger_bounds.origin.y - px(4.0),
+        );
+        div()
+            .id("memory-metric-trigger")
+            .relative()
+            .child(Self::render_system_metric(metric, style, graphs, t, cx))
             .child(
-                div()
-                    .text_color(rgb(t.text_secondary))
-                    .child(format_memory(bytes)),
+                canvas(
+                    move |bounds, _window, app| {
+                        if let Some(entity) = entity.upgrade() {
+                            entity.update(app, |this, _| this.memory_trigger_bounds = bounds);
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                // Pinned to the corner: an absolute child with no insets sits
+                // where the flow would put it — under the metric — and the
+                // panel then hung from the bar's bottom edge, over the bar.
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
             )
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                this.hover_memory(*hovered, cx);
+            }))
+            .children(panel.map(|panel| {
+                deferred(
+                    anchored()
+                        .position(position)
+                        .anchor(Anchor::BottomLeft)
+                        .snap_to_window()
+                        .child(
+                            panel
+                                .render(t, cx)
+                                .id("memory-panel")
+                                .occlude()
+                                .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                                    this.hover_memory(*hovered, cx);
+                                })),
+                        ),
+                )
+                .with_priority(1)
+            }))
             .into_any_element()
     }
 
-    /// okena's own figure and the total, as the status bar shows them.
-    fn memory_figures(&self, gui_bytes: u64, cx: &App) -> Option<(u64, u64, String, String)> {
-        let daemon = process_memory_entity(cx)?
-            .read(cx)
-            .connection(LOCAL_DAEMON_CONNECTION_ID)
-            .cloned()?;
-        let own = gui_bytes + daemon.daemon_bytes;
-        let total = own + daemon.terminals_bytes;
-        Some((
-            own,
-            total,
-            format!(
-                "okena {} — window {} + daemon {}",
-                format_memory(own),
-                format_memory(gui_bytes),
-                format_memory(daemon.daemon_bytes)
-            ),
-            format!(
-                "okena and its terminals {} — okena {} + terminals {}",
-                format_memory(total),
-                format_memory(own),
-                format_memory(daemon.terminals_bytes)
-            ),
-        ))
+    /// What okena and its terminals hold, and the projects holding the most,
+    /// from the local daemon's last report. `None` until it has reported.
+    fn memory_breakdown(&self, gui_bytes: u64, cx: &App) -> (Option<OkenaMemory>, Vec<(String, u64)>) {
+        let Some(daemon) = process_memory_entity(cx)
+            .and_then(|m| m.read(cx).connection(LOCAL_DAEMON_CONNECTION_ID).cloned())
+        else {
+            return (None, Vec::new());
+        };
+        let workspace = self.workspace.read(cx);
+        let mut top: Vec<(String, u64)> = daemon
+            .projects
+            .iter()
+            .map(|(id, bytes)| {
+                let client_id = format!("remote:{LOCAL_DAEMON_CONNECTION_ID}:{id}");
+                let name = workspace
+                    .project(&client_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| id.clone());
+                (name, *bytes)
+            })
+            .collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1));
+        top.truncate(TOP_PROJECTS);
+        (
+            Some(OkenaMemory {
+                window: gui_bytes,
+                daemon: daemon.daemon_bytes,
+                terminals: daemon.terminals_bytes,
+            }),
+            top,
+        )
     }
 
     fn render_remote_status_popover(
@@ -1348,7 +1527,9 @@ impl Render for StatusBar {
             fraction: (stats.cpu_usage / 100.0).clamp(0.0, 1.0),
             history: stats.cpu_history.clone(),
             color: cpu_color,
+            panel: None,
         };
+        let (okena, top_projects) = self.memory_breakdown(stats.gui_memory_bytes, cx);
         let memory_metric = SystemMetric {
             id: "memory-status-metric",
             label: "MEM",
@@ -1357,9 +1538,15 @@ impl Render for StatusBar {
             fraction: memory_percent.min(100) as f32 / 100.0,
             history: stats.memory_history.clone(),
             color: mem_color,
+            panel: Some(MemoryPanel {
+                percent: memory_percent as u64,
+                color: mem_color,
+                used_gb: stats.memory_used_gb,
+                total_gb: stats.memory_total_gb,
+                okena,
+                top_projects,
+            }),
         };
-
-        let memory_figures = self.memory_figures(stats.gui_memory_bytes, cx);
 
         // Built before the widget borrows below, which hold `&self` for the
         // rest of this function.
@@ -1426,31 +1613,13 @@ impl Render for StatusBar {
                     .child(Self::render_system_metric(
                         cpu_metric, bar_style, graphs, &t, cx,
                     ))
-                    .child(Self::render_system_metric(
+                    .child(self.render_memory_metric(
                         memory_metric,
                         bar_style,
                         graphs,
                         &t,
                         cx,
-                    ))
-                    .when_some(memory_figures, |left, (own, total, own_tip, total_tip)| {
-                        left.child(Self::render_memory_figure(
-                            "okena-memory-figure",
-                            "OKENA",
-                            own,
-                            own_tip,
-                            &t,
-                            cx,
-                        ))
-                        .child(Self::render_memory_figure(
-                            "total-memory-figure",
-                            "TOTAL",
-                            total,
-                            total_tip,
-                            &t,
-                            cx,
-                        ))
-                    });
+                    ));
 
                 // Left-side extension widgets
                 for widgets in &left_widgets {

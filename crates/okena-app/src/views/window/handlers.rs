@@ -1265,6 +1265,9 @@ impl WindowView {
                 crate::workspace::requests::WorkbenchRequest::OpenExtensionView { key } => {
                     self.show_extension_view(key, cx);
                 }
+                crate::workspace::requests::WorkbenchRequest::OpenExtensionsPage { open } => {
+                    self.show_extensions_page(open, cx);
+                }
                 crate::workspace::requests::WorkbenchRequest::OpenKnowledgeDoc {
                     root_key,
                     path,

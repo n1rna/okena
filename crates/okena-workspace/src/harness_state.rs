@@ -11,6 +11,12 @@ use okena_core::harness::HarnessSection;
 use okena_state::WindowId;
 use std::collections::HashMap;
 
+/// The Extensions page, kept where an extension's key goes: it shows in the
+/// main area the way an extension's view does, and excludes the other views
+/// the same way. No extension can have this key — theirs are
+/// `connection/extension`, and this has no `/`.
+pub const EXTENSIONS_PAGE: &str = "extensions";
+
 /// Which harness view is showing, per window.
 ///
 /// Keyed by window because each window shows its own view: switching to Agents

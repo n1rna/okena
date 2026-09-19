@@ -367,6 +367,14 @@ impl KeybindingConfig {
         );
 
         bindings.insert(
+            "ToggleOverviewSearch".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-s", None),
+                KeybindingEntry::new("ctrl-shift-s", None),
+            ],
+        );
+
+        bindings.insert(
             "ToggleProjectVisibility".to_string(),
             vec![
                 KeybindingEntry::new("cmd-shift-h", None),

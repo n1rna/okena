@@ -460,6 +460,13 @@ fn token_for(host: &str) -> Option<String> {
     cached_token(cache, host, || gh_cli_token(host))
 }
 
+/// The token okena uses for github.com: `GH_TOKEN` / `GITHUB_TOKEN`, else what
+/// `gh auth token` answers (cached). For callers outside git — the Copilot
+/// usage widget reads the same login.
+pub fn github_dotcom_token() -> Option<String> {
+    token_for("github.com")
+}
+
 /// Put `token` in the cache for `host` as if `gh auth token` had answered it,
 /// so a test neither spawns gh nor depends on the machine's logins.
 #[cfg(test)]

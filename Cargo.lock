@@ -6765,10 +6765,9 @@ dependencies = [
  "okena-cli",
  "okena-core",
  "okena-daemon-core",
- "okena-ext-claude",
- "okena-ext-codex",
- "okena-ext-github",
+ "okena-ext-status",
  "okena-ext-updater",
+ "okena-ext-usage",
  "okena-extensions",
  "okena-files",
  "okena-remote-server",
@@ -6800,7 +6799,6 @@ dependencies = [
  "notify-rust",
  "okena-app-core",
  "okena-core",
- "okena-ext-claude",
  "okena-ext-updater",
  "okena-extensions",
  "okena-files",
@@ -6951,52 +6949,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "okena-ext-claude"
+name = "okena-ext-status"
 version = "0.1.0"
 dependencies = [
- "dirs 5.0.1",
  "gpui",
  "gpui-component",
  "jiff",
- "log",
- "okena-core",
- "okena-extensions",
- "okena-transport",
- "okena-ui",
- "okena-usage",
- "parking_lot",
- "serde_json",
- "sha2",
- "smol",
- "tempfile",
-]
-
-[[package]]
-name = "okena-ext-codex"
-version = "0.1.0"
-dependencies = [
- "base64",
- "dirs 5.0.1",
- "gpui",
- "gpui-component",
- "jiff",
- "log",
- "okena-core",
- "okena-extensions",
- "okena-transport",
- "okena-ui",
- "okena-usage",
- "parking_lot",
- "serde_json",
- "smol",
-]
-
-[[package]]
-name = "okena-ext-github"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "gpui-component",
  "log",
  "okena-core",
  "okena-extensions",
@@ -7027,6 +6985,29 @@ dependencies = [
  "serde_json",
  "sha2",
  "smol",
+]
+
+[[package]]
+name = "okena-ext-usage"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "dirs 5.0.1",
+ "gpui",
+ "gpui-component",
+ "jiff",
+ "log",
+ "okena-core",
+ "okena-extensions",
+ "okena-git",
+ "okena-transport",
+ "okena-ui",
+ "okena-usage",
+ "parking_lot",
+ "serde_json",
+ "sha2",
+ "smol",
+ "tempfile",
 ]
 
 [[package]]

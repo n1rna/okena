@@ -543,30 +543,22 @@ impl ProjectColumn {
         }
     }
 
-    /// Drag handle between the terminal and the info panel.
+    /// Drag handle between the terminal and the info panel: the same thin
+    /// line, wide grab area and cursor as every other divider in the app. It
+    /// is the panel's left edge too, so the panel draws no border of its own.
     fn render_info_panel_handle(&self, cx: &Context<Self>) -> AnyElement {
         let t = theme(cx);
         let project_id = self.project_id.clone();
         let width = self.info_panel_width;
         let active_drag = self.active_drag.clone();
-        div()
-            .id("info-panel-resize")
-            .w(px(4.0))
-            .h_full()
-            .flex_shrink_0()
-            .cursor_col_resize()
-            .hover(|s| s.bg(rgb(t.border_active)))
-            .on_mouse_down(
-                MouseButton::Left,
-                move |event: &MouseDownEvent, _window, _cx| {
-                    *active_drag.borrow_mut() = Some(DragState::InfoPanel {
-                        project_id: project_id.clone(),
-                        initial_mouse_x: f32::from(event.position.x),
-                        initial_width: width,
-                    });
-                },
-            )
-            .into_any_element()
+        okena_ui::resize_handle::ResizeHandle::new(false, t.border, t.border_active, move |position, _| {
+            *active_drag.borrow_mut() = Some(DragState::InfoPanel {
+                project_id,
+                initial_mouse_x: f32::from(position.x),
+                initial_width: width,
+            });
+        })
+        .into_any_element()
     }
 
     /// The column's content with its info panel.
@@ -581,18 +573,12 @@ impl ProjectColumn {
         main: impl FnOnce(&mut Self, &mut Context<Self>) -> Option<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let t = theme(cx);
         let beside = self.info_panel_fits_beside();
         let width = self.info_panel_width;
         let panel = self.info_panel(project, cx).map(|panel| {
             div()
                 .id("project-column-info")
-                .when(beside, |d| {
-                    d.w(px(width))
-                        .flex_shrink_0()
-                        .border_l_1()
-                        .border_color(rgb(t.border))
-                })
+                .when(beside, |d| d.w(px(width)).flex_shrink_0())
                 .when(!beside, |d| d.flex_1())
                 .h_full()
                 .min_h_0()

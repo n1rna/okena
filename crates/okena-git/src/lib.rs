@@ -8,6 +8,7 @@ pub mod error;
 pub mod file_history;
 pub(crate) mod gix_helpers;
 pub mod repository;
+pub use repository::github::github_dotcom_token;
 pub mod store;
 
 pub use blame::{BlameCommit, BlameError, BlameKind, BlameLine, get_blame};
