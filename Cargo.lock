@@ -6944,6 +6944,7 @@ dependencies = [
  "okena-workspace",
  "parking_lot",
  "serde_json",
+ "sysinfo 0.33.1",
  "tempfile",
  "tokio",
  "uuid",

@@ -339,6 +339,18 @@ impl AgentSessionPanel {
         if let Some(agent) = &info.agent {
             facts.push(self.chip(agent.clone(), t.text_secondary, cx));
         }
+        // Everything running in the session's terminals: the agent, what it
+        // spawned, and the shells beside it. Absent while nothing runs.
+        if let Some(bytes) = okena_workspace::process_memory::project_memory(&info.project_id, cx) {
+            facts.push(self.chip(
+                format!(
+                    "{} memory",
+                    okena_workspace::process_memory::format_memory(bytes)
+                ),
+                t.text_secondary,
+                cx,
+            ));
+        }
         if let Some(closed_at) = info.closed_at {
             let ago = okena_ui::ago::format_ago(closed_at, okena_ui::ago::now_millis());
             facts.push(self.chip(format!("closed {ago}"), t.text_muted, cx));

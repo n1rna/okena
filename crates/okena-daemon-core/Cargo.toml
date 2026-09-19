@@ -41,6 +41,8 @@ uuid = { version = "1.10", features = ["v4"] }
 # `RemoteServer::start` (which returns `anyhow::Result`) + the tokio runtime
 # builder (`io::Result`) coalesce through it.
 anyhow = "1.0"
+# Process table for the per-terminal memory figures (`memory_poll`).
+sysinfo = "0.33"
 
 [dev-dependencies]
 # Throwaway repositories for the session push detection tests.

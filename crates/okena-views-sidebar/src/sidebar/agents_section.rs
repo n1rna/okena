@@ -276,6 +276,10 @@ impl Sidebar {
         let attention = row.card.wants_attention();
         let focused = row.focused;
         let body = row.status.clone().or_else(|| row.subtitle.clone());
+        // What its terminals hold, split and tab shells included; nothing
+        // while no process runs in it.
+        let memory = okena_workspace::process_memory::project_memory(&row.info.id, cx)
+            .map(okena_workspace::process_memory::format_memory);
         // Flat and neutral, so a list of ten is calm. The agent's own colour
         // is only the thin bar on its left edge, enough to tell neighbours
         // apart without every card shouting. The selected card stands out by
@@ -360,6 +364,13 @@ impl Sidebar {
                             .text_color(rgb(t.text_primary))
                             .child(row.info.name.clone()),
                     )
+                    .children(memory.map(|memory| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(memory)
+                    }))
                     .child(
                         div()
                             .flex_shrink_0()

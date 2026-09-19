@@ -20,6 +20,27 @@ pub struct ApiSystemStats {
     pub cpu_usage: f32,
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,
+    /// What okena's own processes and terminals hold. `None` from a daemon
+    /// that predates it, or before its first measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<ApiProcessMemory>,
+}
+
+/// Resident memory of okena's daemon and of the process trees in its
+/// terminals, in bytes.
+///
+/// A terminal's tree is its shell and everything under it — an agent CLI and
+/// whatever that spawns. The daemon's figure is its own process alone: the
+/// terminals it hosts are counted in `terminals_bytes`, never twice.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiProcessMemory {
+    pub daemon_bytes: u64,
+    /// Every terminal's tree, whether or not a project owns the terminal.
+    pub terminals_bytes: u64,
+    /// Per project: the trees of every terminal in it (splits, tabs and hook
+    /// terminals alike). A project with no running process is left out.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub projects: std::collections::HashMap<String, u64>,
 }
 
 /// GET /v1/state response
@@ -2691,6 +2712,32 @@ impl ApiLayoutNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_stats_from_a_daemon_without_memory_still_parse() {
+        let json = r#"{"cpu_usage":12.5,"memory_used_bytes":1,"memory_total_bytes":2}"#;
+        let stats: ApiSystemStats = serde_json::from_str(json).unwrap();
+        assert_eq!(stats.memory, None);
+    }
+
+    #[test]
+    fn system_stats_memory_round_trips() {
+        let stats = ApiSystemStats {
+            cpu_usage: 3.0,
+            memory_used_bytes: 10,
+            memory_total_bytes: 20,
+            memory: Some(ApiProcessMemory {
+                daemon_bytes: 100,
+                terminals_bytes: 900,
+                projects: [("p1".to_string(), 600)].into_iter().collect(),
+            }),
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ApiSystemStats>(&json).unwrap(),
+            stats
+        );
+    }
 
     #[test]
     fn state_response_round_trip() {

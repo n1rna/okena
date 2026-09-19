@@ -1797,6 +1797,11 @@ impl PtyManager {
         }
     }
 
+    /// Every terminal with a live PTY, in no particular order.
+    pub fn terminal_ids(&self) -> Vec<String> {
+        self.terminals.lock().keys().cloned().collect()
+    }
+
     /// Get the shell process PID for a terminal
     pub fn get_shell_pid(&self, terminal_id: &str) -> Option<u32> {
         self.terminals

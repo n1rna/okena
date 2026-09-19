@@ -12,12 +12,13 @@ use gpui_component::{h_flex, v_flex};
 use okena_core::api::{ApiLayoutNode, ApiSystemStats};
 use okena_extensions::{ExtensionInstance, ExtensionRegistry};
 use okena_transport::client::{ConnectionStatus, LOCAL_DAEMON_CONNECTION_ID};
+use okena_workspace::process_memory::{format_memory, process_memory_entity};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use sysinfo::System;
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use time::OffsetDateTime;
 
 /// Refresh interval for system stats
@@ -37,6 +38,8 @@ struct SystemStats {
     cpu_history: Vec<f32>,
     /// Recent memory pressure, oldest first, each 0.0..=1.0.
     memory_history: Vec<f32>,
+    /// Resident memory of this GUI process alone.
+    gui_memory_bytes: u64,
 }
 
 /// Everything the status bar needs to draw one system metric (CPU or MEM).
@@ -97,6 +100,14 @@ impl SystemInfoCache {
             .sum::<f32>()
             / self.system.cpus().len().max(1) as f32;
 
+        let own_pid = Pid::from_u32(std::process::id());
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[own_pid]),
+            false,
+            ProcessRefreshKind::nothing().with_memory(),
+        );
+        let gui_memory_bytes = self.system.process(own_pid).map_or(0, |p| p.memory());
+
         let memory_used = self.system.used_memory() as f64 / 1_073_741_824.0; // bytes to GB
         let memory_total = self.system.total_memory() as f64 / 1_073_741_824.0;
         let memory_fraction = if memory_total > 0.0 {
@@ -116,6 +127,7 @@ impl SystemInfoCache {
             memory_total_gb: memory_total as f32,
             cpu_history,
             memory_history,
+            gui_memory_bytes,
         };
     }
 
@@ -1018,6 +1030,57 @@ impl StatusBar {
             .into_any_element()
     }
 
+    /// A memory figure beside the CPU and MEM metrics: label and value, the
+    /// breakdown in the tooltip. Drawn the same in every bar style — there is
+    /// no fraction for a bar or history for a graph, only the amount.
+    fn render_memory_figure(
+        id: &'static str,
+        label: &'static str,
+        bytes: u64,
+        tooltip: String,
+        t: &okena_core::theme::ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .id(id)
+            .gap(px(3.0))
+            .text_size(ui_text_sm(cx))
+            .child(div().text_color(rgb(t.text_muted)).child(label))
+            .child(
+                div()
+                    .text_color(rgb(t.text_secondary))
+                    .child(format_memory(bytes)),
+            )
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .into_any_element()
+    }
+
+    /// okena's own figure and the total, as the status bar shows them.
+    fn memory_figures(&self, gui_bytes: u64, cx: &App) -> Option<(u64, u64, String, String)> {
+        let daemon = process_memory_entity(cx)?
+            .read(cx)
+            .connection(LOCAL_DAEMON_CONNECTION_ID)
+            .cloned()?;
+        let own = gui_bytes + daemon.daemon_bytes;
+        let total = own + daemon.terminals_bytes;
+        Some((
+            own,
+            total,
+            format!(
+                "okena {} — window {} + daemon {}",
+                format_memory(own),
+                format_memory(gui_bytes),
+                format_memory(daemon.daemon_bytes)
+            ),
+            format!(
+                "okena and its terminals {} — okena {} + terminals {}",
+                format_memory(total),
+                format_memory(own),
+                format_memory(daemon.terminals_bytes)
+            ),
+        ))
+    }
+
     fn render_remote_status_popover(
         &self,
         snapshots: &[RemoteStatusSnapshot],
@@ -1296,6 +1359,8 @@ impl Render for StatusBar {
             color: mem_color,
         };
 
+        let memory_figures = self.memory_figures(stats.gui_memory_bytes, cx);
+
         // Built before the widget borrows below, which hold `&self` for the
         // rest of this function.
         let grid_menu = self.render_grid_menu(cx);
@@ -1367,7 +1432,25 @@ impl Render for StatusBar {
                         graphs,
                         &t,
                         cx,
-                    ));
+                    ))
+                    .when_some(memory_figures, |left, (own, total, own_tip, total_tip)| {
+                        left.child(Self::render_memory_figure(
+                            "okena-memory-figure",
+                            "OKENA",
+                            own,
+                            own_tip,
+                            &t,
+                            cx,
+                        ))
+                        .child(Self::render_memory_figure(
+                            "total-memory-figure",
+                            "TOTAL",
+                            total,
+                            total_tip,
+                            &t,
+                            cx,
+                        ))
+                    });
 
                 // Left-side extension widgets
                 for widgets in &left_widgets {

@@ -21,7 +21,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiProcessMemory, ApiTerminalFocusRequest, ApiToast};
 use okena_core::git_poll::GitPollTrigger;
 use rust_embed::RustEmbed;
 use std::collections::{HashMap, HashSet};
@@ -45,6 +45,9 @@ pub struct AppState {
     pub state_version: Arc<tokio::sync::watch::Sender<u64>>,
     pub start_time: Instant,
     pub git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// The daemon's latest memory figures, attached to each
+    /// `SystemStatsChanged` the stream sends.
+    pub process_memory: Arc<tokio::sync::watch::Sender<Option<ApiProcessMemory>>>,
     /// Broadcast of daemon-originated toasts. Each WS connection subscribes a
     /// receiver and forwards [`WsOutbound::Toast`] frames; events sent with no
     /// receivers are simply dropped (fire-and-forget, like git status).
@@ -129,6 +132,7 @@ pub fn build_router(
     state_version: Arc<tokio::sync::watch::Sender<u64>>,
     start_time: Instant,
     git_status: Arc<tokio::sync::watch::Sender<HashMap<String, ApiGitStatus>>>,
+    process_memory: Arc<tokio::sync::watch::Sender<Option<ApiProcessMemory>>>,
     toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
     terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
     remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
@@ -149,6 +153,7 @@ pub fn build_router(
         state_version,
         start_time,
         git_status,
+        process_memory,
         toast_tx,
         terminal_focus_tx,
         remote_subscribed_terminals,
@@ -395,6 +400,7 @@ mod tests {
             Arc::new(tokio::sync::watch::channel(0).0),
             Instant::now(),
             Arc::new(tokio::sync::watch::channel(HashMap::new()).0),
+            Arc::new(tokio::sync::watch::channel(None).0),
             Arc::new(tokio::sync::broadcast::channel(8).0),
             Arc::new(tokio::sync::broadcast::channel(8).0),
             Arc::new(RwLock::new(HashMap::new())),

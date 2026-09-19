@@ -680,6 +680,14 @@ fn main() {
             harness_state,
         ));
 
+        // Memory each connected daemon measures for its terminals, filed by
+        // the remote manager and read by the status bar, agent panel and sidebar.
+        let process_memory =
+            cx.new(|_| okena_workspace::process_memory::ProcessMemory::default());
+        cx.set_global(okena_workspace::process_memory::GlobalProcessMemory(
+            process_memory,
+        ));
+
         // Extensions every connected daemon runs, filled from their snapshots.
         let extensions_state =
             cx.new(|_| okena_workspace::extensions_state::ExtensionsState::default());

@@ -2,7 +2,7 @@ use crate::auth::AuthStore;
 use crate::bridge::BridgeSender;
 use crate::pty_broadcaster::PtyBroadcaster;
 use crate::routes;
-use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiProcessMemory, ApiTerminalFocusRequest, ApiToast};
 use okena_core::git_poll::GitPollTrigger;
 use okena_transport::client::LocalEndpoint;
 use std::collections::{HashMap, HashSet};
@@ -39,6 +39,7 @@ impl RemoteServer {
         state_version: Arc<watch::Sender<u64>>,
         bind_addrs: Vec<IpAddr>,
         git_status: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
+        process_memory: Arc<watch::Sender<Option<ApiProcessMemory>>>,
         toast_tx: Arc<tokio::sync::broadcast::Sender<ApiToast>>,
         terminal_focus_tx: Arc<tokio::sync::broadcast::Sender<ApiTerminalFocusRequest>>,
         remote_subscribed_terminals: Arc<RwLock<HashMap<u64, HashSet<String>>>>,
@@ -208,6 +209,7 @@ impl RemoteServer {
                 state_version,
                 start_time,
                 git_status,
+                process_memory,
                 toast_tx,
                 terminal_focus_tx,
                 remote_subscribed_terminals,
