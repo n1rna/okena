@@ -56,6 +56,7 @@ actions!(
         RestartDaemon,
         SaveDocument,
         FocusTaskSearch,
+        ToggleOverviewSearch,
     ]
 );
 
@@ -481,6 +482,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "StopAllServices" => Some(KeyBinding::new(keystroke, StopAllServices, context)),
         "EqualizeLayout" => Some(KeyBinding::new(keystroke, EqualizeLayout, context)),
         "ToggleProjectLayout" => Some(KeyBinding::new(keystroke, ToggleProjectLayout, context)),
+        "ToggleOverviewSearch" => Some(KeyBinding::new(keystroke, ToggleOverviewSearch, context)),
         "ToggleProjectVisibility" => {
             Some(KeyBinding::new(keystroke, ToggleProjectVisibility, context))
         }

@@ -425,16 +425,9 @@ pub fn format_reset_time_epoch(reset_epoch: f64, include_date: bool) -> String {
 // ============================================================================
 
 /// Styled popover container (the caller adds `id`, `occlude`, hover/click
-/// handlers and children).
+/// handlers and children). The status bar's shared panel frame.
 pub fn usage_popover_container(t: &ThemeColors) -> Div {
-    div()
-        .min_w(px(300.0))
-        .max_w(px(420.0))
-        .bg(rgb(t.bg_primary))
-        .border_1()
-        .border_color(rgb(t.border))
-        .rounded(px(8.0))
-        .shadow_lg()
+    okena_ui::popover::status_panel(t)
 }
 
 /// Bordered popover header: an uppercase title on the left, an optional muted
@@ -451,82 +444,72 @@ pub fn usage_popover_header(
     let primary = t.text_primary;
     let link_id = SharedString::from(format!("{}-settings-link", title));
 
-    h_flex()
-        .px(px(12.0))
-        .py(px(7.0))
+    let trailing = h_flex()
+        .gap(px(8.0))
         .items_center()
-        .justify_between()
-        .border_b_1()
-        .border_color(rgb(t.border))
-        .child(
-            div()
-                .text_size(ui_text_xs(cx))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(t.text_secondary))
-                .child(title.to_string()),
-        )
+        .when_some(plan, |el, plan| {
+            el.child(
+                div()
+                    .text_size(ui_text_xs(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(plan.to_string()),
+            )
+        })
         .child(
             h_flex()
-                .gap(px(8.0))
+                .id(link_id)
+                // Left padding only, so the trailing icon sits flush
+                // with the header's 12px inset (matching the title on
+                // the left) instead of looking inset on the right.
+                .gap(px(4.0))
                 .items_center()
-                .when_some(plan, |el, plan| {
-                    el.child(
-                        div()
-                            .text_size(ui_text_xs(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child(plan.to_string()),
-                    )
-                })
+                .pl(px(4.0))
+                .py(px(1.0))
+                .rounded(px(3.0))
+                .cursor_pointer()
+                .text_color(rgb(muted))
+                .hover(|s| s.text_color(rgb(primary)).bg(rgb(t.bg_hover)))
                 .child(
-                    h_flex()
-                        .id(link_id)
-                        // Left padding only, so the trailing icon sits flush
-                        // with the header's 12px inset (matching the title on
-                        // the left) instead of looking inset on the right.
-                        .gap(px(4.0))
-                        .items_center()
-                        .pl(px(4.0))
-                        .py(px(1.0))
-                        .rounded(px(3.0))
-                        .cursor_pointer()
-                        .text_color(rgb(muted))
-                        .hover(|s| s.text_color(rgb(primary)).bg(rgb(t.bg_hover)))
-                        .child(
-                            div()
-                                .text_size(ui_text_xs(cx))
-                                .line_height(px(10.0))
-                                .child("Settings"),
-                        )
-                        // `currentColor` resolves from the svg's *own* text_color,
-                        // not the parent's — without this the icon renders as an
-                        // invisible black glyph, leaving its slot looking like
-                        // stray right padding.
-                        .child(
-                            svg()
-                                .path("icons/external-link.svg")
-                                .size(px(10.0))
-                                .text_color(rgb(muted)),
-                        )
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                            cx.stop_propagation();
-                        })
-                        .on_click(move |_, _, _cx| {
-                            okena_core::process::open_url(settings_url);
-                        })
-                        .tooltip(move |window, cx| {
-                            Tooltip::new(settings_tooltip).build(window, cx)
-                        }),
-                ),
-        )
+                    div()
+                        .text_size(ui_text_xs(cx))
+                        .line_height(px(10.0))
+                        .child("Settings"),
+                )
+                // `currentColor` resolves from the svg's *own* text_color,
+                // not the parent's — without this the icon renders as an
+                // invisible black glyph, leaving its slot looking like
+                // stray right padding.
+                .child(
+                    svg()
+                        .path("icons/external-link.svg")
+                        .size(px(10.0))
+                        .text_color(rgb(muted)),
+                )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation();
+                })
+                .on_click(move |_, _, _cx| {
+                    okena_core::process::open_url(settings_url);
+                })
+                .tooltip(move |window, cx| {
+                    Tooltip::new(settings_tooltip).build(window, cx)
+                }),
+        );
+    okena_ui::popover::status_panel_header(
+        title.to_string(),
+        Some(trailing.into_any_element()),
+        t,
+        cx,
+    )
 }
 
 /// Padded popover body container (the caller adds the rows).
 pub fn usage_body_container() -> Div {
-    v_flex().px(px(12.0)).py(px(10.0)).gap(px(7.0))
+    okena_ui::popover::status_panel_body()
 }
 
 pub fn usage_divider(t: &ThemeColors) -> impl IntoElement {
-    div().h(px(1.0)).w_full().bg(rgb(t.border))
+    okena_ui::popover::status_panel_divider(t)
 }
 
 // ============================================================================
@@ -824,22 +807,7 @@ pub fn usage_kv_row(
     value: String,
     value_color: u32,
 ) -> impl IntoElement {
-    h_flex()
-        .items_baseline()
-        .justify_between()
-        .child(
-            div()
-                .text_size(ui_text_ms(cx))
-                .text_color(rgb(t.text_secondary))
-                .child(label.to_string()),
-        )
-        .child(
-            div()
-                .text_size(ui_text_ms(cx))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(value_color))
-                .child(value),
-        )
+    okena_ui::popover::status_panel_row(label.to_string(), value, value_color, t, cx)
 }
 
 // ============================================================================

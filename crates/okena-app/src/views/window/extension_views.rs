@@ -3,17 +3,20 @@
 //!
 //! An extension's view replaces the projects grid the way a harness view
 //! does, and one excludes the other. Panes are kept after being switched
-//! away from, so a table keeps its grouping and selection.
+//! away from, so a table keeps its grouping and selection. The Extensions
+//! page shows in the same place, under a key no extension can have.
 
 use std::sync::Arc;
 
 use gpui::*;
 use okena_views_extensions::{AgentBadgesFn, ExtensionPane, ExtensionPaneEvent};
+use okena_workspace::harness_state::EXTENSIONS_PAGE;
 use okena_workspace::extensions_state::{
     ClientExtension, ExtensionConnection, extensions_entity,
 };
 
 use super::WindowView;
+use crate::views::extensions_page::ExtensionsPage;
 
 impl WindowView {
     /// Show the extension `key` full-width.
@@ -30,6 +33,32 @@ impl WindowView {
         }
         okena_workspace::harness_state::set_active_extension(self.window_id, Some(key), cx);
         cx.notify();
+    }
+
+    /// Show the Extensions page full-width, with `open`'s details showing.
+    pub(crate) fn show_extensions_page(&mut self, open: Option<String>, cx: &mut Context<Self>) {
+        match &self.extensions_page {
+            Some(page) => {
+                if let Some(key) = open {
+                    page.update(cx, |page, cx| page.open(key, cx));
+                }
+            }
+            None => {
+                self.extensions_page = Some(cx.new(|cx| ExtensionsPage::new(open, cx)));
+            }
+        }
+        okena_workspace::harness_state::set_active_extension(
+            self.window_id,
+            Some(EXTENSIONS_PAGE.to_string()),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// The Extensions page, if it is what the main area shows.
+    pub(crate) fn active_extensions_page(&self, cx: &App) -> Option<Entity<ExtensionsPage>> {
+        let key = okena_workspace::harness_state::active_extension(self.window_id, cx)?;
+        (key == EXTENSIONS_PAGE).then(|| self.extensions_page.clone()).flatten()
     }
 
     /// The extension pane filling the main area, if one is showing.

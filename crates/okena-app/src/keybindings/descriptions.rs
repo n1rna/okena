@@ -13,7 +13,7 @@ use super::{
     ShowHarness, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager,
     ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal,
     SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
-    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
+    ToggleOverviewSearch, ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
     ToggleUnread, ZoomIn, ZoomOut,
 };
 
@@ -634,6 +634,15 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             description: "Equalize columns and panes to match the focused one",
             category: "Layout",
             factory: || Box::new(EqualizeLayout),
+        },
+    );
+    map.insert(
+        "ToggleOverviewSearch",
+        ActionDescription {
+            name: "Toggle Overview Search",
+            description: "Open or close the search island on the Agents and Projects overviews",
+            category: "Layout",
+            factory: || Box::new(ToggleOverviewSearch),
         },
     );
     map.insert(

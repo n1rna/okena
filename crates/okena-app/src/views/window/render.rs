@@ -5,8 +5,8 @@ use crate::keybindings::{
     RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
     ShowDiffViewer, ShowFileSearch, ShowHarness, ShowHookLog, ShowKeybindings, ShowLogConsole,
     ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowThemeSelector, StartAllServices, StopAllServices, TogglePaneSwitcher, ToggleProjectLayout,
-    ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
+    ShowThemeSelector, StartAllServices, StopAllServices, ToggleOverviewSearch, TogglePaneSwitcher,
+    ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
 };
 use crate::settings::{open_settings_file, settings_entity};
 use crate::theme::theme;
@@ -120,7 +120,7 @@ impl WindowView {
             .iter()
             .map(|p| p.id.clone())
             .collect();
-        // Positions are the grid's, and the grid is what the search bar left.
+        // Positions are the grid's, and the grid is what the search island left.
         if let Some(agents) = self.shown_overview(cx) {
             visible_projects = self.narrow_overview(agents, &visible_projects, cx).shown;
         }
@@ -287,14 +287,14 @@ impl WindowView {
             }
         };
 
-        // The search bar narrows what the overview was going to show, and
+        // The search island narrows what the overview was going to show, and
         // only that: folder filter, hidden projects and focus came first.
         let Some(agents) = self.shown_overview(cx) else {
             return self.render_grid(visible_projects, cx);
         };
         let narrowed = self.narrow_overview(agents, &visible_projects, cx);
         self.prune_overview_filter(agents, &narrowed.facets);
-        let bar = self.render_overview_bar(agents, &narrowed, cx);
+        let island = self.render_overview_island(agents, &narrowed, cx);
         let grid = if narrowed.shown.is_empty() && narrowed.total > 0 {
             prune_pane_map(self.window_id, &std::collections::HashSet::new());
             self.render_overview_no_match(agents, cx)
@@ -303,13 +303,13 @@ impl WindowView {
         };
         div()
             .id("overview")
+            .relative()
             .flex_1()
             .h_full()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
-            .child(bar)
             .child(
                 div()
                     .flex_1()
@@ -319,6 +319,7 @@ impl WindowView {
                     .flex_row()
                     .child(grid),
             )
+            .child(island)
             .into_any_element()
     }
 
@@ -1076,6 +1077,10 @@ impl Render for WindowView {
             // Toggle this window's project grid between columns and rows.
             // Per-window setting persisted on WindowState; sizing percentages
             // carry over unchanged across the flip.
+            // Open or close the overviews' search island.
+            .on_action(cx.listener(|this, _: &ToggleOverviewSearch, window, cx| {
+                this.toggle_overview_search(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleProjectLayout, _window, cx| {
                 let window_id = this.window_id;
                 this.workspace.update(cx, |ws, cx| {
@@ -1647,15 +1652,19 @@ impl Render for WindowView {
                                         None if let Some(pane) = self.active_extension_pane(cx) => {
                                             d.child(pane)
                                         }
+                                        None if let Some(page) = self.active_extensions_page(cx) => {
+                                            d.child(page)
+                                        }
                                         // A project's or session's context
                                         // lives in its own column, behind the
                                         // header's info toggle — not in a
                                         // second panel repeating the same
                                         // thing. How every column is arranged
                                         // and what it opens on are picked from
-                                        // the footer. The one thing above the
-                                        // grid is the overview's search bar:
-                                        // narrowing it is not a setting.
+                                        // the footer. The one thing under the
+                                        // grid is the overview's search
+                                        // island: narrowing it is not a
+                                        // setting.
                                         None => d.child(self.render_projects_grid(cx)),
                                     }),
                             ),

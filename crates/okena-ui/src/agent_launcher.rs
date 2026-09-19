@@ -4,10 +4,10 @@
 //! do it: a "Start work" button, a "Break down with agent" button, agent chips
 //! above a "Start session" button, and an "Open session" button standing in for
 //! all of them once something was running. The launcher is the single shape:
-//! what would start and with which brief, a pill per agent — its name to start
-//! it right away, its model to change for this launch — a way to configure it
-//! first, and — once something is running — the sessions
-//! themselves, with how they are doing and a way in.
+//! what would start and with which brief, one pill — dots to configure first,
+//! the agent's icon to pick the agent and its model for this launch, and the
+//! rest, naming the model, to start it — and, once something is running, the
+//! sessions themselves, with how they are doing and a way in.
 //!
 //! It knows nothing about tasks, specs or agents in particular. The caller
 //! says what the options are and what clicking them does.
@@ -77,25 +77,19 @@ impl Launch {
 }
 
 /// What a launcher remembers while it is open: the agent chosen, the model
-/// picked per agent, and which menu is open. Dropped when the launcher stops
-/// rendering, so a choice lasts until it closes.
+/// picked per agent, and whether the picker is open. Dropped when the
+/// launcher stops rendering, so a choice lasts until it closes.
 #[derive(Default)]
 struct LauncherState {
-    /// The option chosen in the agent menu; `None` until one is, which means
-    /// the default.
+    /// The option chosen in the picker; `None` until one is, which means the
+    /// default.
     chosen: Option<SharedString>,
     /// Keyed by command; `""` is "the CLI's default".
     picks: HashMap<SharedString, String>,
-    menu: Option<Menu>,
+    picker_open: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Menu {
-    Agent,
-    Model,
-}
-
-/// What the pill's model side says: the model this launch runs the agent
+/// What the pill says it will start on: the model this launch runs the agent
 /// on, `default` when none resolves. `None` — no model part at all — for a
 /// launcher with no brief, and for an agent okena passes no model to.
 fn model_label(brief: Option<&LaunchBrief>, command: &str, picked: Option<&str>) -> Option<String> {
@@ -320,30 +314,27 @@ impl AgentLauncher {
         self.busy.is_some() || self.sessions.is_empty() || self.launch_alongside_sessions
     }
 
-    /// The round "configure first" button, beside the title.
+    /// The pill's "configure first" part: three dots at its start.
     fn render_configure(&self, cx: &App) -> Option<AnyElement> {
         let (tooltip, handler) = self.on_configure.clone()?;
-        if self.busy.is_some() || self.disabled.is_some() {
-            return None;
-        }
         let t = theme(cx);
         Some(
             div()
                 .id(SharedString::from(format!("{}-configure", self.id)))
                 .flex_shrink_0()
                 .cursor_pointer()
-                .size(px(BUTTON_SIZE))
+                .h(px(SEGMENT_HEIGHT))
+                .w(px(16.0))
+                .ml(px(2.0))
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .border_1()
-                .border_color(rgb(t.border))
                 .hover(|s| s.bg(rgb(t.bg_hover)))
                 .child(
                     svg()
-                        .path("icons/settings.svg")
-                        .size(px(ICON_SIZE))
+                        .path("icons/more-vertical.svg")
+                        .size(px(12.0))
                         .text_color(rgb(t.text_secondary)),
                 )
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
@@ -395,10 +386,17 @@ impl AgentLauncher {
             .or_else(|| self.options.first())
     }
 
-    /// The one control that starts: `[agent ▾ │ model ▾ │ ▶]`. The left side
-    /// picks what starts — an agent, or an option that starts none — the right
-    /// side the model it runs on for this launch, and the button starts it. In
-    /// its place, why nothing can start, or that one is.
+    /// Whether the picker offers models for `command`: only when the launch
+    /// is briefed and okena hands that agent a model.
+    fn offers_models(&self, command: &str) -> bool {
+        model_label(self.brief.as_ref(), command, None).is_some()
+            && !agent_model::choices(command).is_empty()
+    }
+
+    /// The one control that starts: `[⋮ ◉ model]`. The dots configure first,
+    /// the agent's icon opens the picker for the agent and its model, and the
+    /// rest of the pill — naming the model, or what starts when there is none
+    /// — starts it. In its place, why nothing can start, or that one is.
     fn render_agents(&self, state: &Entity<LauncherState>, cx: &App) -> Option<AnyElement> {
         let t = theme(cx);
         if let Some(label) = self.busy.clone() {
@@ -433,124 +431,61 @@ impl AgentLauncher {
         let accent = option.accent;
         let picked = s.picks.get(&option.command).cloned();
         let model = model_label(self.brief.as_ref(), &option.command, picked.as_deref());
-        let menu = s.menu;
-        let divider = || div().w(px(1.0)).h(px(14.0)).bg(with_alpha(accent, 0.25));
-        let toggle = |which: Menu| {
-            let state = state.clone();
-            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                cx.stop_propagation();
-                state.update(cx, |state, cx| {
-                    state.menu = (state.menu != Some(which)).then_some(which);
-                    cx.notify();
-                });
-            }
-        };
+        let picker_open = s.picker_open;
 
-        let mut agent = h_flex()
+        let toggle = state.clone();
+        let mut agent = div()
             .id(SharedString::from(format!("{}-agent", self.id)))
             .relative()
-            // Inset and round, like the start button: the hover then follows
-            // the pill's own shape instead of squaring off its end.
-            .h(px(SEGMENT_HEIGHT))
-            .ml(px(2.0))
-            .rounded_full()
-            .items_center()
-            .gap(px(6.0))
-            .pl(px(8.0))
-            .pr(px(7.0))
-            .cursor_pointer()
-            .hover(move |s| s.bg(with_alpha(accent, 0.18)))
-            .when(!option.command.is_empty(), |d| {
-                d.child(
-                    svg()
-                        .path(option.icon.clone())
-                        .flex_shrink_0()
-                        .size(px(13.0))
-                        .text_color(rgb(accent)),
-                )
-            })
-            .child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_primary))
-                    .child(option.label.clone()),
-            )
-            .child(chevron(&t))
-            .tooltip(|window, cx| Tooltip::new("Choose what starts").build(window, cx))
-            .on_click(toggle(Menu::Agent));
-        if menu == Some(Menu::Agent) {
-            agent = agent.child(self.render_agent_menu(state, &option.command, cx));
-        }
-
-        let mut pill = h_flex()
-            .flex_shrink_0()
-            .h(px(PILL_HEIGHT))
-            .items_center()
-            .rounded(px(PILL_HEIGHT / 2.0))
-            .border_1()
-            .border_color(with_alpha(accent, 0.35))
-            .bg(with_alpha(accent, 0.07))
-            .child(agent);
-
-        if let Some(model) = model {
-            let choices = agent_model::choices(&option.command);
-            let mut part = h_flex()
-                .id(SharedString::from(format!("{}-model", self.id)))
-                .relative()
-                .h(px(SEGMENT_HEIGHT))
-                .mx(px(2.0))
-                .rounded_full()
-                .items_center()
-                .gap(px(4.0))
-                .px(px(7.0))
-                .text_size(ui_text_ms(cx))
-                .text_color(rgb(if picked.is_some() {
-                    t.text_primary
-                } else {
-                    t.text_secondary
-                }))
-                .child(model);
-            if !choices.is_empty() {
-                part = part
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(with_alpha(accent, 0.18)))
-                    .child(chevron(&t))
-                    .tooltip(|window, cx| Tooltip::new("Model for this launch").build(window, cx))
-                    .on_click(toggle(Menu::Model));
-                if menu == Some(Menu::Model) {
-                    part = part.child(self.render_model_menu(
-                        state,
-                        &option.command,
-                        picked.as_deref(),
-                        choices,
-                        cx,
-                    ));
-                }
-            }
-            pill = pill.child(divider()).child(part);
-        }
-
-        let handler = self.on_launch.clone();
-        let command = option.command.clone();
-        let start_tooltip = option.tooltip();
-        let start = div()
-            .id(SharedString::from(format!("{}-start", self.id)))
             .flex_shrink_0()
             .size(px(SEGMENT_HEIGHT))
-            .mx(px(2.0))
             .rounded_full()
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .bg(with_alpha(accent, 0.85))
-            .hover(move |s| s.bg(rgb(accent)))
+            .when(picker_open, |d| d.bg(with_alpha(accent, 0.18)))
+            .hover(move |s| s.bg(with_alpha(accent, 0.18)))
             .child(
                 svg()
-                    .path("icons/play.svg")
-                    .size(px(10.0))
-                    .text_color(rgb(t.bg_primary)),
+                    .path(option.icon.clone())
+                    .size(px(13.0))
+                    .text_color(rgb(accent)),
             )
+            .tooltip(|window, cx| Tooltip::new("Choose the agent and model").build(window, cx))
+            .on_click(move |_, _window, cx| {
+                cx.stop_propagation();
+                toggle.update(cx, |state, cx| {
+                    state.picker_open = !state.picker_open;
+                    cx.notify();
+                });
+            });
+        if picker_open {
+            agent = agent.child(self.render_picker(state, &option.command, picked.as_deref(), cx));
+        }
+
+        let handler = self.on_launch.clone();
+        let command = option.command.clone();
+        let start_tooltip: SharedString = match &model {
+            Some(model) => format!("{} on {model}", option.tooltip()).into(),
+            None => option.tooltip(),
+        };
+        let start = div()
+            .id(SharedString::from(format!("{}-start", self.id)))
+            .flex_shrink_0()
+            .h(px(SEGMENT_HEIGHT))
+            .mr(px(2.0))
+            .px(px(10.0))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .bg(with_alpha(accent, 0.85))
+            .hover(move |s| s.bg(rgb(accent)))
+            .text_size(ui_text_ms(cx))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(t.bg_primary))
+            .child(model.map(SharedString::from).unwrap_or_else(|| option.label.clone()))
             .tooltip(move |window, cx| Tooltip::new(start_tooltip.clone()).build(window, cx))
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
@@ -562,107 +497,180 @@ impl AgentLauncher {
                     handler(&launch, window, cx);
                 }
             });
-        Some(pill.child(start).into_any_element())
+
+        Some(
+            h_flex()
+                .flex_shrink_0()
+                .h(px(PILL_HEIGHT))
+                .items_center()
+                .gap(px(2.0))
+                .rounded(px(PILL_HEIGHT / 2.0))
+                .border_1()
+                .border_color(with_alpha(accent, 0.35))
+                .bg(with_alpha(accent, 0.07))
+                .when(self.on_configure.is_none(), |d| d.pl(px(2.0)))
+                .children(self.render_configure(cx))
+                .child(agent)
+                .child(start)
+                .into_any_element(),
+        )
     }
 
-    /// Every option, agents first, then the ones that start none.
-    fn render_agent_menu(
+    /// The picker: every option's icon down the left — agents first, then the
+    /// ones that start none — and the chosen agent's models on the right.
+    /// Picking an agent chooses it at once and keeps the picker open for its
+    /// model; one with no models to pick closes it.
+    fn render_picker(
         &self,
         state: &Entity<LauncherState>,
         current: &SharedString,
+        picked: Option<&str>,
         cx: &App,
     ) -> AnyElement {
         let t = theme(cx);
-        let mut menu = menu_panel(format!("{}-agent-menu", self.id), state, &t);
         let (agents, plain): (Vec<&LaunchOption>, Vec<&LaunchOption>) =
             self.options.iter().partition(|o| !o.command.is_empty());
-        let row = |menu: Stateful<Div>, option: &LaunchOption, index: usize| {
+
+        let icon_button = |option: &LaunchOption, index: usize| {
             let choose = state.clone();
             let command = option.command.clone();
-            let preferred = self.preferred.as_ref() == Some(&option.command);
-            menu.child(
-                menu_row(
-                    format!("{}-agent-{index}", self.id),
-                    option.label.clone(),
-                    &option.command == current,
-                    &t,
-                    cx,
+            let closes = !self.offers_models(&command);
+            let selected = &option.command == current;
+            let accent = option.accent;
+            let label = if self.preferred.as_ref() == Some(&option.command) {
+                SharedString::from(format!("{} (default)", option.label))
+            } else {
+                option.label.clone()
+            };
+            div()
+                .id(SharedString::from(format!("{}-agent-{index}", self.id)))
+                .flex_shrink_0()
+                .size(px(PICKER_ICON))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .border_1()
+                .map(|d| {
+                    if selected {
+                        d.border_color(with_alpha(accent, 0.6))
+                            .bg(with_alpha(accent, 0.15))
+                    } else {
+                        d.border_color(rgb(t.border))
+                            .hover(move |s| s.bg(with_alpha(accent, 0.1)))
+                    }
+                })
+                .child(
+                    svg()
+                        .path(option.icon.clone())
+                        .size(px(14.0))
+                        .text_color(rgb(accent)),
                 )
-                .when(!option.command.is_empty(), |d| {
-                    d.child(
-                        svg()
-                            .path(option.icon.clone())
-                            .size(px(12.0))
-                            .text_color(rgb(option.accent)),
-                    )
-                })
-                .when(preferred, |d| {
-                    d.child(
-                        div()
-                            .text_size(ui_text_ms(cx))
-                            .text_color(rgb(t.text_muted))
-                            .child("default"),
-                    )
-                })
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
                 .on_click(move |_, _window, cx| {
                     cx.stop_propagation();
                     choose.update(cx, |state, cx| {
                         state.chosen = Some(command.clone());
-                        state.menu = None;
+                        state.picker_open = !closes;
                         cx.notify();
                     });
-                }),
-            )
+                })
         };
+
+        let mut icons = v_flex().flex_shrink_0().gap(px(4.0));
         for (index, option) in agents.iter().enumerate() {
-            menu = row(menu, option, index);
+            icons = icons.child(icon_button(option, index));
         }
         if !plain.is_empty() {
-            menu = menu.child(div().my(px(4.0)).h(px(1.0)).bg(rgb(t.border)));
+            icons = icons.child(div().my(px(2.0)).h(px(1.0)).bg(rgb(t.border)));
             for (index, option) in plain.iter().enumerate() {
-                menu = row(menu, option, 100 + index);
+                icons = icons.child(icon_button(option, 100 + index));
             }
         }
-        anchor_under(menu)
-    }
 
-    fn render_model_menu(
-        &self,
-        state: &Entity<LauncherState>,
-        command: &SharedString,
-        picked: Option<&str>,
-        choices: &[&'static str],
-        cx: &App,
-    ) -> AnyElement {
-        let t = theme(cx);
-        let mut menu = menu_panel(format!("{}-model-menu", self.id), state, &t);
-        // `""` is the CLI's default, last: a fallback rather than a model.
-        let rows = choices
+        let name = self
+            .options
             .iter()
-            .map(|m| (SharedString::from(*m), *m))
-            .chain(std::iter::once((SharedString::from("CLI default"), "")));
-        for (label, value) in rows {
-            let pick = state.clone();
-            let command = command.clone();
-            menu = menu.child(
-                menu_row(
-                    format!("{}-model-{label}", self.id),
-                    label,
-                    picked == Some(value),
-                    &t,
-                    cx,
-                )
-                .on_click(move |_, _window, cx| {
-                    cx.stop_propagation();
-                    pick.update(cx, |state, cx| {
-                        state.picks.insert(command.clone(), value.to_string());
-                        state.menu = None;
-                        cx.notify();
-                    });
-                }),
+            .find(|o| &o.command == current)
+            .map(|o| o.label.clone())
+            .unwrap_or_default();
+        let mut models = v_flex()
+            .min_w(px(150.0))
+            .py(px(2.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(t.border))
+            .bg(rgb(t.bg_secondary))
+            .child(
+                div()
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(name),
+            );
+        if self.offers_models(current) {
+            // What the pill shows is the model that runs, so the tick is on
+            // it whether it was picked or came from the template.
+            let running = model_label(self.brief.as_ref(), current, picked);
+            // `""` is the CLI's default, last: a fallback rather than a model.
+            let rows = agent_model::choices(current)
+                .iter()
+                .map(|m| (SharedString::from(*m), *m))
+                .chain(std::iter::once((SharedString::from("CLI default"), "")));
+            for (label, value) in rows {
+                let pick = state.clone();
+                let command = current.clone();
+                let ticked = match picked {
+                    Some(p) => p == value,
+                    None => running.as_deref() == Some(if value.is_empty() { "default" } else { value }),
+                };
+                models = models.child(
+                    menu_row(format!("{}-model-{label}", self.id), label, ticked, &t, cx)
+                        .on_click(move |_, _window, cx| {
+                            cx.stop_propagation();
+                            pick.update(cx, |state, cx| {
+                                state.chosen = Some(command.clone());
+                                state.picks.insert(command.clone(), value.to_string());
+                                state.picker_open = false;
+                                cx.notify();
+                            });
+                        }),
+                );
+            }
+        } else {
+            models = models.child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("No model to pick"),
             );
         }
-        anchor_under(menu)
+
+        let close = state.clone();
+        let panel = h_flex()
+            .id(SharedString::from(format!("{}-picker", self.id)))
+            .occlude()
+            .items_start()
+            .gap(px(6.0))
+            .p(px(6.0))
+            .bg(rgb(t.bg_primary))
+            .border_1()
+            .border_color(rgb(t.border))
+            .rounded(px(8.0))
+            .shadow_lg()
+            .on_mouse_down_out(move |_, _window, cx| {
+                close.update(cx, |state, cx| {
+                    state.picker_open = false;
+                    cx.notify();
+                });
+            })
+            .child(icons)
+            .child(models);
+        anchor_under(panel)
     }
 
     fn render_session(&self, session: &LauncherSession, cx: &App) -> AnyElement {
@@ -841,39 +849,6 @@ impl AgentLauncher {
     }
 }
 
-fn chevron(t: &crate::theme::ThemeColors) -> Svg {
-    svg()
-        .path("icons/chevron-down.svg")
-        .flex_shrink_0()
-        .size(px(10.0))
-        .text_color(rgb(t.text_muted))
-}
-
-/// A menu's panel; pressing anywhere outside it closes it.
-fn menu_panel(
-    id: String,
-    state: &Entity<LauncherState>,
-    t: &crate::theme::ThemeColors,
-) -> Stateful<Div> {
-    let close = state.clone();
-    v_flex()
-        .id(SharedString::from(id))
-        .occlude()
-        .min_w(px(170.0))
-        .py(px(4.0))
-        .bg(rgb(t.bg_primary))
-        .border_1()
-        .border_color(rgb(t.border))
-        .rounded(px(6.0))
-        .shadow_lg()
-        .on_mouse_down_out(move |_, _window, cx| {
-            close.update(cx, |state, cx| {
-                state.menu = None;
-                cx.notify();
-            });
-        })
-}
-
 /// One menu row: a check for the current one, then its label; callers add
 /// what trails it.
 fn menu_row(
@@ -921,12 +896,11 @@ fn anchor_under(menu: Stateful<Div>) -> AnyElement {
         .into_any_element()
 }
 
-/// The round configure button.
-const BUTTON_SIZE: f32 = 28.0;
-const ICON_SIZE: f32 = 14.0;
+/// An agent's button in the picker.
+const PICKER_ICON: f32 = 28.0;
 /// The start pill.
 const PILL_HEIGHT: f32 = 28.0;
-/// Each part inside the pill — agent, model, start — as a pill of its own.
+/// Each part inside the pill — configure, agent, start — as a pill of its own.
 const SEGMENT_HEIGHT: f32 = PILL_HEIGHT - 6.0;
 
 impl RenderOnce for AgentLauncher {
@@ -940,7 +914,6 @@ impl RenderOnce for AgentLauncher {
         );
         let starts = self.shows_buttons();
         let brief = starts.then(|| self.render_brief(cx)).flatten();
-        let configure = starts.then(|| self.render_configure(cx)).flatten();
         let agents = starts.then(|| self.render_agents(&state, cx)).flatten();
 
         let header = h_flex()
@@ -974,16 +947,7 @@ impl RenderOnce for AgentLauncher {
                     }))
                     .children(brief),
             )
-            .when(configure.is_some() || agents.is_some(), |d| {
-                d.child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .items_center()
-                        .gap(px(6.0))
-                        .children(configure)
-                        .children(agents),
-                )
-            });
+            .children(agents);
 
         let modes = self.render_modes(cx);
 

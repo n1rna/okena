@@ -5,7 +5,7 @@
 //! (`okena-daemon-core`) need to push the right `CLAUDE_CONFIG_DIR` into the PTYs
 //! they spawn so the `claude` CLI inside Okena terminals reads the per-profile
 //! account. The GUI used to resolve the dir through the gpui extension registry
-//! (`okena-ext-claude::resolve_claude_dir`, which reads the `ExtensionSettingsStore`
+//! (`okena-ext-usage::resolve_claude_dir`, which reads the `ExtensionSettingsStore`
 //! global). That global is just a thin wrapper over the **gpui-free**
 //! [`AppSettings::extension_settings`](crate::settings::AppSettings) map — so the
 //! same three-tier resolution can be done without gpui here, against the
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use crate::settings::AppSettings;
 
 /// Expand a leading `~` / `~/` to the user's home directory. Mirrors the
-/// expansion the GUI's `okena-ext-claude::usage::expand_tilde` did.
+/// expansion the GUI's `okena-ext-usage::claude::expand_tilde` did.
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
@@ -51,7 +51,7 @@ fn existing_path(path: &str, source: &str) -> Option<PathBuf> {
 }
 
 /// Resolve the Claude config directory using the same three-tier precedence as
-/// the GUI's `okena-ext-claude::resolve_claude_dir`, but gpui-free:
+/// the GUI's `okena-ext-usage::resolve_claude_dir`, but gpui-free:
 /// 1. `extension_settings."claude-code".config_dir` in settings.json
 /// 2. `CLAUDE_CONFIG_DIR` environment variable (Claude CLI convention)
 /// 3. `$HOME/.claude` (default)

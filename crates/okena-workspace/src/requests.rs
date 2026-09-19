@@ -239,6 +239,10 @@ pub enum WorkbenchRequest {
     /// Open an extension's view, by its
     /// [`extension_key`](crate::extensions_state::extension_key).
     OpenExtensionView { key: String },
+    /// Open the Extensions page, where extensions are installed, turned on
+    /// and off, configured and removed. `open` shows that extension's details,
+    /// by key.
+    OpenExtensionsPage { open: Option<String> },
     /// Open Harness → Knowledge on one document: `path` inside the knowledge
     /// root discovery keyed `root_key`. How the project info panel opens a
     /// project map's docs.

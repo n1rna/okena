@@ -25,7 +25,7 @@ use okena_workspace::extensions_state::{
     ClientExtension, ExtensionsState, extensions_entity, split_key,
 };
 use okena_workspace::request_broker::RequestBroker;
-use okena_workspace::requests::OverlayRequest;
+use okena_workspace::requests::WorkbenchRequest;
 use okena_workspace::toast::ToastManager;
 
 use crate::render;
@@ -208,17 +208,11 @@ impl ExtensionPane {
         });
     }
 
-    /// Settings → Extensions, with this extension's details open.
+    /// The Extensions page, with this extension's details open.
     pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
         let key = self.key.clone();
         self.request_broker.update(cx, |broker, cx| {
-            broker.push_overlay_request(
-                OverlayRequest::Settings {
-                    page: Some(crate::SETTINGS_PAGE.to_string()),
-                    section: Some(key),
-                },
-                cx,
-            );
+            broker.push_workbench_request(WorkbenchRequest::OpenExtensionsPage { open: Some(key) }, cx);
         });
     }
 
@@ -541,7 +535,7 @@ impl ExtensionPane {
             ExtRunState::Disabled => out.push(
                 banner("ext-disabled", t.text_muted, &t)
                     .child(banner_title(format!("{} is turned off", ext.name), &t, cx))
-                    .child(banner_text("Turn it on in Settings → Extensions.", &t, cx))
+                    .child(banner_text("Turn it on from the Extensions page.", &t, cx))
                     .into_any_element(),
             ),
             _ => {}

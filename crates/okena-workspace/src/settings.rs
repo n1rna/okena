@@ -670,7 +670,7 @@ fn default_status_bar_metrics_graph() -> bool {
 }
 
 /// Current settings schema version - increment when making breaking changes
-pub const SETTINGS_VERSION: u32 = 3;
+pub const SETTINGS_VERSION: u32 = 4;
 
 /// App settings (persisted separately from workspace)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1236,6 +1236,15 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
         settings.version = 3;
     }
 
+    // v3 -> v4: the Claude Code, Codex and GitHub extensions became Usage
+    // (agents' limits) and Status (services' health), each choosing what it
+    // shows. Whatever was on keeps showing.
+    if settings.version == 3 {
+        log::info!("Migrating settings from v3 to v4 (usage and status extensions)");
+        fold_into_usage_and_status(&mut settings);
+        settings.version = 4;
+    }
+
     // Ensure version is current
     if settings.version < SETTINGS_VERSION {
         log::warn!(
@@ -1247,6 +1256,41 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
     }
 
     settings
+}
+
+/// Turn the old per-product extensions on in `enabled_extensions` into Usage
+/// and Status with the same products chosen. Claude's `config_dir` stays under
+/// `"claude-code"`, where the daemon reads it.
+fn fold_into_usage_and_status(settings: &mut AppSettings) {
+    let was_on = |id: &str| settings.enabled_extensions.contains(id);
+    let claude = was_on("claude-code");
+    let codex = was_on("codex");
+    let github = was_on("github");
+    let pick = |pairs: &[(bool, &str)]| -> Vec<String> {
+        pairs
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, slug)| slug.to_string())
+            .collect()
+    };
+    let agents = pick(&[(claude, "claude"), (codex, "codex")]);
+    let services = pick(&[(claude, "claude"), (codex, "codex"), (github, "github")]);
+    for (id, key, chosen) in [("usage", "agents", agents), ("status", "services", services)] {
+        if chosen.is_empty() {
+            continue;
+        }
+        settings.enabled_extensions.insert(id.to_string());
+        let blob = settings
+            .extension_settings
+            .entry(id.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if blob.is_object() && blob.get(key).is_none() {
+            blob[key] = serde_json::json!(chosen);
+        }
+    }
+    for old in ["claude-code", "codex", "github"] {
+        settings.enabled_extensions.remove(old);
+    }
 }
 
 /// Process-level mutex for settings file access.
@@ -1454,8 +1498,10 @@ mod tests {
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         let migrated = migrate_settings(settings);
         assert_eq!(migrated.version, SETTINGS_VERSION);
-        assert!(migrated.enabled_extensions.contains("claude-code"));
-        assert!(!migrated.enabled_extensions.contains("codex"));
+        // Through v3's "claude-code" to v4's Usage and Status.
+        assert!(migrated.enabled_extensions.contains("usage"));
+        assert_eq!(migrated.extension_settings["usage"]["agents"], serde_json::json!(["claude"]));
+        assert!(!migrated.enabled_extensions.contains("claude-code"));
     }
 
     #[test]
@@ -1463,7 +1509,7 @@ mod tests {
         let json = r#"{"version": 2, "codex_integration": true}"#;
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         let migrated = migrate_settings(settings);
-        assert!(migrated.enabled_extensions.contains("codex"));
+        assert_eq!(migrated.extension_settings["usage"]["agents"], serde_json::json!(["codex"]));
     }
 
     #[test]
@@ -1471,8 +1517,10 @@ mod tests {
         let json = r#"{"version": 2, "claude_code_integration": true, "codex_integration": true}"#;
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         let migrated = migrate_settings(settings);
-        assert!(migrated.enabled_extensions.contains("claude-code"));
-        assert!(migrated.enabled_extensions.contains("codex"));
+        assert_eq!(
+            migrated.extension_settings["usage"]["agents"],
+            serde_json::json!(["claude", "codex"])
+        );
     }
 
     #[test]
@@ -1484,6 +1532,36 @@ mod tests {
         assert_eq!(migrated.enabled_extensions.len(), 1);
         assert!(migrated.enabled_extensions.contains("updater"));
         assert!(!migrated.enabled_extensions.contains("claude-code"));
+    }
+
+    #[test]
+    fn migrate_v3_folds_claude_codex_and_github_into_usage_and_status() {
+        let json = r#"{
+            "version": 3,
+            "enabled_extensions": ["claude-code", "github", "updater"],
+            "extension_settings": { "claude-code": { "config_dir": "~/.claude-work" } }
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        let migrated = migrate_settings(settings);
+        assert_eq!(migrated.version, 4);
+        let on = &migrated.enabled_extensions;
+        assert!(on.contains("usage") && on.contains("status") && on.contains("updater"));
+        assert!(!on.contains("claude-code") && !on.contains("github"));
+        let ext = &migrated.extension_settings;
+        assert_eq!(ext["usage"]["agents"], serde_json::json!(["claude"]));
+        assert_eq!(ext["status"]["services"], serde_json::json!(["claude", "github"]));
+        // Claude's login dir stays where the daemon reads it.
+        assert_eq!(ext["claude-code"]["config_dir"], "~/.claude-work");
+    }
+
+    #[test]
+    fn migrate_v3_with_github_alone_turns_on_status_only() {
+        let json = r#"{"version": 3, "enabled_extensions": ["github"]}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        let migrated = migrate_settings(settings);
+        assert!(migrated.enabled_extensions.contains("status"));
+        assert!(!migrated.enabled_extensions.contains("usage"));
+        assert!(!migrated.extension_settings.contains_key("usage"));
     }
 
     #[test]

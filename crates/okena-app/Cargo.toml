@@ -30,7 +30,6 @@ okena-views-extensions = { path = "../okena-views-extensions" }
 
 # Extension system
 okena-extensions = { path = "../okena-extensions" }
-okena-ext-claude = { path = "../okena-ext-claude" }
 okena-ext-updater = { path = "../okena-ext-updater" }
 
 # UI Framework (from Zed repo)

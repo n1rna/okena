@@ -241,6 +241,9 @@ pub struct WindowView {
     pending_harness_restore: Option<okena_core::harness::HarnessSection>,
     /// Extensions' own views, by extension key, kept like the harness panes.
     extension_panes: std::collections::HashMap<String, Entity<okena_views_extensions::ExtensionPane>>,
+    /// The Extensions page, once opened. Kept like the panes, so an install
+    /// form half filled in survives switching away.
+    extensions_page: Option<Entity<crate::views::extensions_page::ExtensionsPage>>,
     /// Grid scroll offset captured when entering project focus, restored on exit
     /// so the project stays in the same place rather than jumping to center.
     /// (The offset is otherwise clamped to 0 while a single project is zoomed.)
@@ -257,11 +260,14 @@ pub struct WindowView {
     last_project_paths: HashMap<String, String>,
     /// Last observed wholesale workspace data replacement epoch.
     last_data_replacement_epoch: u64,
-    /// The search bar above the Projects overview. Per window and per
+    /// The search island under the Projects overview. Per window and per
     /// overview, held here rather than in `WindowState` so it is never saved.
     projects_search: overview_bar::OverviewSearch,
-    /// The search bar and chips above the Agents overview.
+    /// The search box and chips under the Agents overview.
     agents_search: overview_bar::OverviewSearch,
+    /// Whether the overviews' search island is open, or closed to its pill.
+    /// One for both overviews, so switching keeps it as it was.
+    overview_search_open: bool,
 }
 
 impl WindowView {
@@ -473,6 +479,7 @@ impl WindowView {
             projects_scroll_handle: ScrollHandle::new(),
             harness_panes: Vec::new(),
             extension_panes: std::collections::HashMap::new(),
+            extensions_page: None,
             pending_harness_restore,
             projects_grid_bounds: Rc::new(RefCell::new(Bounds {
                 origin: Point::default(),
@@ -497,6 +504,7 @@ impl WindowView {
             last_data_replacement_epoch,
             projects_search: overview_bar::OverviewSearch::new(false, cx),
             agents_search: overview_bar::OverviewSearch::new(true, cx),
+            overview_search_open: true,
         };
 
         // Slice 07 cri 7: persist OS bounds back into this window's

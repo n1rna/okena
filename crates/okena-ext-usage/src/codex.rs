@@ -954,6 +954,7 @@ impl Render for CodexUsage {
                     .py(px(1.0))
                     .rounded(px(3.0))
                     .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .child(crate::bar::agent_icon(crate::selection::Agent::Codex, t.text_muted))
                     .children(usage_trigger_items(&t, cx, &items))
                     .child(
                         canvas(

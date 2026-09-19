@@ -179,7 +179,15 @@ impl SettingsPanel {
         daemon_endpoint: Option<DaemonEndpoint>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let category = page.and_then(SettingsCategory::from_slug);
+        // A built-in extension's page is named by its id.
+        let category = page.and_then(SettingsCategory::from_slug).or_else(|| {
+            let id = page?;
+            cx.try_global::<okena_extensions::ExtensionRegistry>()?
+                .extensions()
+                .iter()
+                .any(|ext| ext.manifest.id == id && ext.settings_view.is_some())
+                .then(|| SettingsCategory::Extension(id.to_string()))
+        });
         let mut panel = Self::new_with_options(workspace, None, category, daemon_endpoint, cx);
         if page == Some(okena_views_extensions::SETTINGS_PAGE)
             && let Some(key) = section

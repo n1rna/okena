@@ -14,6 +14,7 @@ pub mod agent_session;
 pub mod chrome;
 pub mod components;
 pub mod extension_agents;
+pub mod extensions_page;
 pub mod harness;
 pub mod known_tasks;
 pub mod launch_briefs;

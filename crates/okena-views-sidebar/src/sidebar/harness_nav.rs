@@ -11,7 +11,7 @@ use gpui_component::v_flex;
 use okena_core::harness::HarnessSection;
 use okena_ui::theme::theme;
 use okena_ui::tokens::{ui_text, ui_text_ms};
-use okena_workspace::harness_state::active_harness;
+use okena_workspace::harness_state::{EXTENSIONS_PAGE, active_harness};
 use okena_workspace::requests::WorkbenchRequest;
 
 use super::{Sidebar, SidebarList};
@@ -81,10 +81,25 @@ impl Sidebar {
             })
             .collect();
 
-        // Extensions with a view of their own, after the harness views. A
+        // The Extensions page closes the harness list: managing what extends
+        // okena is okena's own view, like the ones above it.
+        let active_extension = okena_workspace::harness_state::active_extension(self.window_id, cx);
+        let manage = {
+            let broker = self.request_broker.clone();
+            let is_active = active.is_none() && active_extension.as_deref() == Some(EXTENSIONS_PAGE);
+            self.nav_item("harness-nav-extensions", "Extensions", is_active, cx)
+                .on_click(move |_, _window, cx| {
+                    broker.update(cx, |b, cx| {
+                        b.push_workbench_request(WorkbenchRequest::OpenExtensionsPage { open: None }, cx);
+                    });
+                })
+                .into_any_element()
+        };
+
+        // Extensions with a view of their own, in a section of their own below
+        // okena's: these are pages an extension draws, not harness views. A
         // remote daemon's are named after it, since two daemons may run the
         // same extension.
-        let active_extension = okena_workspace::harness_state::active_extension(self.window_id, cx);
         let extension_entries: Vec<(String, String)> =
             okena_workspace::extensions_state::extensions_entity(cx)
                 .map(|entity| {
@@ -108,8 +123,11 @@ impl Sidebar {
             .map(|(key, label)| {
                 let broker = self.request_broker.clone();
                 let is_active = active.is_none() && active_extension.as_deref() == Some(key.as_str());
-                self.nav_item(
+                // Marked as an extension's, so it does not read as one more
+                // of okena's views.
+                self.nav_item_with_icon(
                     SharedString::from(format!("harness-nav-ext-{key}")),
+                    Some("icons/puzzle.svg"),
                     SharedString::from(label),
                     is_active,
                     cx,
@@ -123,37 +141,61 @@ impl Sidebar {
                 .into_any_element()
             })
             .collect();
+        let has_extensions = !extensions.is_empty();
+
+        let divider = || div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border));
 
         v_flex()
-            .child(
-                div()
-                    .h(px(28.0))
-                    .px(px(12.0))
-                    .flex()
-                    .items_center()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child("HARNESS"),
-            )
+            .child(self.nav_heading("HARNESS", cx))
             .children(overviews)
             .children(items)
-            .children(extensions)
-            .child(div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgb(t.border)))
+            .child(manage)
+            .child(divider())
+            .when(has_extensions, |d| {
+                d.child(self.nav_heading("EXTENSIONS", cx))
+                    .children(extensions)
+                    .child(divider())
+            })
     }
 }
 
 impl Sidebar {
+    /// The label above a group of nav entries.
+    fn nav_heading(&self, label: &'static str, cx: &App) -> Div {
+        let t = theme(cx);
+        div()
+            .h(px(28.0))
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .text_size(ui_text_ms(cx))
+            .text_color(rgb(t.text_muted))
+            .child(label)
+    }
+
     /// One entry in the nav, the same for an overview and a harness view.
     fn nav_item(
         &self,
-        id: SharedString,
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        is_active: bool,
+        cx: &App,
+    ) -> Stateful<Div> {
+        self.nav_item_with_icon(id, None, label, is_active, cx)
+    }
+
+    /// A nav entry with `icon` before its label.
+    fn nav_item_with_icon(
+        &self,
+        id: impl Into<SharedString>,
+        icon: Option<&'static str>,
         label: impl Into<SharedString>,
         is_active: bool,
         cx: &App,
     ) -> Stateful<Div> {
         let t = theme(cx);
         div()
-            .id(id)
+            .id(ElementId::Name(id.into()))
             .cursor_pointer()
             .h(px(24.0))
             .px(px(12.0))
@@ -166,6 +208,15 @@ impl Sidebar {
                 rgb(t.text_primary)
             } else {
                 rgb(t.text_secondary)
+            })
+            .when_some(icon, |d, icon| {
+                d.gap(px(6.0)).child(
+                    svg()
+                        .path(icon)
+                        .size(px(12.0))
+                        .flex_shrink_0()
+                        .text_color(rgb(t.text_muted)),
+                )
             })
             .child(label.into())
     }

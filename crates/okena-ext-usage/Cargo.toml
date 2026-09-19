@@ -1,5 +1,5 @@
 [package]
-name = "okena-ext-github"
+name = "okena-ext-usage"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -8,10 +8,19 @@ license = "MIT"
 okena-core = { path = "../okena-core" }
 okena-transport = { path = "../okena-transport", features = ["blocking-http"] }
 okena-extensions = { path = "../okena-extensions" }
+okena-git = { path = "../okena-git" }
 okena-ui = { path = "../okena-ui" }
+okena-usage = { path = "../okena-usage" }
 gpui = { git = "https://github.com/zed-industries/zed", package = "gpui" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", package = "gpui-component" }
 serde_json = "1.0"
 smol = "2.0"
 parking_lot = "0.12"
+dirs = "5.0"
 log = "0.4"
+base64 = "0.22"
+jiff = "0.2"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

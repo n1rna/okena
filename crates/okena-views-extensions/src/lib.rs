@@ -7,7 +7,7 @@
 //! - [`pane::ExtensionPane`] is an extension's own view in the main area.
 //! - [`table`] arranges tables: grouping, sorting, filtering, selection.
 //! - [`manage::ExtensionsManager`] installs, approves, configures, updates
-//!   and removes them, in Settings → Extensions.
+//!   and removes them, on the Extensions page and in Settings → Extensions.
 
 #![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
 
@@ -16,7 +16,7 @@ pub mod pane;
 mod render;
 pub mod table;
 
-pub use manage::ExtensionsManager;
+pub use manage::{ExtensionsManager, card, heading, icon_tile};
 pub use pane::{ExtensionPane, ExtensionPaneEvent, extension_by_key};
 
 /// The Settings page extensions are managed on; its section is an

@@ -573,23 +573,14 @@ impl Sidebar {
             .map(|row| self.render_closed_row(row, cx))
             .collect();
 
-        // The way back, at the top of the list it replaced.
-        let back = h_flex()
-            .id("closed-agents-back")
-            .cursor_pointer()
+        // What this list is, at its top. Not a button: the history toggle in
+        // the header is the one way back to the live agents.
+        let heading = h_flex()
             .mx(px(8.0))
             .px(px(6.0))
             .py(px(4.0))
             .gap(px(6.0))
             .items_center()
-            .rounded(px(4.0))
-            .hover(|s| s.bg(rgb(t.bg_hover)))
-            .child(
-                svg()
-                    .path("icons/arrow-left.svg")
-                    .size(px(12.0))
-                    .text_color(rgb(t.text_secondary)),
-            )
             .child(
                 div()
                     .flex_1()
@@ -603,8 +594,7 @@ impl Sidebar {
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_muted))
                     .child(format!("{}", rows.len())),
-            )
-            .on_click(cx.listener(|this, _, _window, cx| this.toggle_closed_agents(cx)));
+            );
 
         let body = if rows.is_empty() {
             div()
@@ -629,7 +619,7 @@ impl Sidebar {
             .w_full()
             .gap(px(4.0))
             .py(px(4.0))
-            .child(back)
+            .child(heading)
             .child(body)
             .into_any_element()
     }
