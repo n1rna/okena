@@ -100,6 +100,18 @@ async fn run_action_queue(
     }
 }
 
+/// File a daemon's memory figures where the views read them; `None` forgets
+/// that daemon's.
+fn file_process_memory(
+    connection_id: &str,
+    memory: Option<okena_core::api::ApiProcessMemory>,
+    cx: &mut App,
+) {
+    if let Some(entity) = okena_workspace::process_memory::process_memory_entity(cx) {
+        entity.update(cx, |m, cx| m.set(connection_id, memory, cx));
+    }
+}
+
 /// Fold an older settings patch under a newer one so coalescing keeps both
 /// deltas; where they touch the same field the newer value wins.
 fn coalesce_settings_actions(older: QueuedAction, newer: QueuedAction) -> QueuedAction {
@@ -450,6 +462,7 @@ impl RemoteConnectionManager {
         if let Some(mut conn) = self.connections.remove(connection_id) {
             conn.disconnect();
         }
+        file_process_memory(connection_id, None, cx);
         // Remove from saved settings (off GPUI thread)
         let id = connection_id.to_string();
         cx.background_executor()
@@ -820,6 +833,11 @@ impl RemoteConnectionManager {
                 if is_local_connection_terminal_failure(&connection_id, &status) {
                     cx.emit(RemoteManagerEvent::LocalConnectionFailed);
                 }
+                // A daemon out of reach has no current figures; the next
+                // stats after it reconnects bring them back.
+                if !matches!(status, ConnectionStatus::Connected) {
+                    file_process_memory(&connection_id, None, cx);
+                }
                 cx.notify();
             }
             ConnectionEvent::TokenObtained {
@@ -926,6 +944,7 @@ impl RemoteConnectionManager {
                 connection_id,
                 stats,
             } => {
+                file_process_memory(&connection_id, stats.memory.clone(), cx);
                 if let Some(conn) = self.connections.get_mut(&connection_id) {
                     conn.set_system_stats(Some(stats));
                 }

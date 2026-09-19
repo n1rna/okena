@@ -200,6 +200,10 @@ impl AgentSessionPanel {
         // this panel's own fetch, or the Tasks view.
         let known_tasks = crate::views::known_tasks::entity(cx);
         cx.observe(&known_tasks, |_, _, cx| cx.notify()).detach();
+        // The session's memory, as its daemon measures it.
+        if let Some(memory) = okena_workspace::process_memory::process_memory_entity(cx) {
+            cx.observe(&memory, |_, _, cx| cx.notify()).detach();
+        }
         let connection_generation = ctx.remote_manager.as_ref().map_or(0, |rm| {
             rm.read(cx).connected_generation(ctx.client.connection_id())
         });

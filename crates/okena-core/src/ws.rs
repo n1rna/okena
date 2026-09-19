@@ -221,6 +221,7 @@ mod tests {
                     cpu_usage: 42.5,
                     memory_used_bytes: 4_294_967_296,
                     memory_total_bytes: 17_179_869_184,
+                    memory: None,
                 },
             },
             WsOutbound::Toast(ApiToast {

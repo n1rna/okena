@@ -262,6 +262,11 @@ impl Sidebar {
             cx.observe(&harness, |_this, _state, cx| cx.notify())
                 .detach();
         }
+        // And when an agent's memory figure changes.
+        if let Some(memory) = okena_workspace::process_memory::process_memory_entity(cx) {
+            cx.observe(&memory, |_this, _state, cx| cx.notify())
+                .detach();
+        }
         // And when extensions with views come and go.
         if let Some(extensions) = okena_workspace::extensions_state::extensions_entity(cx) {
             cx.observe(&extensions, |_this, _state, cx| cx.notify())

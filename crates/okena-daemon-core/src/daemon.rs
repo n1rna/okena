@@ -57,7 +57,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use async_channel::Receiver;
-use okena_core::api::{ApiGitStatus, ApiTerminalFocusRequest, ApiToast};
+use okena_core::api::{ApiGitStatus, ApiProcessMemory, ApiTerminalFocusRequest, ApiToast};
 use okena_core::git_poll::GitPollTrigger;
 use okena_hooks::{HookMonitor, HookRunner};
 use okena_remote_server::auth::AuthStore;
@@ -235,6 +235,9 @@ pub struct DaemonCore {
     state_version: Arc<watch::Sender<u64>>,
     /// Git-status channel the poll loop publishes into and the server broadcasts.
     git_status_tx: Arc<watch::Sender<HashMap<String, ApiGitStatus>>>,
+    /// Memory figures the memory poll publishes and the server attaches to
+    /// each `SystemStatsChanged`.
+    process_memory_tx: Arc<watch::Sender<Option<ApiProcessMemory>>>,
     /// Toast broadcast: a periodic drain task (see [`run`](DaemonCore::run))
     /// pushes the `HookMonitor`'s pending toasts here as [`ApiToast`]s and the
     /// server fans them out to clients. The daemon has no surface of its own, so
@@ -429,6 +432,7 @@ impl DaemonCore {
         // `reactor.state_version` (the same channel), so reads observe the bumps.
         let state_version = Arc::new(reactor.state_version.clone());
         let git_status_tx = Arc::new(watch::Sender::new(HashMap::new()));
+        let process_memory_tx = Arc::new(watch::Sender::new(None));
         // Toast broadcast: the periodic drain task in `run()` is the sole
         // producer; each connected client subscribes a receiver. Capacity bounds
         // the per-client backlog — a lagging client drops non-critical toasts.
@@ -458,6 +462,7 @@ impl DaemonCore {
             state_version.clone(),
             params.listen_addrs,
             git_status_tx.clone(),
+            process_memory_tx.clone(),
             toast_tx.clone(),
             terminal_focus_tx,
             remote_subscribed_terminals.clone(),
@@ -499,6 +504,7 @@ impl DaemonCore {
             pty_events,
             state_version,
             git_status_tx,
+            process_memory_tx,
             toast_tx,
             remote_subscribed_terminals,
             remote_visible_projects,
@@ -531,6 +537,7 @@ impl DaemonCore {
             pty_events,
             state_version,
             git_status_tx,
+            process_memory_tx,
             toast_tx,
             remote_subscribed_terminals,
             remote_visible_projects,
@@ -602,6 +609,11 @@ impl DaemonCore {
                 remote_subscribed_terminals.clone(),
                 remote_visible_projects.clone(),
                 git_poll_trigger_rx,
+            ));
+            tokio::task::spawn_local(crate::memory_poll::run_memory_poll(
+                reactor.workspace.clone(),
+                pty_manager.clone(),
+                process_memory_tx,
             ));
             tokio::task::spawn_local(crate::git_poll::run_git_head_poll(
                 reactor.workspace.clone(),

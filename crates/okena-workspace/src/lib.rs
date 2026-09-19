@@ -15,6 +15,8 @@ pub mod hook_monitor;
 pub mod hooks;
 pub mod lifecycle;
 pub mod persistence;
+#[cfg(feature = "gpui")]
+pub mod process_memory;
 pub mod remote_apply;
 pub mod remote_sync;
 #[cfg(feature = "gpui")]

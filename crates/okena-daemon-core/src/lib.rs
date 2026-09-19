@@ -36,6 +36,7 @@ pub mod daemon;
 pub mod daemon_config;
 pub mod extensions;
 pub mod git_poll;
+pub mod memory_poll;
 pub mod observers;
 pub mod pty_loop;
 pub mod reactor;

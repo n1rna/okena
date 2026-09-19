@@ -61,6 +61,7 @@ impl SystemStatsCache {
             },
             memory_used_bytes: self.system.used_memory(),
             memory_total_bytes: self.system.total_memory(),
+            memory: None,
         };
     }
 
@@ -576,9 +577,10 @@ async fn handle_ws(
             // `state_version` so status refreshes do not force workspace resync.
             _ = system_stats_interval.tick() => {
                 system_stats.refresh();
-                let resp = serde_json::to_string(&WsOutbound::SystemStatsChanged {
-                    stats: system_stats.stats(),
-                }).expect("BUG: WsOutbound must serialize");
+                let mut stats = system_stats.stats();
+                stats.memory = state.process_memory.borrow().clone();
+                let resp = serde_json::to_string(&WsOutbound::SystemStatsChanged { stats })
+                    .expect("BUG: WsOutbound must serialize");
                 if out_tx.send(Message::Text(resp.into())).await.is_err() {
                     break;
                 }
