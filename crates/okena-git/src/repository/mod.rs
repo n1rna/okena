@@ -58,7 +58,7 @@ pub use github::{
     set_enterprise_hosts,
 };
 pub use paths::{
-    compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path,
+    compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path, path_identity,
     project_path_in_worktree, resolve_git_root_and_subdir,
 };
 pub use status::{
@@ -70,8 +70,8 @@ pub(crate) use status::{untracked_line_count, worktree_diff};
 pub use worktree::{
     OrphanedWorktree, VerifiedWorktree, create_worktree, create_worktree_with_start_point,
     fetch_and_fast_forward, list_git_worktrees, list_linked_worktree_paths, move_worktree,
-    remove_orphaned_worktree, remove_worktree, remove_worktree_fast, verify_linked_worktree_fresh,
-    verify_orphaned_worktree,
+    remove_orphaned_worktree, remove_worktree, remove_worktree_fast,
+    try_list_linked_worktree_paths, verify_linked_worktree_fresh, verify_orphaned_worktree,
 };
 
 /// Build a `git` command for an operation that talks to a remote.
