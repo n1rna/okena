@@ -34,6 +34,39 @@ pub(super) enum ChipTarget {
 }
 
 impl ProjectInfoPanel {
+    /// The sessions a scan launcher started, so an agent mapping this project
+    /// is shown where it was asked for — the same as every other launcher.
+    ///
+    /// `kind` is the label the daemon marks the session with: `Map` for one
+    /// project, `Link` for a set of them. A links session lists every project
+    /// it covers, so this project's own launcher shows each one it is in.
+    fn scan_sessions(
+        &self,
+        kind: &str,
+        cx: &App,
+    ) -> Vec<okena_ui::agent_launcher::LauncherSession> {
+        let t = theme(cx);
+        let workspace = self.workspace.read(cx);
+        let Some(name) = workspace.project(&self.project_id).map(|p| p.name.clone()) else {
+            return Vec::new();
+        };
+        let prefix = format!("{kind} ");
+        workspace
+            .projects()
+            .iter()
+            .filter(|p| {
+                p.custom_session
+                    .as_deref()
+                    .is_some_and(|label| label.starts_with(&prefix))
+                    && p.project_scan
+                        .as_deref()
+                        .is_some_and(|scanned| scanned.split(", ").any(|n| n == name))
+            })
+            .filter_map(|p| AgentSessionInfo::collect(workspace, &self.terminals, &p.id))
+            .map(|info| crate::views::agent_session::launcher_session(&info, &t))
+            .collect()
+    }
+
     fn section_heading(&self, label: &str, count: Option<usize>, cx: &App) -> AnyElement {
         let t = theme(cx);
         h_flex()
@@ -182,18 +215,6 @@ impl ProjectInfoPanel {
                 out.push(self.note(fix.clone(), cx));
             }
         }
-        if let Some(notice) = &self.scan_notice {
-            out.push(self.note(notice.clone(), cx));
-        }
-        if let Some(error) = &self.scan_error {
-            out.push(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.warning))
-                    .child(error.clone())
-                    .into_any_element(),
-            );
-        }
 
         // Everything the project owns, behind one button: its map entries,
         // specs, knowledge docs, skills, agents and links.
@@ -203,7 +224,13 @@ impl ProjectInfoPanel {
             SharedString::from(format!("project-info-scan-{project_id}")),
             if mapped { "Rescan" } else { "Scan" },
         )
-        .subtitle("An agent maps this repository into its knowledge folder. Nothing is committed.")
+        .sessions(self.scan_sessions("Map", cx))
+        // Nothing on disk to collide over, so a finished scan must not hide
+        // the way to run another.
+        .launch_alongside_sessions()
+        .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
+            this.open_project(id.to_string(), cx);
+        }))
         .options(crate::views::agent_session::launch_options(
             self.default_agent.as_deref(),
             &t,
@@ -215,6 +242,7 @@ impl ProjectInfoPanel {
             "project-scan",
             cx,
         ))
+        .on_open_brief(self.open_brief())
         .on_launch(cx.listener(
             |this, launch: &okena_ui::agent_launcher::Launch, _window, cx| {
                 this.start_scan(launch.command.to_string(), launch.model.clone(), cx);
@@ -276,18 +304,6 @@ impl ProjectInfoPanel {
         if compact.uses.is_empty() && compact.used_by.is_empty() && compact.unresolved == 0 {
             out.push(self.note("No links to other scanned projects.", cx));
         }
-        if let Some(notice) = &self.links_notice {
-            out.push(self.note(notice.clone(), cx));
-        }
-        if let Some(error) = &self.links_error {
-            out.push(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.warning))
-                    .child(error.clone())
-                    .into_any_element(),
-            );
-        }
 
         // Over this repository and every other one with a map: a picker over
         // the whole set belongs to the cross-project view.
@@ -301,22 +317,17 @@ impl ProjectInfoPanel {
             out.push(self.note("Scan another project to look for links between them.", cx));
             return out;
         }
-        let subtitle = format!(
-            "One agent looks for links between this and {} other scanned {}, and writes each into both maps.",
-            others.len(),
-            if others.len() == 1 {
-                "project"
-            } else {
-                "projects"
-            }
-        );
         let mut project_ids = vec![me.clone()];
         project_ids.extend(others);
         let launcher = okena_ui::agent_launcher::AgentLauncher::new(
             SharedString::from(format!("project-info-links-{me}")),
             "Scan links",
         )
-        .subtitle(subtitle)
+        .sessions(self.scan_sessions("Link", cx))
+        .launch_alongside_sessions()
+        .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
+            this.open_project(id.to_string(), cx);
+        }))
         .options(crate::views::agent_session::launch_options(
             self.default_agent.as_deref(),
             &t,
@@ -328,6 +339,7 @@ impl ProjectInfoPanel {
             "projects-scan",
             cx,
         ))
+        .on_open_brief(self.open_brief())
         .on_launch(cx.listener(
             move |this, launch: &okena_ui::agent_launcher::Launch, _window, cx| {
                 this.start_links_scan(

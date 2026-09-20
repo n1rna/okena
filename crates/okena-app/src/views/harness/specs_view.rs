@@ -1133,7 +1133,6 @@ impl HarnessPane {
                 None => "Draft the change".to_string(),
             },
         )
-        .subtitle("okena scaffolds it, then briefs the agent")
         .options(options)
         .preferred(self.tasks.default_agent.clone())
         // The drafts already going into this root, so a second idea is not
@@ -1159,6 +1158,7 @@ impl HarnessPane {
             "spec-draft",
             cx,
         ))
+        .on_open_brief(self.open_brief())
         .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
             this.draft_spec_change(launch.command.to_string(), launch.model.clone(), cx);
         }))

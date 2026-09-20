@@ -21,6 +21,8 @@ use okena_workspace::state::AgentSortMode;
 use super::{Sidebar, SidebarProjectInfo};
 
 use crate::agent_card::{AgentColor, CardState, agent_color, card_state, subtree_summary};
+use crate::item_widgets::sidebar_rename_input;
+use okena_ui::rename_state::is_renaming;
 use okena_workspace::state::AgentRole;
 use okena_workspace::state::agent_tree::{self, AgentNode};
 use std::collections::HashMap;
@@ -270,6 +272,8 @@ impl Sidebar {
     ) -> AnyElement {
         let t = theme(cx);
         let id = row.info.id.clone();
+        let renaming = is_renaming(&self.project_rename, &id);
+        let name = row.info.name.clone();
         let role = row.role;
         let kind_color = role_color(role, &t);
         let state_color = Self::card_color(row.card, &t);
@@ -355,15 +359,27 @@ impl Sidebar {
                             .text_color(rgb(kind_color))
                             .child(role.badge()),
                     )
-                    .child(
+                    .child(if renaming {
+                        // Renamed in place, like a project row: a session's
+                        // name is the user's, and the list is where it is read.
+                        sidebar_rename_input(
+                            ElementId::Name(format!("agent-rename-{id}").into()),
+                            &self.project_rename,
+                            &t,
+                            cx,
+                        )
+                        .map(IntoElement::into_any_element)
+                        .unwrap_or_else(|| div().flex_1().into_any_element())
+                    } else {
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_size(okena_ui::tokens::ui_text(13.0, cx))
                             .text_color(rgb(t.text_primary))
-                            .child(row.info.name.clone()),
-                    )
+                            .child(row.info.name.clone())
+                            .into_any_element()
+                    })
                     .children(memory.map(|memory| {
                         div()
                             .flex_shrink_0()
@@ -396,8 +412,14 @@ impl Sidebar {
                     .child(text)
                     .into_any_element()
             }))
-            .on_click(cx.listener(move |this, _, _window, cx| {
-                this.focus_project_from_sidebar(id.clone(), true, cx);
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // Second click on the card the user is already on: rename it,
+                // the same gesture a project row takes.
+                if this.check_project_double_click(&id) {
+                    this.start_project_rename(id.clone(), name.clone(), window, cx);
+                } else {
+                    this.focus_project_from_sidebar(id.clone(), true, cx);
+                }
             }))
             .into_any_element()
     }
@@ -637,6 +659,8 @@ impl Sidebar {
         } = row;
         let (role, focused) = (*role, *focused);
         let id = info.id.clone();
+        let renaming = is_renaming(&self.project_rename, &id);
+        let name = info.name.clone();
         let kind_color = role_color(role, &t);
         v_flex()
             .id(SharedString::from(format!("closed-agent-{id}")))
@@ -677,15 +701,25 @@ impl Sidebar {
                             .text_color(rgb(kind_color))
                             .child(role.badge()),
                     )
-                    .child(
+                    .child(if renaming {
+                        sidebar_rename_input(
+                            ElementId::Name(format!("closed-agent-rename-{id}").into()),
+                            &self.project_rename,
+                            &t,
+                            cx,
+                        )
+                        .map(IntoElement::into_any_element)
+                        .unwrap_or_else(|| div().flex_1().into_any_element())
+                    } else {
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_size(okena_ui::tokens::ui_text(13.0, cx))
                             .text_color(rgb(t.text_secondary))
-                            .child(info.name.clone()),
-                    )
+                            .child(info.name.clone())
+                            .into_any_element()
+                    })
                     .child(
                         div()
                             .flex_shrink_0()
@@ -704,8 +738,12 @@ impl Sidebar {
                     .child(text)
                     .into_any_element()
             }))
-            .on_click(cx.listener(move |this, _, _window, cx| {
-                this.focus_project_from_sidebar(id.clone(), true, cx);
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.check_project_double_click(&id) {
+                    this.start_project_rename(id.clone(), name.clone(), window, cx);
+                } else {
+                    this.focus_project_from_sidebar(id.clone(), true, cx);
+                }
             }))
             .into_any_element()
     }

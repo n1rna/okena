@@ -520,6 +520,16 @@ impl HarnessPane {
 }
 
 impl HarnessPane {
+    /// Open a launcher's brief: its own file in Harness → Knowledge.
+    pub(crate) fn open_brief(
+        &self,
+    ) -> impl Fn(&SharedString, &SharedString, &mut Window, &mut App) + 'static + use<> {
+        let broker = self.request_broker.clone();
+        move |root, path, _window, cx| {
+            crate::views::launch_briefs::open_brief(&broker, root, path, cx);
+        }
+    }
+
     /// Apply a lane-divider drag. Clamped so neither lane can be collapsed.
     pub fn set_lane_fraction(&mut self, fraction: f32, cx: &mut Context<Self>) {
         let clamped = fraction.clamp(MIN_LANE_FRACTION, 1.0 - MIN_LANE_FRACTION);

@@ -13,7 +13,7 @@
 //! says what the options are and what clicking them does.
 
 use crate::theme::{theme, with_alpha};
-use crate::tokens::{ui_text_md, ui_text_ms};
+use crate::tokens::{ui_text_md, ui_text_ms, ui_text_sm};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::tooltip::Tooltip;
@@ -54,6 +54,9 @@ pub struct LaunchBrief {
     pub name: SharedString,
     /// Where the template comes from, for its tooltip.
     pub source: SharedString,
+    /// The knowledge file it is, as `(root key, path)`, when it comes from a
+    /// root rather than okena's built-ins. What the chip opens.
+    pub file: Option<(SharedString, SharedString)>,
     /// The models the template names; which one a CLI runs is decided by
     /// [`okena_core::agent_model`].
     pub models: AgentModels,
@@ -150,6 +153,8 @@ pub enum LauncherStyle {
 type CommandHandler = Rc<dyn Fn(&SharedString, &mut Window, &mut App)>;
 type LaunchHandler = Rc<dyn Fn(&Launch, &mut Window, &mut App)>;
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+/// Called with the brief's `(root key, path)` when its chip is clicked.
+type BriefHandler = Rc<dyn Fn(&SharedString, &SharedString, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct AgentLauncher {
@@ -179,6 +184,7 @@ pub struct AgentLauncher {
     /// briefs nothing.
     brief: Option<LaunchBrief>,
     on_launch: Option<LaunchHandler>,
+    on_open_brief: Option<BriefHandler>,
     on_configure: Option<(SharedString, ClickHandler)>,
     on_open: Option<CommandHandler>,
 }
@@ -202,6 +208,7 @@ impl AgentLauncher {
             launch_alongside_sessions: false,
             brief: None,
             on_launch: None,
+            on_open_brief: None,
             on_configure: None,
             on_open: None,
         }
@@ -289,6 +296,16 @@ impl AgentLauncher {
         self
     }
 
+    /// Open the brief's own file when its chip is clicked. Only a brief that
+    /// names a knowledge file can be opened; okena's built-ins have none.
+    pub fn on_open_brief(
+        mut self,
+        handler: impl Fn(&SharedString, &SharedString, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_open_brief = Some(Rc::new(handler));
+        self
+    }
+
     /// Offer a "configure first" button, described by `tooltip`.
     pub fn on_configure(
         mut self,
@@ -347,11 +364,17 @@ impl AgentLauncher {
     }
 
     /// The brief every agent starts with, as one quiet line under the title.
-    /// Where the template comes from is its tooltip.
+    /// Where the template comes from is its tooltip, and — when it is a file
+    /// in a knowledge root — clicking it opens that file.
     fn render_brief(&self, cx: &App) -> Option<AnyElement> {
         let brief = self.brief.clone()?;
         let t = theme(cx);
         let source = brief.source.clone();
+        let opens = brief
+            .file
+            .clone()
+            .zip(self.on_open_brief.clone())
+            .map(|((root, path), handler)| (root, path, handler));
         Some(
             h_flex()
                 .id(SharedString::from(format!("{}-brief", self.id)))
@@ -369,6 +392,14 @@ impl AgentLauncher {
                         .text_color(rgb(t.text_muted)),
                 )
                 .child(div().min_w_0().truncate().child(brief.name.clone()))
+                .when_some(opens, |chip, (root, path, handler)| {
+                    chip.cursor_pointer()
+                        .hover(|s| s.text_color(rgb(t.text_secondary)).underline())
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            handler(&root, &path, window, cx);
+                        })
+                })
                 .tooltip(move |window, cx| Tooltip::new(source.clone()).build(window, cx))
                 .into_any_element(),
         )
@@ -470,22 +501,32 @@ impl AgentLauncher {
             Some(model) => format!("{} on {model}", option.tooltip()).into(),
             None => option.tooltip(),
         };
-        let start = div()
+        let start = h_flex()
             .id(SharedString::from(format!("{}-start", self.id)))
             .flex_shrink_0()
             .h(px(SEGMENT_HEIGHT))
             .mr(px(2.0))
-            .px(px(10.0))
+            .px(px(8.0))
+            .gap(px(5.0))
             .rounded_full()
-            .flex()
             .items_center()
             .cursor_pointer()
-            .bg(with_alpha(accent, 0.85))
-            .hover(move |s| s.bg(rgb(accent)))
-            .text_size(ui_text_ms(cx))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(t.bg_primary))
-            .child(model.map(SharedString::from).unwrap_or_else(|| option.label.clone()))
+            .hover(move |s| s.bg(with_alpha(accent, 0.18)))
+            // Quiet: the model is what this launch runs on, not the button's
+            // name. The pill's own tint says it starts.
+            .child(
+                div()
+                    .text_size(ui_text_sm(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(model.map(SharedString::from).unwrap_or_else(|| option.label.clone())),
+            )
+            .child(
+                svg()
+                    .path("icons/play.svg")
+                    .flex_shrink_0()
+                    .size(px(9.0))
+                    .text_color(rgb(accent)),
+            )
             .tooltip(move |window, cx| Tooltip::new(start_tooltip.clone()).build(window, cx))
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
@@ -1025,6 +1066,7 @@ mod tests {
         LaunchBrief {
             name: "task-start".into(),
             source: "okena's built-in `task-start` template".into(),
+            file: None,
             models: AgentModels::new(model.map(str::to_string), Default::default()),
         }
     }
