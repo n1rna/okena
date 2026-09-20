@@ -26,11 +26,6 @@ use super::editor::DocumentBuffer;
 use super::store_git::{StoreSection, sync_badge};
 use super::{HarnessPane, HarnessSection};
 
-/// Width of the root and document list. Fixed rather than draggable: the list
-/// holds short names, and a second resizable divider in the harness would be
-/// more chrome than it earns.
-const TREE_WIDTH: f32 = 280.0;
-
 fn kind_label(kind: SpecRootKind) -> &'static str {
     match kind {
         SpecRootKind::Store => "store",
@@ -592,17 +587,7 @@ impl HarnessPane {
 
     /// Left column: the roots, then the open root's changes, specs and archive.
     fn render_spec_tree(&self, stores: &SpecStores, cx: &mut Context<Self>) -> AnyElement {
-        let t = theme(cx);
-        let mut col = v_flex()
-            .id("spec-tree")
-            .w(px(TREE_WIDTH))
-            .flex_shrink_0()
-            .h_full()
-            .overflow_y_scroll()
-            .px(px(6.0))
-            .pb(px(10.0))
-            .border_r_1()
-            .border_color(rgb(t.border));
+        let mut col = self.file_sidebar_column("spec-tree");
 
         col = col.child(self.section_label("Roots", cx));
         for root in &stores.roots {
@@ -1258,7 +1243,8 @@ impl HarnessPane {
         };
 
         let actions = self.spec_actions(&stores, cx);
-        let mut root = root.child(self.render_toolbar(actions, cx));
+        let toggle = self.file_sidebar_toggle(!stores.roots.is_empty(), cx);
+        let mut root = root.child(self.render_toolbar_with_leading(Some(toggle), actions, cx));
         if let Some(err) = self.specs.error.clone() {
             root = root.child(self.error_banner(err, cx));
         }
@@ -1274,13 +1260,19 @@ impl HarnessPane {
             .as_deref()
             .and_then(|k| stores.root(k))
             .cloned();
+        let sidebar = self.files.open.then(|| {
+            let tree = self.render_spec_tree(&stores, cx);
+            self.render_file_sidebar(tree, cx)
+        });
         root.child(
             h_flex()
                 .flex_1()
                 .min_h_0()
                 .w_full()
                 .bg(rgb(t.bg_primary))
-                .child(self.render_spec_tree(&stores, cx))
+                // Closed, the document takes the whole width: there is nothing
+                // left of it to leave a gap for.
+                .children(sidebar)
                 // The form stands where a document's text stands. It used to
                 // take the whole view, which hid the tree you were adding to
                 // and the specs you were meant to be reading before proposing.

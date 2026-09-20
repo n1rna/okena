@@ -175,6 +175,18 @@ impl HarnessPane {
         actions: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.render_toolbar_with_leading(None, actions, cx)
+    }
+
+    /// The toolbar with a control ahead of the view's name — where a sidebar
+    /// toggle belongs, and the one place it can live, since a control inside
+    /// the sidebar goes with it when it closes.
+    pub(super) fn render_toolbar_with_leading(
+        &self,
+        leading: Option<AnyElement>,
+        actions: Vec<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
         h_flex()
             .w_full()
@@ -185,6 +197,7 @@ impl HarnessPane {
             .py(px(6.0))
             .border_b_1()
             .border_color(rgb(t.border))
+            .children(leading)
             .child(
                 div()
                     .flex_shrink_0()
@@ -286,6 +299,12 @@ impl Render for HarnessPane {
             .relative()
             .size_full()
             .bg(rgb(t.bg_primary))
+            // Follows a file-sidebar drag wherever the pointer goes inside the
+            // pane, which the divider's own hitbox is far too narrow to do.
+            // Does nothing unless a drag is in flight.
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                this.drag_file_sidebar(f32::from(event.position.x), cx);
+            }))
             .child(div().flex_1().min_h_0().child(body))
             // Over whichever view opened it.
             .children(self.render_context_dialog(cx))
