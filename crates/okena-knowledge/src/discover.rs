@@ -9,6 +9,10 @@
 //!    store isn't registered here), and its own kind folders become a project
 //!    root. A project root that is also a registered store is the store.
 //!
+//! The roots come back in the order they layer in: the one saved order
+//! ([`crate::order`]), which puts a root where the user put it, a root nobody
+//! has arranged yet at the bottom, and okena's own `okena-defaults` last.
+//!
 //! Git sync state is filled in by the caller; nothing here runs `git`.
 
 use crate::identity::{StoreIdentity, validate_store_id};
@@ -32,6 +36,9 @@ pub struct Sources {
     pub registry_path: PathBuf,
     /// Empty when project discovery is turned off.
     pub projects: Vec<ProjectSource>,
+    /// The saved order of root keys, top first. Empty means nobody has
+    /// arranged the roots, which leaves discovery order (see [`crate::order`]).
+    pub order: Vec<String>,
 }
 
 pub fn discover(sources: &Sources) -> KnowledgeStores {
@@ -95,6 +102,9 @@ pub fn discover(sources: &Sources) -> KnowledgeStores {
         }
     }
     out.roots.extend(project_roots);
+    // Last, over everything found: the order is about roots, so it cannot be
+    // applied until both sources have contributed theirs.
+    crate::order::apply(&mut out.roots, &sources.order);
     out
 }
 
@@ -289,9 +299,17 @@ mod tests {
             }
         }
         fn discover(&self, projects: Vec<ProjectSource>) -> KnowledgeStores {
+            self.discover_in_order(projects, Vec::new())
+        }
+        fn discover_in_order(
+            &self,
+            projects: Vec<ProjectSource>,
+            order: Vec<String>,
+        ) -> KnowledgeStores {
             discover(&Sources {
                 registry_path: self.registry(),
                 projects,
+                order,
             })
         }
     }
@@ -450,6 +468,37 @@ mod tests {
             ["project_root_outside", "project_config_invalid"]
         );
         assert!(found.status[0].message.starts_with("c: "));
+    }
+
+    #[test]
+    fn the_saved_order_arranges_stores_and_project_roots_as_one_list() {
+        // The order is over roots, not over sources: a project's own folder
+        // can sit above a registered store, which is exactly what could not be
+        // said before (QBL-425).
+        let s = Sandbox::new();
+        store(&s.path("eng"), "acme-eng");
+        store(&s.path("ops"), "acme-ops");
+        s.register("eng");
+        s.register("ops");
+        write(&s.path("web/.okena/knowledge/docs/a.md"), "x");
+        let web = path_root_key(&display(&s.path("web/.okena/knowledge")));
+
+        let found = s.discover_in_order(
+            vec![s.project("web", "web")],
+            vec![web.clone(), "store:acme-ops".into()],
+        );
+        assert_eq!(
+            found.roots.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+            [web.as_str(), "store:acme-ops", "store:acme-eng"],
+            "arranged roots first, then the one nobody has placed"
+        );
+        // Discovery order is the fallback, not the rule: unarranged, the
+        // registry's own order returns.
+        let plain = s.discover(vec![s.project("web", "web")]);
+        assert_eq!(
+            plain.roots.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+            ["store:acme-eng", "store:acme-ops", web.as_str()]
+        );
     }
 
     #[test]

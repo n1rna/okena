@@ -494,6 +494,19 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// The one order knowledge roots layer in, top first (QBL-425).
+    ///
+    /// Saved whole rather than as a move, because the list is what resolution
+    /// reads: writing it in one go is what makes "reordering saves at once"
+    /// true, and what a restart reads back.
+    pub fn set_knowledge_root_order(&mut self, order: Vec<String>, cx: &mut Context<Self>) {
+        if self.settings.harness.knowledge.order == order {
+            return;
+        }
+        self.settings.harness.knowledge.order = order;
+        self.save_and_notify(cx);
+    }
+
     /// Where a store is cloned when no destination is given. Blank is
     /// `~/knowledge`.
     pub fn set_knowledge_clone_dir(&mut self, value: String, cx: &mut Context<Self>) {

@@ -467,12 +467,25 @@ pub struct KnowledgeConfig {
     /// `~/knowledge`, beside OpenSpec's `~/openspec` convention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_dir: Option<String>,
+
+    /// The one order knowledge roots layer in, as root keys, top first
+    /// (QBL-425). Empty until somebody arranges them, which leaves discovery
+    /// order.
+    ///
+    /// Keys, not paths: a key is `store:<id>` or `path:<absolute path>`, so
+    /// this stays a preference while the checkout paths stay machine state in
+    /// the registry (ADR-0003). `okena-defaults` is never in it — it is always
+    /// last. The rules, and the pruning of roots that have gone, are
+    /// `okena_knowledge::order`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
     //
     // There is deliberately no setting naming one root as the source of launch
     // briefs (QBL-415). Templates, partials and skills resolve across every
-    // healthy root in discovery order, so overriding one is a matter of putting
-    // the file somewhere, not of pointing a setting at it. A `prompts` key left
-    // in an older settings.json is ignored on load and gone on the next save.
+    // healthy root, in the order above, so overriding one is a matter of
+    // putting the file somewhere, not of pointing a setting at it. A `prompts`
+    // key left in an older settings.json is ignored on load and gone on the
+    // next save.
 }
 
 impl Default for KnowledgeConfig {
@@ -481,6 +494,7 @@ impl Default for KnowledgeConfig {
             // Must match the serde default above.
             projects: true,
             clone_dir: None,
+            order: Vec::new(),
         }
     }
 }
@@ -1570,6 +1584,40 @@ mod tests {
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         let migrated = migrate_settings(settings);
         assert!(!migrated.enabled_extensions.contains("updater"));
+    }
+
+    #[test]
+    fn the_knowledge_root_order_survives_a_restart_and_stays_absent_until_set() {
+        // What "the order is saved with the user's settings and survives a
+        // restart" comes down to: the list round-trips through the file, and a
+        // user who never arranged anything gets no key written at all.
+        let arranged = AppSettings {
+            harness: HarnessConfig {
+                knowledge: KnowledgeConfig {
+                    order: vec!["path:/repo/.okena/knowledge".into(), "store:acme-eng".into()],
+                    ..KnowledgeConfig::default()
+                },
+                ..HarnessConfig::default()
+            },
+            ..AppSettings::default()
+        };
+        let written = serde_json::to_string(&arranged).expect("serialize");
+        let read_back: AppSettings = serde_json::from_str(&written).expect("deserialize");
+        assert_eq!(
+            read_back.harness.knowledge.order,
+            ["path:/repo/.okena/knowledge", "store:acme-eng"],
+            "the order a restart reads back is the order that was saved"
+        );
+
+        let untouched = serde_json::to_string(&AppSettings::default()).expect("serialize");
+        assert!(
+            !untouched.contains("\"order\""),
+            "an order nobody has set should not be written: {untouched}"
+        );
+        // And a file written before this story still loads, with no order.
+        let old: AppSettings = serde_json::from_str(r#"{"harness":{"knowledge":{"clone_dir":"~/k"}}}"#)
+            .expect("an older file still loads");
+        assert!(old.harness.knowledge.order.is_empty());
     }
 
     #[test]

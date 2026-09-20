@@ -105,7 +105,8 @@ pub(super) fn refine_knowledge_document(
     let registry = okena_knowledge::registry::registry_path(&get_config_dir());
     // Refining rewrites the file, so okena's own store is refused here for the
     // same reason a save is: the next start would undo whatever the agent did.
-    let root = match super::knowledge::resolve_writable_root(&registry, &projects, Some(&root)) {
+    let sources = super::knowledge::knowledge_sources(&registry, &projects, settings);
+    let root = match super::knowledge::resolve_writable_root(&sources, Some(&root)) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
