@@ -2,6 +2,7 @@
 use crate::state::WorktreeMetadata;
 use crate::state::{HookTerminalStatus, LayoutNode, ProjectData, WindowState, WorkspaceData};
 use okena_core::theme::FolderColor;
+use okena_git::path_identity;
 use okena_terminal::backend::{TerminalSessionTeardown, TerminalTeardownRoute};
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
@@ -1176,19 +1177,28 @@ fn backfill_worktree_checkout_roots(data: &mut WorkspaceData) {
         if repo.is_empty() {
             continue;
         }
-        let registered = registries
-            .entry(repo.to_string())
-            .or_insert_with(|| okena_git::list_linked_worktree_paths(Path::new(repo)));
+        // Read the registry strictly: a repo that cannot be read looks exactly
+        // like a repo with no worktrees, and the row would quietly keep its old
+        // path as if the question had been asked and answered.
+        let registered = registries.entry(repo.to_string()).or_insert_with(|| {
+            okena_git::try_list_linked_worktree_paths(Path::new(repo)).unwrap_or_else(|error| {
+                log::warn!(
+                    "checkout-root backfill: {error}; worktree rows under it keep their stored path"
+                );
+                Vec::new()
+            })
+        });
         let Some(root) = registered_checkout_root(registered, Path::new(&project.path)) else {
             continue;
         };
         // Another project's own directory is never this row's checkout root.
         // Adopting it is how a deleted checkout nested inside a live worktree
         // would inherit its neighbour's existence and stop being swept.
+        let root_identity = path_identity(root);
         if occupied
             .iter()
             .enumerate()
-            .any(|(other, path)| other != index && Path::new(path) == root)
+            .any(|(other, path)| other != index && path_identity(Path::new(path)) == root_identity)
         {
             continue;
         }
@@ -1205,15 +1215,30 @@ fn backfill_worktree_checkout_roots(data: &mut WorkspaceData) {
 /// The registered worktree a project sits in: the deepest checkout Git lists
 /// for the parent repo that contains it. A nested checkout and a submodule both
 /// carry a `.git` pointer file, so only Git's registry tells them apart.
+///
+/// Matched by filesystem identity, not by spelling: `git worktree add` records
+/// the checkout canonically, so a repo reached through a symlinked ancestor —
+/// every path under macOS's `/var`, and any user whose checkouts sit behind a
+/// symlink — is registered as `/private/var/…` while the project row keeps the
+/// `/var/…` it was created with. A lexical prefix test finds no match there and
+/// the caller cannot tell that from "not in a worktree at all".
+///
+/// The answer is returned as a slice of `project_path` rather than the
+/// registry's own spelling, because everything downstream compares it against
+/// other project paths, which are stored the way the user gave them.
 fn registered_checkout_root<'a>(
-    registered: &'a [PathBuf],
-    project_path: &Path,
+    registered: &[PathBuf],
+    project_path: &'a Path,
 ) -> Option<&'a Path> {
-    registered
-        .iter()
-        .filter(|root| project_path.starts_with(root))
-        .max_by_key(|root| root.components().count())
-        .map(PathBuf::as_path)
+    if registered.is_empty() {
+        return None;
+    }
+    let roots: Vec<PathBuf> = registered.iter().map(|root| path_identity(root)).collect();
+    // `ancestors` walks deepest first, so the first hit is the innermost
+    // checkout containing the project.
+    project_path
+        .ancestors()
+        .find(|ancestor| roots.contains(&path_identity(ancestor)))
 }
 
 /// The directory a worktree project actually checks out into: its recorded
@@ -2898,6 +2923,32 @@ mod tests {
             None
         );
         assert_eq!(registered_checkout_root(&[], Path::new("/wt/app")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_checkout_root_matches_a_registered_root_behind_a_symlink() {
+        // `git worktree add` records the checkout canonically, so a checkout
+        // reached through a symlinked ancestor is registered under one spelling
+        // and stored in the project row under another — the shape every macOS
+        // path under /var has, where the registry says /private/var/…. Matching
+        // by spelling alone finds nothing and the row silently loses its root.
+        let fixture =
+            std::env::temp_dir().join(format!("okena-wt-symlink-{}", uuid::Uuid::new_v4()));
+        let actual = fixture.join("actual");
+        let alias = fixture.join("alias");
+        std::fs::create_dir_all(&actual).expect("create checkout directory");
+        std::os::unix::fs::symlink(&actual, &alias).expect("create directory alias");
+        let registered = vec![actual.canonicalize().expect("canonical checkout")];
+
+        let project_path = alias.join("packages/app");
+        assert_eq!(
+            registered_checkout_root(&registered, &project_path),
+            Some(alias.as_path()),
+            "the root is found, and answered in the project's own spelling"
+        );
+
+        std::fs::remove_dir_all(&fixture).expect("remove symlink fixture");
     }
 
     #[test]
