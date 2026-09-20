@@ -137,9 +137,18 @@ pub(crate) fn entry_matches(entry: &KnowledgeEntry, filter: &str) -> bool {
         .any(|field| field.to_lowercase().contains(&needle))
 }
 
-/// The list: kinds in their fixed order, empty kinds left out, docs nested
-/// under folder rows. Folding is ignored while filtering, so a match is never
-/// hidden inside a closed folder.
+/// Kinds listed with their entries nested under folder rows.
+///
+/// Docs and templates are the kinds whose names carry a path: `ci/pipeline`,
+/// and — since QBL-427 — `partials/context` and `briefs/task-start`. Showing
+/// those flat made the partials look like a pile of oddly named templates and
+/// left the briefs with nothing to tell them apart. Skills and agents are one
+/// name each, so a folder row would only add a level to click through.
+const NESTED_KINDS: &[KnowledgeKind] = &[KnowledgeKind::Doc, KnowledgeKind::Template];
+
+/// The list: kinds in their fixed order, empty kinds left out, docs and
+/// templates nested under folder rows. Folding is ignored while filtering, so
+/// a match is never hidden inside a closed folder.
 pub(crate) fn group_entries<'a>(
     entries: &'a [KnowledgeEntry],
     filter: &str,
@@ -159,13 +168,14 @@ pub(crate) fn group_entries<'a>(
         let count = matching.len();
         let mut rows = Vec::new();
         if filtering || !collapsed.contains(kind.folder()) {
-            match kind {
-                KnowledgeKind::Doc => nest_docs(&matching, filtering, collapsed, &mut rows),
-                _ => rows.extend(
+            if NESTED_KINDS.contains(&kind) {
+                nest(kind.folder(), &matching, filtering, collapsed, &mut rows);
+            } else {
+                rows.extend(
                     matching
                         .into_iter()
                         .map(|entry| Row::Entry { entry, depth: 0 }),
-                ),
+                );
             }
         }
         groups.push(Group { kind, count, rows });
@@ -173,14 +183,19 @@ pub(crate) fn group_entries<'a>(
     groups
 }
 
-fn nest_docs<'a>(
-    docs: &[&'a KnowledgeEntry],
+/// Nest `entries` under one folder row per directory of their names.
+///
+/// `kind_folder` is the kind's folder on disk (`docs`, `templates`), which
+/// prefixes every fold key so two kinds cannot collapse each other's folders.
+fn nest<'a>(
+    kind_folder: &str,
+    entries: &[&'a KnowledgeEntry],
     filtering: bool,
     collapsed: &HashSet<String>,
     rows: &mut Vec<Row<'a>>,
 ) {
     let mut open: Vec<&str> = Vec::new();
-    for entry in docs {
+    for entry in entries {
         let folders: Vec<&str> = entry
             .name
             .rsplit_once('/')
@@ -193,7 +208,7 @@ fn nest_docs<'a>(
         open.truncate(shared);
         let mut hidden = false;
         for (depth, folder) in folders.iter().enumerate() {
-            let key = format!("docs/{}", folders[..=depth].join("/"));
+            let key = format!("{kind_folder}/{}", folders[..=depth].join("/"));
             if depth >= shared && !hidden {
                 rows.push(Row::Folder {
                     key: key.clone(),
@@ -1413,6 +1428,58 @@ mod tests {
                 "[Templates] 1",
                 "task-start",
             ]
+        );
+    }
+
+    #[test]
+    fn partials_and_briefs_nest_under_their_own_folders() {
+        // QBL-427: a partial is `partials/<name>` and a brief
+        // `briefs/<flow>`, so the templates group nests exactly as docs do
+        // instead of listing every partial flat beside the briefs.
+        let entries = vec![
+            entry(KnowledgeKind::Template, "briefs/task-create"),
+            entry(KnowledgeKind::Template, "briefs/doc-refine"),
+            entry(KnowledgeKind::Template, "partials/context"),
+            entry(KnowledgeKind::Template, "partials/coordinate-child"),
+            entry(KnowledgeKind::Template, "house-style"),
+        ];
+        assert_eq!(
+            outline(&group_entries(&entries, "", &HashSet::new())),
+            [
+                "[Templates] 5",
+                "+briefs",
+                "  doc-refine",
+                "  task-create",
+                "house-style",
+                "+partials",
+                "  context",
+                "  coordinate-child",
+            ]
+        );
+
+        // Folded by the same key the docs folders use, prefixed with the
+        // kind's folder so `docs/briefs` and `templates/briefs` are distinct.
+        let collapsed: HashSet<String> = ["templates/partials".to_string()].into();
+        assert_eq!(
+            outline(&group_entries(&entries, "", &collapsed)),
+            [
+                "[Templates] 5",
+                "+briefs",
+                "  doc-refine",
+                "  task-create",
+                "house-style",
+                "+partials",
+            ]
+        );
+
+        // Skills and agents stay flat: their names carry no path.
+        let flat = vec![
+            entry(KnowledgeKind::Skill, "release"),
+            entry(KnowledgeKind::Agent, "reviewer"),
+        ];
+        assert_eq!(
+            outline(&group_entries(&flat, "", &HashSet::new())),
+            ["[Skills] 1", "release", "[Agents] 1", "reviewer"]
         );
     }
 

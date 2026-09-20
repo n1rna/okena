@@ -1192,7 +1192,7 @@ mod tests {
     }
 
     const DEFAULTS_KEY: &str = "store:okena-defaults";
-    const TEMPLATE: &str = "templates/spec-draft.md";
+    const TEMPLATE: &str = "templates/briefs/spec-draft.md";
 
     #[test]
     fn okenas_defaults_are_listed_as_builtin_and_every_write_to_them_is_refused() {
