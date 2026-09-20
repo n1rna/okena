@@ -1248,7 +1248,7 @@ impl StatusBar {
                 (name, *bytes)
             })
             .collect();
-        top.sort_by(|a, b| b.1.cmp(&a.1));
+        top.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
         top.truncate(TOP_PROJECTS);
         (
             Some(OkenaMemory {
