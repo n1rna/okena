@@ -68,9 +68,35 @@ pub fn normalize(roots: &[KnowledgeRoot], order: &[String]) -> Vec<String> {
     listed.into_iter().map(|root| root.key.clone()).collect()
 }
 
+/// The order after dropping the root keyed `key` onto the row at `onto`.
+///
+/// The drop line is drawn along the top of the target row, so the dragged root
+/// takes that row's place and the target and everything below it shift down by
+/// one. Dropping a root onto the row directly below itself therefore changes
+/// nothing, which is what the gesture looks like it should do.
+///
+/// `order` is the full list as shown, not the saved one: a drag writes a
+/// complete order, so it is also what prunes keys for roots that have gone.
+/// An `onto` past the end, or a `key` that is not in the list, appends.
+pub fn moved(order: &[String], key: &str, onto: usize) -> Vec<String> {
+    // Dropped on itself. Worth saying outright: with the target removed from
+    // the list first, there is nothing left to measure the drop against, and
+    // the root would be appended to the bottom instead of staying put.
+    if order.get(onto).is_some_and(|target| target == key) {
+        return order.to_vec();
+    }
+    let mut out: Vec<String> = order.iter().filter(|k| *k != key).cloned().collect();
+    let at = order
+        .get(onto)
+        .and_then(|target| out.iter().position(|k| k == target))
+        .unwrap_or(out.len());
+    out.insert(at, key.to_string());
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply, normalize};
+    use super::{apply, moved, normalize};
     use crate::knowledge::{KnowledgeRoot, KnowledgeRootKind};
 
     fn root(key: &str) -> KnowledgeRoot {
@@ -168,6 +194,24 @@ mod tests {
             ["store:b", "store:new"],
             "the gone key drops out, the new root is written in at the bottom"
         );
+    }
+
+    #[test]
+    fn dragging_a_root_puts_it_where_the_drop_line_was() {
+        let list = order(&["a", "b", "c"]);
+        let at = |keys: Vec<String>| keys;
+        // Onto the top row: it becomes the top.
+        assert_eq!(at(moved(&list, "c", 0)), ["c", "a", "b"]);
+        // Onto a row below: it lands above that row, not below it.
+        assert_eq!(at(moved(&list, "a", 2)), ["b", "a", "c"]);
+        // Onto the row directly below itself: the gesture is a no-op.
+        assert_eq!(at(moved(&list, "a", 1)), ["a", "b", "c"]);
+        // Onto itself: also nothing.
+        assert_eq!(at(moved(&list, "b", 1)), ["a", "b", "c"]);
+        // Past the end, and a key nobody is holding: both append rather than
+        // panicking, because a stale drag must not take the window down.
+        assert_eq!(at(moved(&list, "a", 9)), ["b", "c", "a"]);
+        assert_eq!(at(moved(&list, "zz", 0)), ["zz", "a", "b", "c"]);
     }
 
     #[test]

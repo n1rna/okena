@@ -212,8 +212,9 @@ used by OpenSpec stores, is described in
 ## In okena
 
 - **Harness → Knowledge** has these parts:
-  - **Root list:** every root, with its health and a sync badge (`↑` commits to
-    push, `↓` commits to pull, `•` uncommitted changes).
+  - **Root list:** every root, in the order it layers in, with its health and a
+    sync badge (`↑` commits to push, `↓` commits to pull, `•` uncommitted
+    changes). `+` beside the ROOTS heading opens the **Roots page**.
   - **Entry list:** the open root's entries grouped by kind, with docs and
     templates nested by folder — so `briefs` and `partials` are directories
     holding one row per file — and a filter over titles, names, paths,
@@ -258,6 +259,34 @@ used by OpenSpec stores, is described in
   - **In a project root:** committing is left to you.
   - **Agent:** it starts the agent you pick, else `harness.agent_command`;
     without an agent it refuses.
+
+### The Roots page
+
+`+` beside the sidebar's ROOTS heading opens the Roots page in the right-hand
+column, where a document would be — the same way **New** opens its form, so the
+roots you are changing stay on screen beside it. Knowledge and Specs share it,
+and it is also offered from either section's empty state, where there is no
+sidebar to put a `+` in.
+
+The page:
+
+- **Adds a root**, with the same three choices Settings offers — clone a
+  repository, add an existing folder, create a new one. It is the same form,
+  not a copy of it.
+- **Lists every root** with its kind, health, path and what it holds, problems
+  included, so a broken root is fixed from the same place it is listed.
+- **Removes one.** A store is unregistered and its checkout stays on disk. A
+  Specs folder root is dropped from `harness.specs.folders`. A project root has
+  neither, so it has no Remove: it belongs to its repository. `okena-defaults`
+  has none either — it is rewritten on every start.
+- **Reorders Knowledge roots by dragging**, which saves at once and changes
+  which copy of a template the next agent launch uses. The drop line sits along
+  the top of the row you are over, so a root lands where that line is.
+  `okena-defaults` is shown last without a handle. Specs roots are not layered,
+  so the Specs list has no order and no handles.
+
+### Elsewhere
+
 - **Settings → Knowledge** clones a repository, adds an existing folder or
   creates a new store — the same three choices Settings → Specs offers. It
   removes a store from the registry while leaving the checkout on disk. It also
@@ -503,7 +532,7 @@ top first:
 
 Keys, not paths: the order is a preference, while the checkout paths stay
 machine state in the registry, so a synced `settings.json` means the same thing
-on every machine.
+on every machine. Arrange the list on the [Roots page](#the-roots-page).
 
 A root can override one partial — say, `reporting` — without supplying any
 template, and one template without supplying any partial. An empty file is not
