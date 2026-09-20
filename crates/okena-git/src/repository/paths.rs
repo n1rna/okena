@@ -19,6 +19,16 @@ pub fn get_repo_common_dir(path: &Path) -> Option<PathBuf> {
     Some(std::fs::canonicalize(common_dir).unwrap_or_else(|_| normalize_path(common_dir)))
 }
 
+/// The identity of a directory on disk, for comparing two spellings of the
+/// same place. macOS exposes `/var` through `/private/var` and a user's
+/// checkout may sit behind a symlinked ancestor, so Git's registry and okena's
+/// stored project paths routinely name one directory two ways; comparing them
+/// lexically silently finds no match. Paths that do not exist keep the
+/// portable lexical normalization, which is all that can be said about them.
+pub fn path_identity(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| normalize_path(path))
+}
+
 /// Normalize a path by resolving `.` and `..` components without filesystem access.
 pub fn normalize_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
@@ -102,6 +112,28 @@ pub fn compute_target_paths(
 mod tests {
     use super::*;
     use crate::repository::test_support::{git_in, init_temp_repo};
+
+    #[test]
+    fn path_identity_prefers_canonical_filesystem_path() {
+        let directory = tempfile::tempdir().expect("create identity directory");
+        let dotted = directory.path().join(".");
+        assert_eq!(
+            path_identity(&dotted),
+            directory.path().canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_identity_matches_a_directory_symlink_alias() {
+        let parent = tempfile::tempdir().expect("create identity parent");
+        let actual = parent.path().join("actual");
+        let alias = parent.path().join("alias");
+        std::fs::create_dir(&actual).expect("create actual directory");
+        std::os::unix::fs::symlink(&actual, &alias).expect("create directory alias");
+
+        assert_eq!(path_identity(&actual), path_identity(&alias));
+    }
 
     #[test]
     fn get_repo_root_returns_none_for_invalid_path() {

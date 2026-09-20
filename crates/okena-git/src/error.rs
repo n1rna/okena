@@ -43,6 +43,10 @@ pub enum GitError {
     #[error("directory '{path}' already exists and is not empty")]
     CloneTargetExists { path: PathBuf },
 
+    /// Git's registry of linked worktrees could not be read.
+    #[error("cannot read the worktree registry of '{path}': {reason}")]
+    WorktreeRegistryUnreadable { path: PathBuf, reason: String },
+
     /// Failed to parse structured output (JSON, etc.).
     #[error("parse error: {0}")]
     ParseError(String),
