@@ -25,9 +25,6 @@ use super::editor::{DocumentBuffer, Documents};
 use super::store_git::{StoreGitPanel, StoreSection, sync_badge};
 use super::{HarnessPane, HarnessSection};
 
-/// Width of the root and entry list, matching the Specs view.
-const TREE_WIDTH: f32 = 280.0;
-
 /// Knowledge-view state.
 pub(crate) struct KnowledgeState {
     /// Every root the daemon discovered. `None` until the first load lands.
@@ -746,16 +743,7 @@ impl HarnessPane {
     ) -> AnyElement {
         let t = theme(cx);
         let builtin_root = self.knowledge_open_root().is_some_and(|r| r.builtin);
-        let mut col = v_flex()
-            .id("knowledge-tree")
-            .w(px(TREE_WIDTH))
-            .flex_shrink_0()
-            .h_full()
-            .overflow_y_scroll()
-            .px(px(6.0))
-            .pb(px(10.0))
-            .border_r_1()
-            .border_color(rgb(t.border));
+        let mut col = self.file_sidebar_column("knowledge-tree");
 
         col = col.child(self.kn_section_label("Roots".into(), cx));
         for root in &stores.roots {
@@ -1283,7 +1271,8 @@ impl HarnessPane {
                 cx,
             ));
         }
-        let mut view = view.child(self.render_toolbar(actions, cx));
+        let toggle = self.file_sidebar_toggle(!stores.roots.is_empty(), cx);
+        let mut view = view.child(self.render_toolbar_with_leading(Some(toggle), actions, cx));
         if let Some(notice) = self.knowledge_draft.notice.clone() {
             view = view.child(self.info_banner(notice, cx));
         }
@@ -1302,13 +1291,19 @@ impl HarnessPane {
             .as_deref()
             .and_then(|k| stores.root(k))
             .cloned();
+        let sidebar = self.files.open.then(|| {
+            let tree = self.render_knowledge_tree(&stores, cx);
+            self.render_file_sidebar(tree, cx)
+        });
         view.child(
             h_flex()
                 .flex_1()
                 .min_h_0()
                 .w_full()
                 .bg(rgb(t.bg_primary))
-                .child(self.render_knowledge_tree(&stores, cx))
+                // Closed, the entry takes the whole width: there is nothing
+                // left of it to leave a gap for.
+                .children(sidebar)
                 // The form stands where an entry's text stands. It used to
                 // take the whole view, which hid the entries you are meant to
                 // read before adding to them.
