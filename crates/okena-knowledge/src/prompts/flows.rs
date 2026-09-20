@@ -11,6 +11,13 @@
 
 use std::fmt;
 
+/// The folder a root keeps its launch briefs in, relative to the root.
+///
+/// Named here because it is the one place that decides it: the built-ins are
+/// materialized into it, resolution reads from it, and the Knowledge view
+/// shows it as a directory of its own.
+pub const BRIEFS_DIR: &str = "templates/briefs";
+
 /// A point at which okena briefs an agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Flow {
@@ -102,14 +109,16 @@ impl Flow {
         }
     }
 
-    /// Where a store keeps this flow's template, relative to the root.
+    /// Where a store keeps this flow's brief, relative to the root.
     ///
-    /// A flat file per flow under `templates/`, so the mapping from "which
-    /// brief is this" to "which file do I edit" needs no index to look up. A
-    /// store that wants to organise its own templates in folders still can —
-    /// those are simply not the ones okena launches with.
+    /// A flat file per flow under `templates/briefs/`, so the mapping from
+    /// "which brief is this" to "which file do I edit" needs no index to look
+    /// up. The `briefs/` folder is what tells them apart from the partials
+    /// beside them (QBL-427); a store that wants to organise templates of its
+    /// own in other folders still can — those are simply not the ones okena
+    /// launches with.
     pub fn template_path(self) -> String {
-        format!("templates/{}.md", self.id())
+        format!("{BRIEFS_DIR}/{}.md", self.id())
     }
 
     /// The variables okena fills for this flow.
@@ -302,8 +311,11 @@ mod tests {
     }
 
     #[test]
-    fn a_template_lives_under_templates_named_for_its_flow() {
-        assert_eq!(Flow::SpecDraft.template_path(), "templates/spec-draft.md");
+    fn a_brief_lives_under_templates_briefs_named_for_its_flow() {
+        assert_eq!(
+            Flow::SpecDraft.template_path(),
+            "templates/briefs/spec-draft.md"
+        );
     }
 
     #[test]
