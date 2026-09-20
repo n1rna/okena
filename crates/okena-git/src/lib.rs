@@ -30,11 +30,11 @@ pub use repository::{
     get_head_snapshot, get_repo_common_dir, get_repo_root, has_uncommitted_changes,
     is_branch_merged, is_complete_checkout, list_branches, list_branches_classified,
     list_linked_worktree_paths, list_pull_requests, merge_branch, move_worktree,
-    parse_clone_progress, project_path_in_worktree, push_branch, rebase_onto,
+    parse_clone_progress, path_identity, project_path_in_worktree, push_branch, rebase_onto,
     remove_orphaned_worktree, remove_worktree, remove_worktree_fast, resolve_git_root_and_subdir,
     resolve_review_base, stage_file, start_clone_repository, stash_changes, stash_pop,
-    uncommitted_changes, unstage_file, validate_clone_url, verify_linked_worktree_fresh,
-    verify_orphaned_worktree,
+    try_list_linked_worktree_paths, uncommitted_changes, unstage_file, validate_clone_url,
+    verify_linked_worktree_fresh, verify_orphaned_worktree,
 };
 
 /// Validate that a git ref (branch name, commit hash, revision) doesn't look

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use okena_core::process::{command, safe_output};
 
 use super::branch::get_default_branch;
+use super::paths::path_identity;
 use super::{head_branch_short, network_command, path_str, require_success};
 use crate::error::{GitError, GitResult};
 
@@ -747,29 +748,46 @@ pub fn list_git_worktrees(repo_path: &Path) -> Vec<(String, String)> {
     result
 }
 
-/// List the paths Git registers as linked worktrees for a repository.
+/// List the paths Git registers as linked worktrees for a repository, or say
+/// why they could not be read.
 /// The main worktree is intentionally excluded.
-pub fn list_linked_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
-    let Some(repo) = crate::gix_helpers::open(repo_path) else {
-        return Vec::new();
-    };
+pub fn try_list_linked_worktree_paths(repo_path: &Path) -> GitResult<Vec<PathBuf>> {
+    let repo = crate::gix_helpers::open(repo_path).ok_or_else(|| {
+        GitError::WorktreeRegistryUnreadable {
+            path: repo_path.to_path_buf(),
+            reason: "the repository could not be opened".to_string(),
+        }
+    })?;
     // macOS exposes `/var` through `/private/var`. gix may report either spelling
     // for the main worktree, so compare existing paths by canonical filesystem
     // identity instead of lexical components. Missing paths retain the portable
     // lexical fallback used elsewhere in this module.
     let main_worktree = repo.workdir().map(path_identity);
-    let Ok(worktrees) = repo.worktrees() else {
-        return Vec::new();
-    };
-    worktrees
+    let worktrees = repo
+        .worktrees()
+        .map_err(|error| GitError::WorktreeRegistryUnreadable {
+            path: repo_path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    Ok(worktrees
         .into_iter()
         .filter_map(|proxy| proxy.base().ok())
         .filter(|path| main_worktree.as_ref() != Some(&path_identity(path)))
-        .collect()
+        .collect())
 }
 
-fn path_identity(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| crate::repository::normalize_path(path))
+/// The same registry, for callers that can only carry on without it.
+///
+/// A failed read still comes back as an empty list — there is nothing better to
+/// hand a caller whose fallback is "assume no worktrees" — but it is logged,
+/// so an unreadable registry is distinguishable from a repository that
+/// genuinely has no linked worktrees. Callers that can act on the difference
+/// should use [`try_list_linked_worktree_paths`].
+pub fn list_linked_worktree_paths(repo_path: &Path) -> Vec<PathBuf> {
+    try_list_linked_worktree_paths(repo_path).unwrap_or_else(|error| {
+        log::warn!("{error}; treating it as having no linked worktrees");
+        Vec::new()
+    })
 }
 
 #[cfg(test)]
@@ -801,25 +819,25 @@ mod tests {
     }
 
     #[test]
-    fn path_identity_prefers_canonical_filesystem_path() {
-        let directory = tempfile::tempdir().expect("create identity directory");
-        let dotted = directory.path().join(".");
-        assert_eq!(
-            path_identity(&dotted),
-            directory.path().canonicalize().unwrap()
+    fn an_unreadable_registry_is_reported_rather_than_read_as_empty() {
+        // Both come back as an empty list, so the lenient caller cannot tell
+        // "no linked worktrees" from "could not look": the strict read is what
+        // keeps the failure visible.
+        let missing = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        let error = try_list_linked_worktree_paths(&missing)
+            .expect_err("a repository that cannot be opened is not an answer");
+        assert!(
+            matches!(error, GitError::WorktreeRegistryUnreadable { .. }),
+            "unexpected error: {error}"
         );
-    }
+        assert!(list_linked_worktree_paths(&missing).is_empty());
 
-    #[cfg(unix)]
-    #[test]
-    fn path_identity_matches_a_directory_symlink_alias() {
-        let parent = tempfile::tempdir().expect("create identity parent");
-        let actual = parent.path().join("actual");
-        let alias = parent.path().join("alias");
-        std::fs::create_dir(&actual).expect("create actual directory");
-        std::os::unix::fs::symlink(&actual, &alias).expect("create directory alias");
-
-        assert_eq!(path_identity(&actual), path_identity(&alias));
+        let (_tmp, repo) = init_temp_repo();
+        assert_eq!(
+            try_list_linked_worktree_paths(&repo).expect("a readable registry"),
+            Vec::<PathBuf>::new(),
+            "a repo with no linked worktrees reads as empty, not as a failure"
+        );
     }
 
     #[test]
