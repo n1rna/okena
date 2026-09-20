@@ -18,6 +18,9 @@
 //! - [`registry`]: okena's per-profile list of store checkouts;
 //! - [`tree`]: the entries inside one root;
 //! - [`discover`]: every root on this machine, with health;
+//! - [`order`]: the one saved order those roots layer in (the rules live in
+//!   `okena_core::knowledge_order`, since the client arranges what the daemon
+//!   resolves through);
 //! - [`git`]: clone, plus the store git shared with OpenSpec stores — sync
 //!   state with changed files, fetch, fast-forward pull, commit and push;
 //! - [`setup`]: creating a new store;
@@ -38,6 +41,8 @@ pub mod prompts;
 pub mod registry;
 pub mod setup;
 pub mod tree;
+
+pub use okena_core::knowledge_order as order;
 
 use okena_core::knowledge::Diagnostic;
 

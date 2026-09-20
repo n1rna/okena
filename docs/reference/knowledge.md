@@ -447,14 +447,36 @@ words come from the partials above.
 Per flow, per partial and per skill, okena reads every root it can see, in
 order, and uses the first one that has the file:
 
-1. Registered stores, in registry order.
-2. Project roots, by project name.
-3. okena's built-in, which is compiled in.
+1. Every root, in the order below.
+2. okena's built-in, which is compiled in.
 
-Nothing configures this — there is no setting naming one root as the source of
-briefs, and a file overrides a default simply by existing at the same path in a
-root that comes earlier. `okena-defaults` is never a layer: it holds a copy of
-the built-ins for reading, and the built-ins are step 3 already.
+Nothing configures *which* root briefs come from — there is no setting naming
+one as the source, and a file overrides a default simply by existing at the
+same path in a root that comes earlier. `okena-defaults` is never a layer: it
+holds a copy of the built-ins for reading, and the built-ins are step 2 already.
+
+#### The order
+
+Stores and project roots form **one ordered list**, saved as
+`harness.knowledge.order` — root keys (`store:<id>`, `path:<absolute path>`),
+top first:
+
+- A root the list names sits where the list puts it, so a project root can be
+  above a store or below it.
+- A root the list does not name — one added since the order was last saved —
+  goes to the **bottom**, keeping discovery order (registered stores in
+  registry order, then project roots by project name) among its peers. It
+  overrides nothing until it is moved up.
+- **`okena-defaults` is always last and is never in the list.** It cannot be
+  moved above the roots meant to override it.
+- The order is saved with your settings, so it survives a restart. Keys for
+  roots that are no longer discovered — unregistered, or a project that left
+  the workspace — drop out of it the next time it is saved. A root whose
+  checkout is merely missing keeps its place.
+
+Keys, not paths: the order is a preference, while the checkout paths stay
+machine state in the registry, so a synced `settings.json` means the same thing
+on every machine.
 
 A root can override one partial — say, `reporting` — without supplying any
 template, and one template without supplying any partial. An empty file is not

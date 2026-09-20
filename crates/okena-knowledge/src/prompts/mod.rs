@@ -8,15 +8,16 @@
 //! Resolution walks every knowledge root okena can see, in order, and ends in
 //! a guarantee:
 //!
-//! 1. each root in turn — registered stores first, then the projects' own
-//!    knowledge folders — and the first one holding the file wins;
+//! 1. each root in turn, and the first one holding the file wins;
 //! 2. okena's built-in template, which is compiled in.
 //!
 //! Nobody picks a root for this. Knowledge is layered the way a search path is,
-//! and the order is the order roots are discovered in: the stores registered on
-//! this machine, which is where a team puts what it wants to hold everywhere,
-//! then the projects' own folders. An empty file is not an answer and falls
-//! through, so a root can hold a placeholder without silencing the layer below.
+//! and the order is one saved list the user arranges ([`crate::order`],
+//! QBL-425): the roots they have placed, in their order, then any root nobody
+//! has placed yet, at the bottom in discovery order. Stores and projects' own
+//! folders are one list, so either can sit above the other. An empty file is
+//! not an answer and falls through, so a root can hold a placeholder without
+//! silencing the layer below.
 //!
 //! The guarantee is that step 2 always exists, for every flow. There is no
 //! state in which okena has nothing to say to an agent, so an organisation can
@@ -26,7 +27,9 @@
 //! The built-ins are the same files okena writes into its own `okena-defaults`
 //! store (see [`defaults`]), so "read the default and override it" starts from
 //! the exact text that would otherwise have run. That store is okena's, always
-//! rewritten to match, and never one of the layers: overriding a default means
+//! rewritten to match, and never one of the layers: it is consulted last, as
+//! the compiled-in step 2, and it is not part of the order — it cannot be
+//! moved above the very roots meant to override it. Overriding a default means
 //! putting a copy in a root of your own.
 //!
 //! Skills resolve the same way (see [`skill`]), but whole: a skill is handed to
@@ -46,7 +49,8 @@ use std::path::Path;
 /// One root a file can be resolved from: the key naming it, and its checkout.
 pub type Root<'a> = (&'a str, &'a Path);
 
-/// The roots a file is looked for in, in order; the first one holding it wins.
+/// The roots a file is looked for in, in the user's saved order; the first one
+/// holding it wins.
 ///
 /// okena's own defaults are never in here: they are the compiled-in last
 /// resort, which is what makes them impossible to lose.

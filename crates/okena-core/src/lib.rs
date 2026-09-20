@@ -12,6 +12,7 @@ pub mod git_poll;
 pub mod harness;
 pub mod keys;
 pub mod knowledge;
+pub mod knowledge_order;
 pub mod latency_probe;
 pub mod process;
 pub mod profiles;
