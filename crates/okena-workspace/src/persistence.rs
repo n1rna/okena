@@ -46,9 +46,9 @@ static WORKSPACE_LOCK: Mutex<()> = Mutex::new(());
 // Re-export from settings module for backward compatibility
 #[allow(unused_imports)]
 pub use super::settings::{
-    AppSettings, CursorShape, DEFAULT_SIDEBAR_WIDTH, DiffViewMode, HooksConfig, MAX_SIDEBAR_WIDTH,
-    MIN_SIDEBAR_WIDTH, ProjectHooks, SETTINGS_VERSION, SidebarSettings, TerminalHooks,
-    WorktreeHooks, get_settings_path, load_settings, save_settings,
+    AppSettings, CursorShape, DEFAULT_SIDEBAR_WIDTH, DiffViewMode, HarnessFilesSettings,
+    HooksConfig, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, ProjectHooks, SETTINGS_VERSION,
+    SidebarSettings, TerminalHooks, WorktreeHooks, get_settings_path, load_settings, save_settings,
 };
 
 // Re-export from sessions module for backward compatibility

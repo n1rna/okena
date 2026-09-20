@@ -19,11 +19,19 @@ to an agent that has never heard of okena.
 ├── docs/**/*.md                  principles, processes, architecture, runbooks
 ├── skills/**/SKILL.md            one skill per directory holding a SKILL.md
 ├── agents/**/*.md                one subagent per file
-└── templates/**/*.md             prompt templates
+└── templates/
+    ├── briefs/<flow>.md          the brief for one launch flow
+    ├── partials/<name>.md        text shared between briefs
+    └── **/*.md                   any other prompt template
 ```
 
 Every folder is optional. A root needs at least one kind folder or an identity.
 Anything outside the four kind folders (a `README.md`, CI config) is ignored.
+
+`templates/` has two folders okena reads by name: `briefs/`, one file per
+[launch flow](#flows), and `partials/`, the [shared text](#partials) they
+include. Both are listed as directories of their own in the Knowledge view.
+Anything else under `templates/` is a template the store keeps for itself.
 
 | Kind | What counts as an entry | Name |
 |---|---|---|
@@ -206,8 +214,10 @@ used by OpenSpec stores, is described in
 - **Harness → Knowledge** has these parts:
   - **Root list:** every root, with its health and a sync badge (`↑` commits to
     push, `↓` commits to pull, `•` uncommitted changes).
-  - **Entry list:** the open root's entries grouped by kind, with docs nested
-    by folder, and a filter over titles, names, paths, descriptions and tags.
+  - **Entry list:** the open root's entries grouped by kind, with docs and
+    templates nested by folder — so `briefs` and `partials` are directories
+    holding one row per file — and a filter over titles, names, paths,
+    descriptions and tags.
     Markdown entries render formatted, and a skill lists its supporting files.
     A template one of your roots holds a copy of is marked `override` when
     that copy is what a launch reads, and `default` when a copy exists but
@@ -383,8 +393,14 @@ release.
 ### Flows
 
 A **flow** is a point at which okena briefs an agent. A store overrides one by
-putting a file at `templates/<flow>.md`; its frontmatter should say
+putting a file at `templates/briefs/<flow>.md`; its frontmatter should say
 `for: <flow>`.
+
+The briefs used to sit flat at `templates/<flow>.md`, beside the partials.
+They moved into `briefs/` so the two kinds of file are told apart at a glance,
+and **there is no migration**: a copy left at the old path is read by nothing.
+okena sweeps the old paths out of its own `okena-defaults` store on each start;
+an override of your own stays where you put it and simply stops applying.
 
 | Flow | When | Variables |
 |---|---|---|
@@ -458,14 +474,36 @@ words come from the partials above.
 Per flow, per partial and per skill, okena reads every root it can see, in
 order, and uses the first one that has the file:
 
-1. Registered stores, in registry order.
-2. Project roots, by project name.
-3. okena's built-in, which is compiled in.
+1. Every root, in the order below.
+2. okena's built-in, which is compiled in.
 
-Nothing configures this — there is no setting naming one root as the source of
-briefs, and a file overrides a default simply by existing at the same path in a
-root that comes earlier. `okena-defaults` is never a layer: it holds a copy of
-the built-ins for reading, and the built-ins are step 3 already.
+Nothing configures *which* root briefs come from — there is no setting naming
+one as the source, and a file overrides a default simply by existing at the
+same path in a root that comes earlier. `okena-defaults` is never a layer: it
+holds a copy of the built-ins for reading, and the built-ins are step 2 already.
+
+#### The order
+
+Stores and project roots form **one ordered list**, saved as
+`harness.knowledge.order` — root keys (`store:<id>`, `path:<absolute path>`),
+top first:
+
+- A root the list names sits where the list puts it, so a project root can be
+  above a store or below it.
+- A root the list does not name — one added since the order was last saved —
+  goes to the **bottom**, keeping discovery order (registered stores in
+  registry order, then project roots by project name) among its peers. It
+  overrides nothing until it is moved up.
+- **`okena-defaults` is always last and is never in the list.** It cannot be
+  moved above the roots meant to override it.
+- The order is saved with your settings, so it survives a restart. Keys for
+  roots that are no longer discovered — unregistered, or a project that left
+  the workspace — drop out of it the next time it is saved. A root whose
+  checkout is merely missing keeps its place.
+
+Keys, not paths: the order is a preference, while the checkout paths stay
+machine state in the registry, so a synced `settings.json` means the same thing
+on every machine.
 
 A root can override one partial — say, `reporting` — without supplying any
 template, and one template without supplying any partial. An empty file is not
@@ -483,11 +521,14 @@ passed alongside the rendered brief, before it, and never replace it.
 
 ### The `okena-defaults` store
 
-okena's own templates, partials and skills (the
+okena's own briefs, partials and skills (the
 [`project-map` skill](project-map.md#the-project-map-skill)) are written to
 `<profile config dir>/knowledge/okena-defaults` and registered, so they are
 readable in Harness → Knowledge like any other store. They are the same bytes
-the built-ins render from.
+the built-ins render from, at the paths a root of your own would override them
+at: `templates/briefs/<flow>.md`, `templates/partials/<name>.md` and
+`skills/<name>/SKILL.md`. A file okena used to manage here and no longer does
+is removed on the next start, so the store never shows a brief no launch reads.
 
 - It is a knowledge root, not a git repository.
 - **It is read-only.** okena rewrites every file in it to match the build on

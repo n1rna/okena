@@ -5,6 +5,16 @@ pub const DEFAULT_SIDEBAR_WIDTH: f32 = 240.0;
 pub const MIN_SIDEBAR_WIDTH: f32 = 150.0;
 pub const MAX_SIDEBAR_WIDTH: f32 = 500.0;
 
+/// Hold a width inside the bounds. A NaN — a width derived from a zero-sized
+/// layout — would pass `clamp` straight through and lay the sidebar out as
+/// nothing, with no edge left to drag back.
+fn clamp_width(width: f32) -> f32 {
+    if width.is_nan() {
+        return DEFAULT_SIDEBAR_WIDTH;
+    }
+    width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ResizeDrag {
     start_x: f32,
@@ -28,8 +38,28 @@ impl Default for ResizableSidebarState {
 }
 
 impl ResizableSidebarState {
+    /// Start at a width a caller has kept across sessions, held inside the
+    /// bounds in case the stored value predates them.
+    pub fn new(width: f32) -> Self {
+        Self {
+            width: clamp_width(width),
+            drag: None,
+        }
+    }
+
     pub fn width(&self) -> f32 {
         self.width
+    }
+
+    /// Set the width outright — a sidebar restored from settings, or one
+    /// whose width another view of the same setting has just changed.
+    pub fn set_width(&mut self, width: f32) {
+        self.width = clamp_width(width);
+    }
+
+    /// Whether a drag is in flight.
+    pub fn is_resizing(&self) -> bool {
+        self.drag.is_some()
     }
 
     pub fn start_resize(&mut self, mouse_x: f32) {
@@ -44,8 +74,7 @@ impl ResizableSidebarState {
         let Some(drag) = self.drag else {
             return false;
         };
-        let width =
-            (drag.start_width + mouse_x - drag.start_x).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        let width = clamp_width(drag.start_width + mouse_x - drag.start_x);
         if width == self.width {
             return false;
         }
@@ -133,6 +162,33 @@ mod tests {
         assert_eq!(state.width(), MIN_SIDEBAR_WIDTH);
         assert!(state.update_resize(1_000.0));
         assert_eq!(state.width(), MAX_SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn a_restored_width_is_held_inside_the_bounds() {
+        // What was persisted was clamped when it was set, but the bounds can
+        // change between releases, and a corrupt settings file can say
+        // anything at all.
+        assert_eq!(ResizableSidebarState::new(320.0).width(), 320.0);
+        assert_eq!(ResizableSidebarState::new(10.0).width(), MIN_SIDEBAR_WIDTH);
+        assert_eq!(
+            ResizableSidebarState::new(9_000.0).width(),
+            MAX_SIDEBAR_WIDTH
+        );
+        assert_eq!(
+            ResizableSidebarState::new(f32::NAN).width(),
+            DEFAULT_SIDEBAR_WIDTH
+        );
+    }
+
+    #[test]
+    fn a_drag_is_in_flight_only_between_the_press_and_the_release() {
+        let mut state = ResizableSidebarState::default();
+        assert!(!state.is_resizing());
+        state.start_resize(100.0);
+        assert!(state.is_resizing());
+        state.end_resize();
+        assert!(!state.is_resizing());
     }
 
     #[test]

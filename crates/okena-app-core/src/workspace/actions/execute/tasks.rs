@@ -1718,9 +1718,9 @@ pub(super) mod agent_shell_tests {
     #[test]
     fn a_stores_verify_template_replaces_only_the_verify_instruction() {
         let dir = std::env::temp_dir().join(format!("okena-task-verify-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("templates")).expect("mkdir");
+        std::fs::create_dir_all(dir.join("templates/briefs")).expect("mkdir");
         std::fs::write(
-            dir.join("templates/task-verify.md"),
+            dir.join("templates/briefs/task-verify.md"),
             "---\nfor: task-verify\n---\nVerify {key} on staging.\n",
         )
         .expect("write");
@@ -2694,9 +2694,9 @@ mod launch_model_tests {
     #[test]
     fn a_knowledge_roots_template_sets_the_model_codex_gets() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(dir.path().join("templates")).expect("mkdir");
+        std::fs::create_dir_all(dir.path().join("templates/briefs")).expect("mkdir");
         std::fs::write(
-            dir.path().join("templates/task-start.md"),
+            dir.path().join("templates/briefs/task-start.md"),
             "---\nmodel: sonnet\nmodels:\n  codex: gpt-5-codex\n---\nWork on {key}",
         )
         .expect("write");

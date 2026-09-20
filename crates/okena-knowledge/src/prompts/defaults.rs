@@ -11,20 +11,20 @@ use std::path::Path;
 /// The raw file for `flow`, frontmatter and all.
 pub const fn file(flow: Flow) -> &'static str {
     match flow {
-        Flow::TaskStart => include_str!("templates/task-start.md"),
-        Flow::TasksStart => include_str!("templates/tasks-start.md"),
-        Flow::TaskVerify => include_str!("templates/task-verify.md"),
-        Flow::TaskBreakDown => include_str!("templates/break-down.md"),
-        Flow::TaskCoordinate => include_str!("templates/task-coordinate.md"),
-        Flow::TasksCoordinate => include_str!("templates/tasks-coordinate.md"),
-        Flow::TaskCreate => include_str!("templates/task-create.md"),
-        Flow::TaskRefine => include_str!("templates/task-refine.md"),
-        Flow::SpecDraft => include_str!("templates/spec-draft.md"),
-        Flow::KnowledgeDraft => include_str!("templates/knowledge-draft.md"),
-        Flow::DocumentRefine => include_str!("templates/doc-refine.md"),
-        Flow::AgentSession => include_str!("templates/agent-session.md"),
-        Flow::ProjectScan => include_str!("templates/project-scan.md"),
-        Flow::ProjectsScan => include_str!("templates/projects-scan.md"),
+        Flow::TaskStart => include_str!("templates/briefs/task-start.md"),
+        Flow::TasksStart => include_str!("templates/briefs/tasks-start.md"),
+        Flow::TaskVerify => include_str!("templates/briefs/task-verify.md"),
+        Flow::TaskBreakDown => include_str!("templates/briefs/break-down.md"),
+        Flow::TaskCoordinate => include_str!("templates/briefs/task-coordinate.md"),
+        Flow::TasksCoordinate => include_str!("templates/briefs/tasks-coordinate.md"),
+        Flow::TaskCreate => include_str!("templates/briefs/task-create.md"),
+        Flow::TaskRefine => include_str!("templates/briefs/task-refine.md"),
+        Flow::SpecDraft => include_str!("templates/briefs/spec-draft.md"),
+        Flow::KnowledgeDraft => include_str!("templates/briefs/knowledge-draft.md"),
+        Flow::DocumentRefine => include_str!("templates/briefs/doc-refine.md"),
+        Flow::AgentSession => include_str!("templates/briefs/agent-session.md"),
+        Flow::ProjectScan => include_str!("templates/briefs/project-scan.md"),
+        Flow::ProjectsScan => include_str!("templates/briefs/projects-scan.md"),
     }
 }
 
@@ -161,9 +161,15 @@ pub fn skill_file(name: &str) -> Option<&'static str> {
         .map(|(_, file)| *file)
 }
 
+/// The folder a root keeps its partials in, relative to the root.
+///
+/// Beside [`super::flows::BRIEFS_DIR`], and shown as a directory of its own in
+/// the Knowledge view for the same reason (QBL-427).
+pub const PARTIALS_DIR: &str = "templates/partials";
+
 /// Where a store keeps partial `name`, relative to its root.
 pub fn partial_path(name: &str) -> String {
-    format!("templates/partials/{name}.md")
+    format!("{PARTIALS_DIR}/{name}.md")
 }
 
 /// The built-in body of partial `name`, frontmatter stripped.
@@ -216,11 +222,13 @@ pub struct Materialized {
     /// Files that were on disk saying something else, and now say what the
     /// built-in says.
     pub updated: Vec<String>,
+    /// Files okena used to manage here and has now removed.
+    pub removed: Vec<String>,
 }
 
 impl Materialized {
     pub fn changed_anything(&self) -> bool {
-        !self.written.is_empty() || !self.updated.is_empty()
+        !self.written.is_empty() || !self.updated.is_empty() || !self.removed.is_empty()
     }
 }
 
@@ -229,6 +237,20 @@ impl Materialized {
 /// Nothing reads it now — okena rewrites every file regardless — so a run
 /// deletes it rather than leaving a stale file that claims to mean something.
 const STALE_RECORD_PATH: &str = ".okena-knowledge/defaults.lock";
+
+/// Paths okena used to manage in this store and no longer does.
+///
+/// The briefs used to sit flat at `templates/<flow>.md`, beside the partials
+/// (QBL-427). A file left behind there would be a brief no launch reads, shown
+/// in the Knowledge view as though it were current — so a materialize removes
+/// it. Only okena's own store is swept: an override of your own at the old
+/// path simply stops applying, and stays where you put it.
+fn retired_files() -> Vec<String> {
+    Flow::all()
+        .iter()
+        .map(|f| format!("templates/{}.md", f.id()))
+        .collect()
+}
 
 /// Write okena's templates, partials and skills into `root`, overwriting
 /// whatever is there.
@@ -257,6 +279,12 @@ pub fn materialize(root: &Path) -> std::io::Result<Materialized> {
                 write_file(&path, contents)?;
                 report.written.push(rel);
             }
+        }
+    }
+    for rel in retired_files() {
+        let path = root.join(&rel);
+        if path.is_file() && std::fs::remove_file(&path).is_ok() {
+            report.removed.push(rel);
         }
     }
     // Best-effort: a record okena cannot remove is only clutter, and failing
@@ -315,7 +343,8 @@ then your projects' own knowledge folders — and uses the first one that has it
 falling back to the built-in. So you can override one brief without supplying
 the rest, and deleting your copy restores okena's.
 
-- `templates/<flow>.md` — the brief for one launch flow; frontmatter says which.
+- `templates/briefs/<flow>.md` — the brief for one launch flow; frontmatter
+  says which.
 - `templates/partials/<name>.md` — text shared between briefs, included with
   `{>name}`, or used as `{value|name}` when a value is empty.
 - `skills/<name>/SKILL.md` — skills okena hands an agent whole, such as
@@ -410,6 +439,30 @@ mod tests {
         assert!(dir.path().join(partial_path("reporting")).exists());
         let second = materialize(dir.path()).expect("write again");
         assert!(!second.changed_anything(), "{second:?}");
+    }
+
+    #[test]
+    fn a_brief_left_at_the_old_flat_path_is_swept_away() {
+        // The briefs moved under `templates/briefs/` (QBL-427). A copy left at
+        // the path they used to have is a brief no launch reads, so okena's
+        // own store must not keep showing it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        materialize(dir.path()).expect("write");
+        let old = dir.path().join("templates/spec-draft.md");
+        std::fs::write(&old, file(Flow::SpecDraft)).expect("old-path copy");
+
+        let again = materialize(dir.path()).expect("write again");
+        assert!(!old.exists(), "the old flat path was left on disk");
+        assert_eq!(again.removed, ["templates/spec-draft.md"]);
+        assert!(again.written.is_empty() && again.updated.is_empty(), "{again:?}");
+        // The brief itself is where it belongs, and nothing else moved.
+        assert!(
+            dir.path()
+                .join(Flow::SpecDraft.template_path())
+                .starts_with(dir.path().join("templates/briefs"))
+        );
+        assert!(dir.path().join("templates/briefs/spec-draft.md").is_file());
+        assert!(dir.path().join(partial_path("reporting")).is_file());
     }
 
     #[test]

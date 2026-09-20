@@ -467,12 +467,25 @@ pub struct KnowledgeConfig {
     /// `~/knowledge`, beside OpenSpec's `~/openspec` convention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clone_dir: Option<String>,
+
+    /// The one order knowledge roots layer in, as root keys, top first
+    /// (QBL-425). Empty until somebody arranges them, which leaves discovery
+    /// order.
+    ///
+    /// Keys, not paths: a key is `store:<id>` or `path:<absolute path>`, so
+    /// this stays a preference while the checkout paths stay machine state in
+    /// the registry (ADR-0003). `okena-defaults` is never in it — it is always
+    /// last. The rules, and the pruning of roots that have gone, are
+    /// `okena_knowledge::order`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
     //
     // There is deliberately no setting naming one root as the source of launch
     // briefs (QBL-415). Templates, partials and skills resolve across every
-    // healthy root in discovery order, so overriding one is a matter of putting
-    // the file somewhere, not of pointing a setting at it. A `prompts` key left
-    // in an older settings.json is ignored on load and gone on the next save.
+    // healthy root, in the order above, so overriding one is a matter of
+    // putting the file somewhere, not of pointing a setting at it. A `prompts`
+    // key left in an older settings.json is ignored on load and gone on the
+    // next save.
 }
 
 impl Default for KnowledgeConfig {
@@ -481,6 +494,7 @@ impl Default for KnowledgeConfig {
             // Must match the serde default above.
             projects: true,
             clone_dir: None,
+            order: Vec::new(),
         }
     }
 }
@@ -645,6 +659,52 @@ impl Default for SidebarSettings {
     }
 }
 
+/// Default width of the Knowledge and Specs file sidebar, in pixels — the
+/// width both views were fixed at before it could be dragged.
+pub const DEFAULT_HARNESS_FILES_WIDTH: f32 = 280.0;
+
+fn default_harness_files_width() -> f32 {
+    DEFAULT_HARNESS_FILES_WIDTH
+}
+
+/// The file sidebar shared by the Knowledge and Specs views: whether it is
+/// open, and how wide.
+///
+/// One setting for both, not one each: they are the same sidebar over
+/// different roots, so a width you settled on in one is the width you want in
+/// the other. Width shares the main sidebar's bounds
+/// ([`MIN_SIDEBAR_WIDTH`]..[`MAX_SIDEBAR_WIDTH`]).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct HarnessFilesSettings {
+    /// Open by default: a fresh view must show the roots it is about, and a
+    /// document with nothing to open it from is a dead end.
+    #[serde(default = "default_true")]
+    pub is_open: bool,
+    #[serde(default = "default_harness_files_width")]
+    pub width: f32,
+}
+
+impl Default for HarnessFilesSettings {
+    fn default() -> Self {
+        Self {
+            is_open: true,
+            width: DEFAULT_HARNESS_FILES_WIDTH,
+        }
+    }
+}
+
+impl HarnessFilesSettings {
+    /// Hold a width inside the bounds the sidebar may take.
+    pub fn clamp_width(width: f32) -> f32 {
+        // A NaN out of a drag would otherwise pass `clamp` straight through
+        // and lay the sidebar out as nothing.
+        if width.is_nan() {
+            return DEFAULT_HARNESS_FILES_WIDTH;
+        }
+        width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+    }
+}
+
 /// Status bar appearance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusBarSettings {
@@ -690,6 +750,10 @@ pub struct AppSettings {
     /// Sidebar settings
     #[serde(default)]
     pub sidebar: SidebarSettings,
+
+    /// The Knowledge and Specs file sidebar's open state and width.
+    #[serde(default)]
+    pub harness_files: HarnessFilesSettings,
     /// Whether to show border around focused terminal
     #[serde(default = "default_show_focused_border")]
     pub show_focused_border: bool,
@@ -929,6 +993,7 @@ impl Default for AppSettings {
             theme_mode: ThemeMode::default(),
             active_session: None,
             sidebar: SidebarSettings::default(),
+            harness_files: HarnessFilesSettings::default(),
             harness: HarnessConfig::default(),
             github_enterprise_hosts: Vec::new(),
             gh_path: None,
@@ -1573,6 +1638,40 @@ mod tests {
     }
 
     #[test]
+    fn the_knowledge_root_order_survives_a_restart_and_stays_absent_until_set() {
+        // What "the order is saved with the user's settings and survives a
+        // restart" comes down to: the list round-trips through the file, and a
+        // user who never arranged anything gets no key written at all.
+        let arranged = AppSettings {
+            harness: HarnessConfig {
+                knowledge: KnowledgeConfig {
+                    order: vec!["path:/repo/.okena/knowledge".into(), "store:acme-eng".into()],
+                    ..KnowledgeConfig::default()
+                },
+                ..HarnessConfig::default()
+            },
+            ..AppSettings::default()
+        };
+        let written = serde_json::to_string(&arranged).expect("serialize");
+        let read_back: AppSettings = serde_json::from_str(&written).expect("deserialize");
+        assert_eq!(
+            read_back.harness.knowledge.order,
+            ["path:/repo/.okena/knowledge", "store:acme-eng"],
+            "the order a restart reads back is the order that was saved"
+        );
+
+        let untouched = serde_json::to_string(&AppSettings::default()).expect("serialize");
+        assert!(
+            !untouched.contains("\"order\""),
+            "an order nobody has set should not be written: {untouched}"
+        );
+        // And a file written before this story still loads, with no order.
+        let old: AppSettings = serde_json::from_str(r#"{"harness":{"knowledge":{"clone_dir":"~/k"}}}"#)
+            .expect("an older file still loads");
+        assert!(old.harness.knowledge.order.is_empty());
+    }
+
+    #[test]
     fn a_settings_file_still_naming_a_prompts_store_loads_and_drops_it() {
         // QBL-415 removed `harness.knowledge.prompts`: briefs resolve across
         // every root now, so there is nothing to point at. A settings file
@@ -1593,6 +1692,48 @@ mod tests {
 
         let saved = serde_json::to_string(&loaded).expect("serialize");
         assert!(!saved.contains("prompts"), "the dead key survived a save");
+    }
+
+    #[test]
+    fn a_settings_file_written_before_the_file_sidebar_opens_it_at_the_old_width() {
+        // Every settings file written before QBL-428 lacks the key, and the
+        // sidebar it describes was open and 280px wide. Loading one must not
+        // close the sidebar or resize it.
+        let loaded: AppSettings = serde_json::from_str("{}").expect("an old file still loads");
+        assert!(loaded.harness_files.is_open);
+        assert_eq!(loaded.harness_files.width, DEFAULT_HARNESS_FILES_WIDTH);
+    }
+
+    #[test]
+    fn the_file_sidebar_survives_a_save_and_a_load() {
+        let settings = AppSettings {
+            harness_files: HarnessFilesSettings {
+                is_open: false,
+                width: 412.0,
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let loaded: AppSettings = serde_json::from_str(&json).expect("deserialize");
+        assert!(!loaded.harness_files.is_open);
+        assert_eq!(loaded.harness_files.width, 412.0);
+    }
+
+    #[test]
+    fn a_file_sidebar_width_is_held_inside_its_bounds() {
+        assert_eq!(HarnessFilesSettings::clamp_width(300.0), 300.0);
+        assert_eq!(HarnessFilesSettings::clamp_width(0.0), MIN_SIDEBAR_WIDTH);
+        assert_eq!(HarnessFilesSettings::clamp_width(-40.0), MIN_SIDEBAR_WIDTH);
+        assert_eq!(
+            HarnessFilesSettings::clamp_width(9_000.0),
+            MAX_SIDEBAR_WIDTH
+        );
+        // A drag that divided by a zero width would otherwise lay the sidebar
+        // out as nothing, with no way back to a usable size.
+        assert_eq!(
+            HarnessFilesSettings::clamp_width(f32::NAN),
+            DEFAULT_HARNESS_FILES_WIDTH
+        );
     }
 
     #[test]
