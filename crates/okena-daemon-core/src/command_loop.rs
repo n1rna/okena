@@ -3121,6 +3121,7 @@ pub async fn daemon_command_loop(
                 | ActionRequest::KnowledgeFileDelete { .. }
                 | ActionRequest::KnowledgeOverrides { .. }
                 | ActionRequest::KnowledgeOverride { .. }
+                | ActionRequest::KnowledgeLayering
                 | ActionRequest::KnowledgeStoreClone { .. }
                 | ActionRequest::KnowledgeStoreRegister { .. }
                 | ActionRequest::KnowledgeStoreUnregister { .. }

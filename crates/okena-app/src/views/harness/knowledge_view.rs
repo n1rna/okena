@@ -272,6 +272,10 @@ impl HarnessPane {
         let generation = self.knowledge.load_generation;
         self.knowledge.loading = true;
         self.knowledge.error = None;
+        // Which roots hold a copy of each layered file, for the marks in the
+        // list and the list under an open one. Refreshed with the tree, so a
+        // copy deleted or a root reordered shows without reopening the view.
+        self.load_knowledge_layering(cx);
         cx.notify();
 
         let client = self.client.clone();
@@ -720,6 +724,10 @@ impl HarnessPane {
                         entry.title
                     )),
             )
+            // A template one of your roots overrides is marked here, so the
+            // list says which briefs you have taken over without opening one
+            // (QBL-426).
+            .children(self.render_layering_badge(&entry.path, cx))
             .when(warned, |d| {
                 d.child(
                     div()
@@ -1026,6 +1034,9 @@ impl HarnessPane {
                     .child(files),
             );
         }
+        // Every root holding a copy of this file, in layering order, with the
+        // one a launch reads marked (QBL-426).
+        col = col.children(self.render_layering_list(&entry.path, cx));
         for d in &entry.status {
             col = col.child(self.kn_diagnostic(d, cx));
         }
@@ -1081,9 +1092,6 @@ impl HarnessPane {
                     .w_full()
                     .max_w(okena_markdown::DOC_MAX_WIDTH)
                     .min_w_0();
-                if read_only {
-                    page = page.children(self.render_default_notice(&path, cx));
-                }
                 if let Some(entry) = &entry {
                     page = page.child(self.render_entry_meta(entry, cx));
                 }

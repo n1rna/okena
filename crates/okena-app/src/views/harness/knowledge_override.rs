@@ -11,12 +11,13 @@
 //! could hold a copy, and which one a launch would actually read.
 
 use crate::theme::{theme, with_alpha};
-use crate::ui::tokens::{ui_text_ms, ui_text_xs};
+use crate::ui::tokens::{ui_text_md, ui_text_ms, ui_text_xs};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
 use serde::Deserialize;
+use std::collections::HashMap;
 
 use super::HarnessPane;
 
@@ -70,9 +71,115 @@ pub(crate) struct OverrideRoot {
     pub(crate) has: bool,
 }
 
+/// Which roots hold a copy of each layered file, and which copy is applied.
+///
+/// One answer for every root at once (`ActionRequest::KnowledgeLayering`),
+/// because both things drawn from it are lists: a template's detail page names
+/// every root holding a copy, and the sidebar marks each template that has an
+/// override (QBL-426).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct Layering {
+    /// Every healthy root in layering order, okena's own last.
+    #[serde(default)]
+    pub(crate) roots: Vec<LayerRoot>,
+    /// Per path relative to a root, the copies of it and the applied one.
+    #[serde(default)]
+    pub(crate) paths: HashMap<String, Copies>,
+}
+
+/// One root in the layer order.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct LayerRoot {
+    pub(crate) key: String,
+    pub(crate) name: String,
+    /// `store` or `project`, for the line beside the name.
+    #[serde(default)]
+    pub(crate) kind: String,
+    /// okena's own defaults store: not a layer, the fallback made readable.
+    #[serde(default)]
+    pub(crate) builtin: bool,
+}
+
+/// What the roots hold of one file.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct Copies {
+    /// Roots where the file exists, in layering order.
+    #[serde(default)]
+    pub(crate) copies: Vec<String>,
+    /// The one a launch reads. Not always the first copy: an empty file is a
+    /// placeholder, not an answer, and falls through to the layer below.
+    #[serde(default)]
+    pub(crate) applied: Option<String>,
+}
+
+/// What the sidebar puts beside a template that has an override.
+///
+/// Two readings, because the answer to "is my override doing anything?" is
+/// what someone is looking for: [`Badge::Override`] when the copy a launch
+/// reads is one of yours, [`Badge::Default`] when a copy exists but okena's
+/// own is still what is sent — an empty placeholder, or a copy that only sits
+/// below the one that wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Badge {
+    Override,
+    Default,
+}
+
+impl Badge {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Badge::Override => "override",
+            Badge::Default => "default",
+        }
+    }
+}
+
+impl Layering {
+    fn root(&self, key: &str) -> Option<&LayerRoot> {
+        self.roots.iter().find(|r| r.key == key)
+    }
+
+    /// Every root holding a copy of `path`, in layering order, paired with
+    /// whether it is the copy a launch reads.
+    ///
+    /// Empty for a path nothing layers — a doc, an agent, the README — where
+    /// "which root supplies this?" has no answer.
+    pub(crate) fn copies_of(&self, path: &str) -> Vec<(&LayerRoot, bool)> {
+        let Some(copies) = self.paths.get(path) else {
+            return Vec::new();
+        };
+        copies
+            .copies
+            .iter()
+            .filter_map(|key| {
+                let root = self.root(key)?;
+                Some((root, copies.applied.as_deref() == Some(key.as_str())))
+            })
+            .collect()
+    }
+
+    /// What to mark `path` with in the entry list, if anything.
+    ///
+    /// Nothing unless a root of your own holds a copy: a template only okena
+    /// has is the ordinary case, and a mark on every row would say nothing.
+    pub(crate) fn badge(&self, path: &str) -> Option<Badge> {
+        let copies = self.copies_of(path);
+        if !copies.iter().any(|(root, _)| !root.builtin) {
+            return None;
+        }
+        Some(match copies.iter().find(|(_, applied)| *applied) {
+            Some((root, _)) if !root.builtin => Badge::Override,
+            _ => Badge::Default,
+        })
+    }
+}
+
 /// The Override picker's state, and the answer it is drawn from.
 #[derive(Default)]
 pub(crate) struct OverrideState {
+    /// Which roots hold each layered file. Loaded with the tree, and kept
+    /// across selections: it describes every entry, not the open one.
+    pub(crate) layering: Layering,
     /// The daemon's answer for the open file. `None` while it is in flight,
     /// or when the open file is not one of okena's.
     pub(crate) overrides: Option<Overrides>,
@@ -99,6 +206,145 @@ impl OverrideState {
 }
 
 impl HarnessPane {
+    /// Load which roots hold a copy of each layered file.
+    ///
+    /// Once per knowledge refresh rather than per row: the whole entry list is
+    /// marked from it, and the open file's root list too. That is also what
+    /// makes it follow the world — a copy deleted, a file saved or the root
+    /// order changed all refresh the view, and the answer is rebuilt with it.
+    pub(super) fn load_knowledge_layering(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client
+                    .post_action(ActionRequest::KnowledgeLayering)
+                    .and_then(|v| v.ok_or_else(|| "Missing reply".to_string()))
+                    .and_then(|v| {
+                        serde_json::from_value::<Layering>(v)
+                            .map_err(|e| format!("Unexpected reply: {e}"))
+                    })
+            })
+            .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    // A failure leaves the last answer standing: a stale mark
+                    // is better than every template losing its list at once,
+                    // and the next refresh tries again.
+                    if let Ok(layering) = result {
+                        this.knowledge_override.layering = layering;
+                        cx.notify();
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// The mark beside a template in the entry list: it has an override, and
+    /// whether that override is what a launch reads.
+    pub(super) fn render_layering_badge(
+        &self,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let badge = self.knowledge_override.layering.badge(path)?;
+        let t = theme(cx);
+        Some(
+            div()
+                .flex_shrink_0()
+                .text_size(ui_text_xs(cx))
+                .text_color(rgb(match badge {
+                    Badge::Override => t.button_primary_bg,
+                    Badge::Default => t.text_muted,
+                }))
+                .child(badge.label())
+                .into_any_element(),
+        )
+    }
+
+    /// Under an open template: every root holding a copy of it, in layering
+    /// order, with the one a launch reads marked.
+    ///
+    /// The list includes okena's own store, which is where the answer "nothing
+    /// overrides this, so the default is what is sent" comes from. Nothing is
+    /// shown for a file the layers do not resolve.
+    pub(super) fn render_layering_list(
+        &self,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let copies = self.knowledge_override.layering.copies_of(path);
+        if copies.is_empty() {
+            return None;
+        }
+        let t = theme(cx);
+        let mut rows = v_flex().gap(px(1.0));
+        for (root, applied) in copies {
+            let key = root.key.clone();
+            let target = path.to_string();
+            rows = rows.child(
+                h_flex()
+                    .id(SharedString::from(format!("knowledge-copy-{}", root.key)))
+                    .cursor_pointer()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(4.0))
+                    .py(px(1.0))
+                    .rounded(px(3.0))
+                    .when(applied, |d| {
+                        d.bg(with_alpha(t.button_primary_bg, 0.14))
+                    })
+                    .when(!applied, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
+                    .child(
+                        div()
+                            .text_size(ui_text_md(cx))
+                            .text_color(rgb(if applied {
+                                t.text_primary
+                            } else {
+                                t.text_secondary
+                            }))
+                            .child(root.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_text_xs(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(root.kind.clone()),
+                    )
+                    .when(applied, |d| {
+                        d.child(
+                            div()
+                                .text_size(ui_text_xs(cx))
+                                .text_color(rgb(t.button_primary_bg))
+                                .child("applied"),
+                        )
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.open_knowledge_doc(key.clone(), target.clone(), cx);
+                        }),
+                    ),
+            );
+        }
+        Some(
+            h_flex()
+                .gap(px(10.0))
+                .items_start()
+                .child(
+                    div()
+                        .w(px(72.0))
+                        .flex_shrink_0()
+                        .pt(px(1.0))
+                        .text_size(ui_text_ms(cx))
+                        .text_color(rgb(t.text_muted))
+                        .child("Copies"),
+                )
+                .child(rows)
+                .into_any_element(),
+        )
+    }
+
     /// Ask the daemon who overrides `path`, for the file just opened from
     /// okena's defaults.
     pub(super) fn load_knowledge_overrides(&mut self, path: String, cx: &mut Context<Self>) {
@@ -171,49 +417,6 @@ impl HarnessPane {
             });
         })
         .detach();
-    }
-
-    /// The line above a default's text: what it is, and who is already
-    /// overriding it.
-    pub(super) fn render_default_notice(
-        &self,
-        path: &str,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let t = theme(cx);
-        let overriding = self.knowledge_override.for_path(path)?.winning()?.clone();
-        let key = overriding.key.clone();
-        let target = path.to_string();
-        Some(
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap(px(8.0))
-                .px(px(10.0))
-                .py(px(6.0))
-                .rounded(px(4.0))
-                .bg(with_alpha(t.button_primary_bg, 0.10))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(ui_text_ms(cx))
-                        .text_color(rgb(t.text_secondary))
-                        .child(format!(
-                            "`{}` overrides this, so it is what agents are sent.",
-                            overriding.name
-                        )),
-                )
-                .child(self.small_button(
-                    "knowledge-open-override",
-                    "Open",
-                    cx.listener(move |this, _, _window, cx| {
-                        this.open_knowledge_doc(key.clone(), target.clone(), cx);
-                    }),
-                    cx,
-                ))
-                .into_any_element(),
-        )
     }
 
     /// The header controls for a default: the badge, and the one action it
@@ -408,7 +611,109 @@ impl HarnessPane {
 
 #[cfg(test)]
 mod tests {
-    use super::{OverrideRoot, Overrides};
+    use super::{Badge, Copies, LayerRoot, Layering, OverrideRoot, Overrides};
+
+    /// The layer order okena always ends in: your roots, then okena's own.
+    fn layering(paths: &[(&str, &[&str], Option<&str>)]) -> Layering {
+        let root = |key: &str, builtin: bool| LayerRoot {
+            key: key.into(),
+            name: key.into(),
+            kind: if builtin { "store" } else { "project" }.into(),
+            builtin,
+        };
+        Layering {
+            roots: vec![
+                root("acme", false),
+                root("zeta", false),
+                root("store:okena-defaults", true),
+            ],
+            paths: paths
+                .iter()
+                .map(|(path, copies, applied)| {
+                    (
+                        (*path).to_string(),
+                        Copies {
+                            copies: copies.iter().map(|c| (*c).to_string()).collect(),
+                            applied: applied.map(str::to_string),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    const BRIEF: &str = "templates/briefs/spec-draft.md";
+
+    #[test]
+    fn the_copies_of_a_template_come_in_layer_order_with_the_applied_one_marked() {
+        let l = layering(&[(
+            BRIEF,
+            &["acme", "zeta", "store:okena-defaults"],
+            Some("acme"),
+        )]);
+        assert_eq!(
+            l.copies_of(BRIEF)
+                .iter()
+                .map(|(r, applied)| (r.key.as_str(), *applied))
+                .collect::<Vec<_>>(),
+            [
+                ("acme", true),
+                ("zeta", false),
+                ("store:okena-defaults", false)
+            ]
+        );
+
+        // A path nothing layers has no list at all — a doc is read from the
+        // root you opened it in, so "who supplies it" is a category error.
+        assert!(l.copies_of("docs/ci.md").is_empty());
+
+        // A root the answer no longer lists is dropped rather than drawn as a
+        // nameless row: the two halves come from one reply, but a later
+        // refresh can still race a root being unregistered.
+        let mut stale = l.clone();
+        stale.roots.retain(|r| r.key != "zeta");
+        assert_eq!(
+            stale
+                .copies_of(BRIEF)
+                .iter()
+                .map(|(r, _)| r.key.as_str())
+                .collect::<Vec<_>>(),
+            ["acme", "store:okena-defaults"]
+        );
+    }
+
+    #[test]
+    fn the_list_marks_a_template_by_whether_your_copy_is_the_one_sent() {
+        // Only okena has it: the ordinary case, and no mark.
+        let none = layering(&[(
+            BRIEF,
+            &["store:okena-defaults"],
+            Some("store:okena-defaults"),
+        )]);
+        assert_eq!(none.badge(BRIEF), None);
+        assert_eq!(none.badge("docs/ci.md"), None);
+
+        // A root of yours overrides it and wins: that is what agents are sent.
+        let won = layering(&[(BRIEF, &["acme", "store:okena-defaults"], Some("acme"))]);
+        assert_eq!(won.badge(BRIEF), Some(Badge::Override));
+
+        // A copy that is not what is sent — an empty placeholder — reads
+        // differently, because "my override does nothing" is the thing worth
+        // saying.
+        let unused = layering(&[(
+            BRIEF,
+            &["acme", "store:okena-defaults"],
+            Some("store:okena-defaults"),
+        )]);
+        assert_eq!(unused.badge(BRIEF), Some(Badge::Default));
+
+        // And so does one where every copy is empty and nothing applies.
+        let nothing = layering(&[(BRIEF, &["acme"], None)]);
+        assert_eq!(nothing.badge(BRIEF), Some(Badge::Default));
+
+        assert_eq!(Badge::Override.label(), "override");
+        assert_eq!(Badge::Default.label(), "default");
+    }
 
     fn root(key: &str, has: bool) -> OverrideRoot {
         OverrideRoot {

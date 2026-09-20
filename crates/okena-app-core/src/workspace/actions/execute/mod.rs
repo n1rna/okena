@@ -1023,6 +1023,7 @@ pub fn execute_action(
         | ActionRequest::KnowledgeFileDelete { .. }
         | ActionRequest::KnowledgeOverrides { .. }
         | ActionRequest::KnowledgeOverride { .. }
+        | ActionRequest::KnowledgeLayering
         | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreRegister { .. }
         | ActionRequest::KnowledgeStoreUnregister { .. }
