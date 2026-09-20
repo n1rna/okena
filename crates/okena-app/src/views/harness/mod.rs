@@ -9,6 +9,7 @@ mod context_dialog;
 mod doc_agents;
 mod editor;
 mod file_ops;
+mod file_sidebar;
 mod knowledge_draft;
 mod knowledge_override;
 mod knowledge_view;
@@ -335,6 +336,9 @@ pub struct HarnessPane {
     /// Board width from the last frame, used to turn a drag into a fraction.
     pub(crate) board_width: Rc<RefCell<f32>>,
     pub(crate) section: HarnessSection,
+    /// The Knowledge and Specs file sidebar: open state and width. One
+    /// setting behind both views, mirrored here per pane.
+    pub(crate) files: file_sidebar::FileSidebar,
     pub(crate) tasks: TasksState,
     pub(crate) specs: SpecsState,
     pub(crate) knowledge: knowledge_view::KnowledgeState,
@@ -383,10 +387,15 @@ impl HarnessPane {
         cx.observe(
             &crate::settings::settings_entity(cx),
             |this: &mut Self, settings, cx| {
-                let wanted = settings.read(cx).settings.harness.task_provider.clone();
-                if wanted != this.tasks.provider {
-                    this.switch_provider(wanted, cx);
+                let settings = settings.read(cx).settings.clone();
+                // Specs and Knowledge are separate panes over one sidebar
+                // setting: whichever is not on screen must still come back
+                // the way the other one was left.
+                this.sync_file_sidebar(&settings);
+                if settings.harness.task_provider != this.tasks.provider {
+                    this.switch_provider(settings.harness.task_provider, cx);
                 }
+                cx.notify();
             },
         )
         .detach();
@@ -436,6 +445,7 @@ impl HarnessPane {
             active_drag: ctx.active_drag,
             board_width: Rc::new(RefCell::new(0.0)),
             section,
+            files: file_sidebar::FileSidebar::from_settings(cx),
             tasks: TasksState {
                 provider_display_name: tasks_view::provider_label(&provider).to_string(),
                 provider,

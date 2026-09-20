@@ -301,6 +301,19 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
+    /// Open or close the Knowledge and Specs file sidebar.
+    pub fn set_harness_files_open(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.settings.harness_files.is_open = value;
+        self.save_and_notify(cx);
+    }
+
+    /// Set the Knowledge and Specs file sidebar's width (clamped to bounds).
+    pub fn set_harness_files_width(&mut self, value: f32, cx: &mut Context<Self>) {
+        use crate::workspace::persistence::HarnessFilesSettings;
+        self.settings.harness_files.width = HarnessFilesSettings::clamp_width(value);
+        self.save_and_notify(cx);
+    }
+
     /// Set the theme mode and optional custom theme ID.
     pub fn set_theme_mode(&mut self, value: ThemeMode, cx: &mut Context<Self>) {
         self.settings.theme_mode = value;

@@ -422,7 +422,7 @@ mod tests {
         let layers = [("store:acme", dir.path())];
         write(
             dir.path(),
-            "templates/task-start.md",
+            "templates/briefs/task-start.md",
             "---\nname: acme-start\nmodels:\n  codex: gpt-5-codex\n---\nWork on {key}",
         );
         let b = brief(Flow::TaskStart, &layers, &Vars::new());
@@ -433,7 +433,7 @@ mod tests {
 
         write(
             dir.path(),
-            "templates/task-start.md",
+            "templates/briefs/task-start.md",
             "---\nmodel: haiku\n---\nx",
         );
         let b = brief(Flow::TaskStart, &layers, &Vars::new());
@@ -444,7 +444,7 @@ mod tests {
         // An empty override falls through, model and all.
         write(
             dir.path(),
-            "templates/task-start.md",
+            "templates/briefs/task-start.md",
             "---\nmodel: haiku\n---\n\n",
         );
         let b = brief(Flow::TaskStart, &layers, &Vars::new());
@@ -458,10 +458,10 @@ mod tests {
         // holds it too, and the store is listed first, so the store wins.
         let store = tempfile::tempdir().expect("tempdir");
         let project = tempfile::tempdir().expect("tempdir");
-        write(store.path(), "templates/agent-session.md", "Store: {goal}");
+        write(store.path(), "templates/briefs/agent-session.md", "Store: {goal}");
         write(
             project.path(),
-            "templates/agent-session.md",
+            "templates/briefs/agent-session.md",
             "Project: {goal}",
         );
         let layers = [("store:acme", store.path()), ("path:/p/web", project.path())];
@@ -472,18 +472,18 @@ mod tests {
             b.source,
             Source::Root {
                 key: "store:acme".into(),
-                path: "templates/agent-session.md".into()
+                path: "templates/briefs/agent-session.md".into()
             }
         );
 
         // Take it out of the store and the project root's copy takes over —
         // the acceptance case for removing an override one layer up.
-        std::fs::remove_file(store.path().join("templates/agent-session.md")).expect("rm");
+        std::fs::remove_file(store.path().join("templates/briefs/agent-session.md")).expect("rm");
         let b = brief(Flow::AgentSession, &layers, &vars(&[("goal", "ship it")]));
         assert_eq!(b.text(), "Project: ship it");
 
         // With neither, the built-in is still there.
-        std::fs::remove_file(project.path().join("templates/agent-session.md")).expect("rm");
+        std::fs::remove_file(project.path().join("templates/briefs/agent-session.md")).expect("rm");
         assert_eq!(
             brief(
                 Flow::AgentSession,
@@ -496,6 +496,25 @@ mod tests {
     }
 
     #[test]
+    fn an_override_at_the_old_flat_brief_path_no_longer_applies() {
+        // The briefs moved under `templates/briefs/` and there is no
+        // migration (QBL-427): a copy left where they used to live is read by
+        // nothing, and the built-in is what launches.
+        let store = tempfile::tempdir().expect("tempdir");
+        let layers = [("store:acme", store.path())];
+        write(store.path(), "templates/agent-session.md", "Old: {goal}");
+
+        let b = brief(Flow::AgentSession, &layers, &vars(&[("goal", "g")]));
+        assert_eq!(b.source, Source::Builtin);
+        assert!(!b.text().starts_with("Old:"), "{}", b.text());
+
+        // The same words at the new path do apply.
+        write(store.path(), "templates/briefs/agent-session.md", "New: {goal}");
+        let b = brief(Flow::AgentSession, &layers, &vars(&[("goal", "g")]));
+        assert_eq!(b.text(), "New: g");
+    }
+
+    #[test]
     fn an_empty_file_in_an_earlier_root_does_not_silence_a_later_one() {
         // An empty override is a placeholder, not an answer: it must not
         // shadow the layer that does have something to say.
@@ -503,11 +522,11 @@ mod tests {
         let second = tempfile::tempdir().expect("tempdir");
         write(
             first.path(),
-            "templates/agent-session.md",
+            "templates/briefs/agent-session.md",
             "---\nfor: agent-session\n---\n\n",
         );
         write(first.path(), "templates/partials/reporting.md", "   \n");
-        write(second.path(), "templates/agent-session.md", "Second: {goal}");
+        write(second.path(), "templates/briefs/agent-session.md", "Second: {goal}");
         write(
             second.path(),
             "templates/partials/reporting.md",
@@ -531,7 +550,7 @@ mod tests {
             "templates/partials/reporting.md",
             "Ping us in #eng when stuck.",
         );
-        write(project.path(), "templates/spec-draft.md", "Draft it: {change}");
+        write(project.path(), "templates/briefs/spec-draft.md", "Draft it: {change}");
         let layers = [("store:acme", store.path()), ("path:/p/web", project.path())];
 
         let session: Vars = Flow::AgentSession
@@ -549,7 +568,7 @@ mod tests {
             d.source,
             Source::Root {
                 key: "path:/p/web".into(),
-                path: "templates/spec-draft.md".into()
+                path: "templates/briefs/spec-draft.md".into()
             }
         );
     }
@@ -583,21 +602,21 @@ mod tests {
         let store = tempfile::tempdir().expect("tempdir");
         let project = tempfile::tempdir().expect("tempdir");
         let skill = super::defaults::skill_path("project-map");
-        write(project.path(), "templates/spec-draft.md", "Theirs");
+        write(project.path(), "templates/briefs/spec-draft.md", "Theirs");
         write(store.path(), &skill, "---\nname: project-map\n---\nOurs\n");
         // An empty file is not an override, here as at launch.
-        write(store.path(), "templates/spec-draft.md", "---\nfor: x\n---\n");
+        write(store.path(), "templates/briefs/spec-draft.md", "---\nfor: x\n---\n");
         let layers = [("store:acme", store.path()), ("path:/p/web", project.path())];
 
         assert_eq!(
-            super::supplied_by(&layers, "templates/spec-draft.md").map(|(k, _)| k),
+            super::supplied_by(&layers, "templates/briefs/spec-draft.md").map(|(k, _)| k),
             Some("path:/p/web")
         );
         assert_eq!(
             super::supplied_by(&layers, &skill).map(|(k, _)| k),
             Some("store:acme")
         );
-        assert_eq!(super::supplied_by(&layers, "templates/task-start.md"), None);
+        assert_eq!(super::supplied_by(&layers, "templates/briefs/task-start.md"), None);
 
         // Only the kinds that have defaults are layered at all.
         assert!(super::is_layered("templates/partials/reporting.md"));
@@ -623,7 +642,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         write(
             dir.path(),
-            "templates/agent-session.md",
+            "templates/briefs/agent-session.md",
             "---\nfor: agent-session\n---\nOur way: {goal}\n",
         );
         let b = brief(
@@ -635,7 +654,7 @@ mod tests {
             b.source,
             Source::Root {
                 key: "acme-eng".into(),
-                path: "templates/agent-session.md".into()
+                path: "templates/briefs/agent-session.md".into()
             }
         );
         assert_eq!(b.text(), "Our way: ship it");
@@ -645,7 +664,7 @@ mod tests {
     fn a_flow_the_root_does_not_override_falls_through() {
         // Overriding one flow must not mean supplying all six.
         let dir = tempfile::tempdir().expect("tempdir");
-        write(dir.path(), "templates/agent-session.md", "Ours: {goal}");
+        write(dir.path(), "templates/briefs/agent-session.md", "Ours: {goal}");
         let b = brief(Flow::SpecDraft, &[("acme-eng", dir.path())], &Vars::new());
         assert_eq!(b.source, Source::Builtin);
     }
@@ -655,7 +674,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         write(
             dir.path(),
-            "templates/agent-session.md",
+            "templates/briefs/agent-session.md",
             "---\nfor: agent-session\n---\n\n",
         );
         let b = brief(Flow::AgentSession, &[("acme-eng", dir.path())], &Vars::new());
@@ -679,7 +698,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         write(
             dir.path(),
-            "templates/agent-session.md",
+            "templates/briefs/agent-session.md",
             "{goal} and {mystery}",
         );
         let b = brief(
