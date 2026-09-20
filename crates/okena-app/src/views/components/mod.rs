@@ -2,6 +2,7 @@
 //!
 //! This module contains reusable components:
 //! - Simple input field
+//! - The add-a-root form Settings and the Roots page share
 //! - Path auto-complete input
 //! - Modal backdrop and content builders
 //! - Dropdown select component
@@ -9,6 +10,7 @@
 //! - Syntax highlighting utilities
 //! - Virtualized code view
 
+pub mod add_root_form;
 pub mod dropdown;
 pub mod file_icon;
 pub mod launch_pickers;

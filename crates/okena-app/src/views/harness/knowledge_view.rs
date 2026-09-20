@@ -321,6 +321,7 @@ impl HarnessPane {
                             }
                             this.knowledge.root_key = key;
                             this.knowledge.stores = Some(stores);
+                            this.prune_knowledge_order(cx);
                             match tree {
                                 Some(Ok(tree)) => {
                                     this.knowledge.tree = Some(tree);
@@ -350,6 +351,34 @@ impl HarnessPane {
             });
         })
         .detach();
+    }
+
+    /// Drop keys for roots that are no longer discovered from the saved order.
+    ///
+    /// A listing is the only moment okena learns that a root has gone — it was
+    /// unregistered, or its project left the workspace — so it is the moment
+    /// to forget where it used to sit. A root whose checkout is merely missing
+    /// is still discovered, so it keeps its place.
+    ///
+    /// Nothing is written unless something actually dropped, and an empty or
+    /// failed listing is left alone: "no roots came back" must not be read as
+    /// "arrange nothing".
+    fn prune_knowledge_order(&mut self, cx: &mut Context<Self>) {
+        let Some(stores) = self.knowledge.stores.as_ref() else {
+            return;
+        };
+        if stores.roots.is_empty() {
+            return;
+        }
+        let settings = crate::settings::settings_entity(cx);
+        let saved = settings.read(cx).settings.harness.knowledge.order.clone();
+        if saved.is_empty() {
+            return;
+        }
+        let kept = okena_core::knowledge_order::normalize(&stores.roots, &saved);
+        if kept != saved {
+            settings.update(cx, |state, cx| state.set_knowledge_root_order(kept, cx));
+        }
     }
 
     fn select_knowledge_root(&mut self, key: String, cx: &mut Context<Self>) {
@@ -757,7 +786,15 @@ impl HarnessPane {
             .border_r_1()
             .border_color(rgb(t.border));
 
-        col = col.child(self.kn_section_label("Roots".into(), cx));
+        // The roots are listed here, so this is where you add and arrange
+        // them (QBL-429).
+        col = col.child(self.tree_heading_with_add(
+            "Roots",
+            "knowledge-roots-page",
+            "Add or arrange roots",
+            |this, _window, cx| this.open_roots_page(cx),
+            cx,
+        ));
         for root in &stores.roots {
             col = col.child(self.render_knowledge_root_row(root, cx));
         }
@@ -1209,12 +1246,25 @@ impl HarnessPane {
                     .map(|d| self.kn_diagnostic(d, cx)),
             )
             .child(self.field_hint_text(&format!("Store registry: {}", stores.registry_path), cx))
-            .child(h_flex().pt(px(6.0)).child(self.small_button(
-                "knowledge-open-settings",
-                "Open knowledge settings",
-                cx.listener(|this, _, _window, cx| this.open_settings("knowledge", cx)),
-                cx,
-            )))
+            // The sidebar's `+` opens the Roots page, but with no roots there
+            // is no sidebar — and this is exactly when you came to add one.
+            .child(
+                h_flex()
+                    .pt(px(6.0))
+                    .gap(px(6.0))
+                    .child(self.primary_button(
+                        "knowledge-add-root",
+                        "Add a root",
+                        cx.listener(|this, _, _window, cx| this.open_roots_page(cx)),
+                        cx,
+                    ))
+                    .child(self.small_button(
+                        "knowledge-open-settings",
+                        "Open knowledge settings",
+                        cx.listener(|this, _, _window, cx| this.open_settings("knowledge", cx)),
+                        cx,
+                    )),
+            )
             .into_any_element()
     }
 
@@ -1291,8 +1341,14 @@ impl HarnessPane {
             view = view.child(self.error_banner(err, cx));
         }
         if stores.roots.is_empty() {
+            // The page is the way out of this state, so it takes the column
+            // when it is open; there is no sidebar to put it beside.
             return view
-                .child(self.render_no_knowledge(&stores, cx))
+                .child(if self.roots.open {
+                    self.render_roots_page(cx)
+                } else {
+                    self.render_no_knowledge(&stores, cx)
+                })
                 .into_any_element();
         }
 
@@ -1312,7 +1368,9 @@ impl HarnessPane {
                 // The form stands where an entry's text stands. It used to
                 // take the whole view, which hid the entries you are meant to
                 // read before adding to them.
-                .child(if self.knowledge_draft.open {
+                .child(if self.roots.open {
+                    self.render_roots_page(cx)
+                } else if self.knowledge_draft.open {
                     self.render_knowledge_draft_form(&stores, cx)
                 } else {
                     self.render_knowledge_document(open_root.as_ref(), cx)

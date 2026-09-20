@@ -14,6 +14,7 @@ mod knowledge_override;
 mod knowledge_view;
 mod markdown;
 mod new_task_form;
+mod roots_page;
 mod sections;
 mod specs_view;
 mod store_git;
@@ -351,6 +352,8 @@ pub struct HarnessPane {
     pub(crate) knowledge_files: file_ops::FileOps,
     /// The projects-and-context dialog a Specs or Knowledge launcher opened.
     pub(crate) context_dialog: Option<context_dialog::ContextTarget>,
+    /// The Roots page the sidebar's `+` opens, for this pane's section.
+    pub(crate) roots: roots_page::RootsPage,
 }
 
 /// Everything a harness pane needs from its window.
@@ -422,6 +425,7 @@ impl HarnessPane {
         let knowledge_refine = doc_agents::DocRefine::new();
         let spec_files = file_ops::FileOps::new(cx);
         let knowledge_files = file_ops::FileOps::new(cx);
+        let roots = roots_page::RootsPage::new(section, cx);
         let mut pane = Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -496,6 +500,7 @@ impl HarnessPane {
             spec_files,
             knowledge_files,
             context_dialog: None,
+            roots,
         };
         match section {
             HarnessSection::Tasks => {
