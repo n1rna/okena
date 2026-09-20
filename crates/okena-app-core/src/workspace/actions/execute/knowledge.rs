@@ -152,6 +152,7 @@ fn execute_at(
             })
         }
         ActionRequest::KnowledgeOverrides { path } => overrides(sources, path),
+        ActionRequest::KnowledgeLayering => layering(sources),
         ActionRequest::KnowledgeOverride { root, path } => override_into(sources, root, path),
         ActionRequest::KnowledgeStoreClone { url, path } => match git::clone_store(
             registry,
@@ -290,6 +291,80 @@ fn candidates(sources: &Sources) -> Vec<KnowledgeRoot> {
         .into_iter()
         .filter(|r| r.healthy && !r.builtin)
         .collect()
+}
+
+/// Every healthy root, in layering order, with okena's own last.
+///
+/// The layers are [`candidates`] — resolution's own order, which is discovery's
+/// — and okena's defaults are appended rather than left out. They are not a
+/// layer: the store holds a readable copy of the built-ins, which resolution
+/// reaches as its compiled-in last resort. Last is therefore exactly where a
+/// list of "who holds a copy of this" has to put them, and it is what makes
+/// "the default is what applies" a state the list can show.
+fn layer_order(sources: &Sources) -> Vec<KnowledgeRoot> {
+    let all = discovered(sources).roots;
+    let (builtin, layers): (Vec<_>, Vec<_>) = all
+        .into_iter()
+        .filter(|r| r.healthy)
+        .partition(|r| r.builtin);
+    layers.into_iter().chain(builtin).collect()
+}
+
+/// Which roots hold a copy of each layered file, and which copy is applied.
+///
+/// One answer for every root at once: a template's detail page lists the roots
+/// holding a copy, and the sidebar marks the templates that have an override,
+/// so asking per file would be a request per row (QBL-426).
+///
+/// A copy is a file that exists. What is *applied* is the first root that
+/// supplies it, which is resolution's own rule and not the same thing — an
+/// empty file is a placeholder, not an answer, and falls through to the layer
+/// below. Saying both is what lets the view tell you your placeholder is doing
+/// nothing.
+fn layering(sources: &Sources) -> ActionResult {
+    let roots = layer_order(sources);
+    let mut paths: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    for root in &roots {
+        for rel in tree::layered_paths(Path::new(&root.path)) {
+            paths.entry(rel).or_default();
+        }
+    }
+    let listed: serde_json::Map<String, serde_json::Value> = paths
+        .into_keys()
+        .map(|rel| {
+            let copies: Vec<&KnowledgeRoot> = roots
+                .iter()
+                .filter(|r| Path::new(&r.path).join(&rel).is_file())
+                .collect();
+            let applied = copies
+                .iter()
+                .find(|r| prompts::supplies(Path::new(&r.path), &rel))
+                .map(|r| r.key.clone());
+            let value = serde_json::json!({
+                "copies": copies.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
+                "applied": applied,
+            });
+            (rel, value)
+        })
+        .collect();
+    ActionResult::Ok(Some(serde_json::json!({
+        "roots": roots.iter().map(root_line).collect::<Vec<_>>(),
+        "paths": listed,
+    })))
+}
+
+/// One root as the layering answer names it.
+fn root_line(root: &KnowledgeRoot) -> serde_json::Value {
+    serde_json::json!({
+        "key": root.key,
+        "name": root.name,
+        "kind": match root.kind {
+            KnowledgeRootKind::Store => "store",
+            KnowledgeRootKind::Project => "project",
+        },
+        "builtin": root.builtin,
+    })
 }
 
 /// Copy okena's default for `path` into `root`, at the same path.
@@ -1313,6 +1388,103 @@ mod tests {
         let readme = ask("README.md");
         assert_eq!(readme["layered"], false);
         assert!(readme["winner"].is_null(), "{readme}");
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn layering_lists_every_root_holding_a_copy_with_okenas_own_last() {
+        let (sandbox, defaults) = with_defaults("layering", "acme");
+        // A second store, so there is an order to follow rather than a winner
+        // by default. Its id sorts after `acme`, which is the order the
+        // registry lists them in and so the order the layers come in.
+        store(&sandbox.join("zeta"), "zeta");
+        okena_knowledge::registry::register(
+            &registry(&sandbox),
+            &sandbox.join("zeta").to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        let ask = || -> serde_json::Value {
+            ok!(run(&sandbox, &[], ActionRequest::KnowledgeLayering))
+        };
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|k| k.as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // The order is the layers' own, and okena's store is last: it is not a
+        // layer, it is the fallback made readable.
+        let out = ask();
+        let listed: Vec<&str> = out["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed, ["store:acme", "store:zeta", DEFAULTS_KEY], "{out}");
+        let stores: KnowledgeStores = ok!(run(&sandbox, &[], ActionRequest::KnowledgeStores));
+        let discovery: Vec<&str> = stores
+            .roots
+            .iter()
+            .filter(|r| r.healthy && !r.builtin)
+            .map(|r| r.key.as_str())
+            .collect();
+        assert_eq!(&listed[..discovery.len()], discovery.as_slice(), "{out}");
+        assert_eq!(out["roots"][2]["builtin"], true);
+
+        // Nobody overrides the brief yet, so okena's own copy is the one
+        // applied — and it is the only copy there is.
+        let at = |out: &serde_json::Value, path: &str| out["paths"][path].clone();
+        let brief = at(&out, TEMPLATE);
+        assert_eq!(keys(&brief["copies"]), [DEFAULTS_KEY], "{brief}");
+        assert_eq!(brief["applied"], DEFAULTS_KEY);
+
+        // Both stores take a copy. They are listed in layering order, and the
+        // first one is what a launch reads.
+        write(&sandbox.join("zeta").join(TEMPLATE), "Zeta drafts it");
+        write(&sandbox.join("acme").join(TEMPLATE), "Acme drafts it");
+        let brief = at(&ask(), TEMPLATE);
+        assert_eq!(
+            keys(&brief["copies"]),
+            ["store:acme", "store:zeta", DEFAULTS_KEY],
+            "{brief}"
+        );
+        assert_eq!(brief["applied"], "store:acme");
+
+        // Delete the winning copy and the highlight moves down the order.
+        std::fs::remove_file(sandbox.join("acme").join(TEMPLATE)).unwrap();
+        let brief = at(&ask(), TEMPLATE);
+        assert_eq!(keys(&brief["copies"]), ["store:zeta", DEFAULTS_KEY]);
+        assert_eq!(brief["applied"], "store:zeta");
+
+        // An empty copy is a placeholder, not an answer: it is listed as a
+        // copy, and what applies is still the layer below it.
+        write(&sandbox.join("acme").join(TEMPLATE), "---\nfor: x\n---\n");
+        let brief = at(&ask(), TEMPLATE);
+        assert_eq!(
+            keys(&brief["copies"]),
+            ["store:acme", "store:zeta", DEFAULTS_KEY]
+        );
+        assert_eq!(brief["applied"], "store:zeta");
+
+        // With every override gone, okena's default applies again.
+        std::fs::remove_file(sandbox.join("acme").join(TEMPLATE)).unwrap();
+        std::fs::remove_file(sandbox.join("zeta").join(TEMPLATE)).unwrap();
+        let brief = at(&ask(), TEMPLATE);
+        assert_eq!(keys(&brief["copies"]), [DEFAULTS_KEY]);
+        assert_eq!(brief["applied"], DEFAULTS_KEY);
+
+        // A partial and a skill layer the same way; a doc is not layered at
+        // all and is not in the answer.
+        let out = ask();
+        assert!(out["paths"]["templates/partials/reporting.md"].is_object(), "{out}");
+        assert!(out["paths"]["skills/project-map/SKILL.md"].is_object(), "{out}");
+        assert!(out["paths"]["docs/readme.md"].is_null(), "{out}");
+        assert!(out["paths"]["README.md"].is_null(), "{out}");
+        assert!(defaults.join(TEMPLATE).is_file());
         std::fs::remove_dir_all(&sandbox).ok();
     }
 

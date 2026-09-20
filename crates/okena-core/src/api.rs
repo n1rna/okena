@@ -2037,6 +2037,19 @@ pub enum ActionRequest {
     KnowledgeOverrides {
         path: String,
     },
+    /// Which roots hold a copy of each layered file, and which copy is applied.
+    ///
+    /// The whole picture at once rather than one file at a time, because both
+    /// things that need it need it for a list: a template's detail page names
+    /// every root holding a copy, and the sidebar marks each template that has
+    /// an override (QBL-426). Replies with `{ roots: [{ key, name, kind,
+    /// builtin }], paths: { "<path in a root>": { copies: [key…], applied } }
+    /// }`. `roots` is layering order — every healthy root, okena's own last,
+    /// since it is not a layer but the compiled-in fallback made readable.
+    /// `copies` are the roots where the file exists, in that order, and
+    /// `applied` is the first one a launch would actually read, which is not
+    /// the first copy when an earlier one is empty.
+    KnowledgeLayering,
     /// Copy a file from okena's defaults into `root`, at the same path.
     ///
     /// How a default is changed: the copy is yours to edit, and resolution

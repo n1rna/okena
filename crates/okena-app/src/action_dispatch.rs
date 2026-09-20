@@ -1254,6 +1254,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::KnowledgeFileDelete { .. }
         | ActionRequest::KnowledgeOverrides { .. }
         | ActionRequest::KnowledgeOverride { .. }
+        | ActionRequest::KnowledgeLayering
         | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreRegister { .. }
         | ActionRequest::KnowledgeStoreUnregister { .. }

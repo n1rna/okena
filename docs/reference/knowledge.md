@@ -219,6 +219,17 @@ used by OpenSpec stores, is described in
     holding one row per file — and a filter over titles, names, paths,
     descriptions and tags.
     Markdown entries render formatted, and a skill lists its supporting files.
+    A template one of your roots holds a copy of is marked `override` when
+    that copy is what a launch reads, and `default` when a copy exists but
+    okena's own is still what is sent — an empty file is a placeholder, not an
+    answer. A template only okena has is not marked.
+  - **Copies:** an opened template, partial or skill lists every root holding
+    a copy of it, in [layering order](#resolution) and ending in
+    `okena-defaults`, with the copy a launch actually reads highlighted and
+    labelled **applied**. Each one opens that root's copy. The list follows
+    the roots: reorder them and the highlight moves, delete the winning copy
+    and it moves to the next. A doc or an agent has no list — nothing
+    overrides them.
   - **Editing:** an opened file can be edited and saved with `cmd-s`
     (`ctrl-s`). A Markdown file toggles between **Edit** (the source) and
     **Preview**; any other file opens straight in the editor. A file with
@@ -530,7 +541,9 @@ is removed on the next start, so the store never shows a brief no launch reads.
   okena copies the file there at the same path, ready to edit, and
   [resolution](#resolution) then prefers it. A root that already has the file
   is opened rather than overwritten, and the picker says when a copy would lose
-  to a root that comes earlier. Deleting your copy restores okena's.
+  to a root that comes earlier. Deleting your copy restores okena's. Which
+  roots already hold a copy, and which one is applied, is the **Copies** list
+  above — on a default and on your own copy alike.
 
 ## Limits
 
