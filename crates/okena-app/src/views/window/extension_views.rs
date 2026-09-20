@@ -44,7 +44,8 @@ impl WindowView {
                 }
             }
             None => {
-                self.extensions_page = Some(cx.new(|cx| ExtensionsPage::new(open, cx)));
+                let broker = self.request_broker.clone();
+                self.extensions_page = Some(cx.new(|cx| ExtensionsPage::new(open, broker, cx)));
             }
         }
         okena_workspace::harness_state::set_active_extension(

@@ -1649,7 +1649,15 @@ pub enum ActionRequest {
     AgentStartSession {
         /// The user's own description of what the agent should do. Becomes its
         /// opening prompt.
+        ///
+        /// Required for a free-form session, which is nothing without it.
+        /// Optional under a `brief`, whose flow says the standing part.
         goal: String,
+        /// The standing job this session is for, which picks the flow its
+        /// brief comes from. `None` is a free-form session, briefed by
+        /// `agent-session` against `goal` alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        brief: Option<crate::harness::SessionBrief>,
         /// Short name for the session. Empty derives one from the goal.
         #[serde(default)]
         name: String,
@@ -3089,6 +3097,7 @@ mod tests {
             },
             ActionRequest::AgentStartSession {
                 goal: "g".into(),
+                brief: None,
                 name: String::new(),
                 root: String::new(),
                 project_ids: vec!["p1".into()],

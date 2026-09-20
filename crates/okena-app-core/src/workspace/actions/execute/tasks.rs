@@ -13,6 +13,7 @@ use super::briefs::{self, PromptRoots};
 use crate::workspace::focus::FocusManager;
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{WindowId, Workspace};
+use okena_core::harness::SessionBrief;
 use okena_core::tasks::{TaskAuthState, TaskAuthStatusResponse, TaskProviderStatus};
 use okena_knowledge::prompts::{Flow, Vars};
 use okena_tasks::provider::{AuthStatus, Credential, TaskError, TaskProvider};
@@ -2844,11 +2845,16 @@ mod agent_override_tests {
 /// Shares every mechanism with the task and spec routes — a session project, an
 /// agent launched with okena's MCP wired in — and differs only in where the
 /// brief comes from. Kept here beside `start_work` so the three stay in step.
+///
+/// `brief` names a standing job — building an extension — whose flow says
+/// everything but what the user typed. Without one this is a session against
+/// the goal alone, which is therefore required.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start_custom_session(
     ws: &mut Workspace,
     window_id: WindowId,
     goal: String,
+    brief: Option<SessionBrief>,
     name: String,
     root: String,
     project_ids: Vec<String>,
@@ -2864,7 +2870,7 @@ pub(super) fn start_custom_session(
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
     let goal = goal.trim().to_string();
-    if goal.is_empty() {
+    if goal.is_empty() && brief.is_none() {
         return ActionResult::Err("describe what the agent should do first".into());
     }
 
@@ -2888,7 +2894,7 @@ pub(super) fn start_custom_session(
         return ActionResult::Err(format!("working directory not found: {root}"));
     }
 
-    let label = session_label(&name, &goal);
+    let label = session_label(&name, &goal, brief);
     let display = label.clone();
     // Resolved before the session exists, from this side's roots: a ref whose
     // item has gone since the user picked it is dropped, not trusted.
@@ -2928,13 +2934,25 @@ pub(super) fn start_custom_session(
     let command = super::agent_context::launch_command(settings, agent_command.as_deref());
     let install = super::agent_context::install(&command, &context_items);
     let prompts = briefs::prompt_roots(&ws.data.projects, settings);
-    let brief = custom_brief(&goal, &context, &context_items, install.loaded(), &prompts);
+    let flow = session_flow(brief);
+    let opening = custom_brief(
+        flow,
+        &goal,
+        &context,
+        &context_items,
+        install.loaded(),
+        &prompts,
+    );
     // A client that briefed the agent itself — break-down, refine, draft a
     // task — resolved that brief's model and sends it as the pick.
-    let model = briefs::launch_model(Flow::AgentSession, &prompts, model);
-    if let Some(shell) =
-        custom_agent_shell(settings, agent_command.as_deref(), &brief, &install, &model)
-        && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id)
+    let model = briefs::launch_model(flow, &prompts, model);
+    if let Some(shell) = custom_agent_shell(
+        settings,
+        agent_command.as_deref(),
+        &opening,
+        &install,
+        &model,
+    ) && let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id)
     {
         p.default_shell = Some(shell);
     }
@@ -3005,10 +3023,18 @@ fn expand_home(p: &str) -> String {
 ///
 /// The user's name if they gave one; otherwise the first few words of the goal,
 /// because a session listed as the whole paragraph is unreadable in a sidebar.
-fn session_label(name: &str, goal: &str) -> String {
+fn session_label(name: &str, goal: &str, brief: Option<SessionBrief>) -> String {
     let name = name.trim();
     if !name.is_empty() {
         return name.to_string();
+    }
+    // A standing brief with nothing typed still has a name: its own.
+    if goal.trim().is_empty()
+        && let Some(brief) = brief
+    {
+        return match brief {
+            SessionBrief::ExtensionBuild => "extension".to_string(),
+        };
     }
     let mut label: String = goal
         .split_whitespace()
@@ -3026,12 +3052,26 @@ fn session_label(name: &str, goal: &str) -> String {
     }
 }
 
+/// The flow a custom session is briefed by: its standing job's, or the
+/// free-form one.
+pub(super) fn session_flow(brief: Option<SessionBrief>) -> Flow {
+    match brief {
+        None => Flow::AgentSession,
+        Some(SessionBrief::ExtensionBuild) => Flow::ExtensionBuild,
+    }
+}
+
 /// The opening prompt for a custom session.
 ///
-/// The goal verbatim, plus the projects the user pointed the agent at. The
-/// paths matter: the session may be rooted above them, where "the project" is
-/// ambiguous until they are named.
+/// What the user typed verbatim, plus the projects they pointed the agent at.
+/// The paths matter: the session may be rooted above them, where "the project"
+/// is ambiguous until they are named.
+///
+/// The typed text fills the one variable its flow names for it — `goal` for a
+/// free-form session, `summary` for a standing brief, where it is a block
+/// because it may be empty.
 pub(super) fn custom_brief(
+    flow: Flow,
     goal: &str,
     context: &[(String, String)],
     context_items: &[okena_core::context::ContextItem],
@@ -3039,7 +3079,10 @@ pub(super) fn custom_brief(
     prompts: &PromptRoots,
 ) -> String {
     let mut vars = Vars::new();
-    vars.insert("goal", goal.to_string());
+    match flow {
+        Flow::AgentSession => vars.insert("goal", goal.to_string()),
+        _ => vars.insert("summary", briefs::block(goal)),
+    };
     vars.insert(
         "context",
         briefs::context_block(context_items, loaded, prompts),
@@ -3048,9 +3091,7 @@ pub(super) fn custom_brief(
         "projects",
         briefs::project_block("given-projects", context, prompts),
     );
-    briefs::build(Flow::AgentSession, prompts, &vars)
-        .rendered
-        .text
+    briefs::build(flow, prompts, &vars).rendered.text
 }
 
 /// The opening prompt for starting work on a task.
@@ -3977,8 +4018,10 @@ mod delete_workspace_tests {
 
 #[cfg(test)]
 mod custom_session_tests {
-    use super::{custom_brief, resolve_session_root, session_label};
+    use super::{custom_brief, resolve_session_root, session_flow, session_label};
     use crate::workspace::persistence::AppSettings;
+    use okena_core::harness::SessionBrief;
+    use okena_knowledge::prompts::Flow;
 
     fn ctx(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -4041,7 +4084,7 @@ mod custom_session_tests {
     #[test]
     fn a_name_is_used_verbatim() {
         assert_eq!(
-            session_label("Refactor auth", "some long goal"),
+            session_label("Refactor auth", "some long goal", None),
             "Refactor auth"
         );
     }
@@ -4050,14 +4093,19 @@ mod custom_session_tests {
     fn without_a_name_the_label_is_the_first_few_words() {
         // A session listed as a whole paragraph is unreadable in a sidebar.
         let goal = "Migrate the billing service off the legacy queue and delete the shim";
-        let label = session_label("", goal);
+        let label = session_label("", goal, None);
         assert_eq!(label, "Migrate the billing service off the");
         assert!(label.len() <= 48);
     }
 
     #[test]
     fn an_empty_goal_still_gets_a_label() {
-        assert_eq!(session_label("", ""), "agent");
+        assert_eq!(session_label("", "", None), "agent");
+        // A standing brief with nothing typed is named after itself.
+        assert_eq!(
+            session_label("", "", Some(SessionBrief::ExtensionBuild)),
+            "extension"
+        );
     }
 
     #[test]
@@ -4065,6 +4113,7 @@ mod custom_session_tests {
         // The session may be rooted above them, where "the project" is
         // ambiguous until they are named.
         let b = custom_brief(
+            Flow::AgentSession,
             "Do the thing",
             &ctx(&[("okena", "/p/okena")]),
             &[],
@@ -4076,11 +4125,57 @@ mod custom_session_tests {
     }
 
     #[test]
+    fn an_extension_build_session_is_briefed_by_its_own_flow() {
+        // The Extensions page's launch: the summary is wrapped in the
+        // standing brief rather than being the whole of it.
+        assert_eq!(session_flow(None), Flow::AgentSession);
+        assert_eq!(
+            session_flow(Some(SessionBrief::ExtensionBuild)),
+            Flow::ExtensionBuild
+        );
+
+        let b = custom_brief(
+            Flow::ExtensionBuild,
+            "a widget that shows the build queue",
+            &ctx(&[("okena", "/p/okena")]),
+            &[],
+            false,
+            &Vec::new(),
+        );
+        assert!(b.contains("a widget that shows the build queue"), "{b}");
+        assert!(b.contains("docs/reference/extensions.md"), "{b}");
+        assert!(b.contains("examples/extension-template"), "{b}");
+        assert!(b.contains("wasm32-wasip2"), "{b}");
+        assert!(b.contains("/p/okena"), "the projects it was given: {b}");
+        // The block variables land in the prose, not as `{summary}` in it.
+        assert!(!b.contains("{summary}") && !b.contains("{projects}"), "{b}");
+    }
+
+    #[test]
+    fn an_extension_build_session_starts_without_a_summary() {
+        // The summary is optional, so the brief has to stand on its own —
+        // and leave no hole where it would have been.
+        let b = custom_brief(Flow::ExtensionBuild, "", &[], &[], false, &Vec::new());
+        assert!(b.starts_with("Build an okena extension.\n\n"), "{b}");
+        assert!(b.contains("docs/reference/extensions.md"), "{b}");
+        let reporting = okena_knowledge::prompts::defaults::partial_body("reporting")
+            .expect("reporting partial");
+        assert!(b.contains(&reporting), "{b}");
+    }
+
+    #[test]
     fn a_brief_without_projects_is_the_goal_and_the_reporting_rule() {
         // No project list and no context block when none were given — and,
         // like every brief, how to look context up and how to report when it
         // stops to wait.
-        let b = custom_brief("Do the thing", &[], &[], false, &Vec::new());
+        let b = custom_brief(
+            Flow::AgentSession,
+            "Do the thing",
+            &[],
+            &[],
+            false,
+            &Vec::new(),
+        );
         let lookup = okena_knowledge::prompts::defaults::partial_body("context-lookup")
             .expect("context-lookup partial");
         let reporting = okena_knowledge::prompts::defaults::partial_body("reporting")

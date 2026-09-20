@@ -328,6 +328,34 @@ pub struct PushedBranch {
     pub branch: String,
 }
 
+/// What a free-form session is being started to build, which decides the
+/// brief it opens with.
+///
+/// Absent — every session but one — is a session against a goal the person
+/// typed, briefed by the `agent-session` flow. A variant here names a flow
+/// whose brief wraps that text in a standing job, so the client that opens
+/// the launcher does not have to carry the prose.
+///
+/// Not [`AgentPurpose`]: that records which card lists the session
+/// afterwards. This one is only read while starting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionBrief {
+    /// Building an okena extension from a summary, started from the
+    /// Extensions page. Briefed by the `extension-build` flow.
+    ExtensionBuild,
+}
+
+impl SessionBrief {
+    /// The launch flow this brief comes from, as templates and launchers
+    /// name it.
+    pub const fn flow_id(self) -> &'static str {
+        match self {
+            SessionBrief::ExtensionBuild => "extension-build",
+        }
+    }
+}
+
 /// What an agent session was started for: which card started it, and on what.
 ///
 /// Set by the daemon when it starts the session, so every card lists exactly

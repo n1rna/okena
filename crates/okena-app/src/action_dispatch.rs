@@ -1125,6 +1125,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         // Project ids are client-side and must be stripped for the daemon.
         ActionRequest::AgentStartSession {
             goal,
+            brief,
             name,
             root,
             project_ids,
@@ -1136,6 +1137,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             context,
         } => ActionRequest::AgentStartSession {
             goal,
+            brief,
             name,
             root,
             project_ids: project_ids.iter().map(|id| s(id)).collect(),

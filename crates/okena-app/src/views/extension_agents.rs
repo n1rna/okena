@@ -41,6 +41,8 @@ pub fn launch(
                     None => format!("Agent from {}", extension.ext.name),
                 }),
                 goal: agent.goal.clone(),
+                // The extension wrote the goal; no standing brief wraps it.
+                brief: None,
                 name: agent.name.clone().unwrap_or_default(),
                 task: None,
                 root: agent.root.clone().unwrap_or_default(),

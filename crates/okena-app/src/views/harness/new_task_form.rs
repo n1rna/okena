@@ -268,6 +268,9 @@ impl HarnessPane {
                     .post_action(ActionRequest::AgentStartSession {
                         context,
                         goal,
+                        // Already the whole brief, rendered here: nothing for
+                        // the daemon to wrap it in.
+                        brief: None,
                         name,
                         root: String::new(),
                         // Context only: named in the brief, never given
@@ -622,6 +625,7 @@ impl HarnessPane {
                     .post_action(ActionRequest::AgentStartSession {
                         context: Vec::new(),
                         goal,
+                        brief: None,
                         name,
                         root: String::new(),
                         project_ids: Vec::new(),

@@ -22,6 +22,7 @@ Why this shape: [ADR-0007](../decisions/0007-wasm-extensions.md).
 | Native views, Settings → Extensions | `crates/okena-views-extensions` |
 | Example library | `examples/extension-library` |
 | Template | `examples/extension-template` |
+| The `extension-build` brief the Build an extension button launches with | `crates/okena-knowledge/src/prompts/templates/briefs/extension-build.md` |
 
 ## A library repo
 
@@ -294,6 +295,30 @@ To ship a prebuilt component, copy the built `.wasm` to `extension.wasm` next to
 the manifest and commit it; installs then skip building.
 
 The template in `examples/extension-template` is a starting point.
+
+## Build an extension with an agent
+
+Writing one is a doc-reading job — this page, the template, the
+`wasm32-wasip2` target — so the **Extensions** page's header has a **Build an
+extension** button that hands it to an agent instead.
+
+It opens the agent launcher: you type a summary of the extension (optional —
+without one the agent asks), pick the agent, model, working directory,
+projects and context as usual, and start. The working directory is where the
+agent creates the extension's folder.
+
+The brief comes from the `extension-build`
+[launch flow](knowledge.md#flows), so the launcher's chip reads
+`extension-build · <model>` and a knowledge root can replace it with its own
+`templates/briefs/extension-build.md`. okena's built-in tells the agent to read this
+page, start from `examples/extension-template`, read
+`examples/extension-library` for worked examples, and build for
+`wasm32-wasip2`.
+
+The agent stops at a folder that is ready to install; installing stays with
+you, because it means approving the extension's permissions. Install it from
+Settings → Extensions → Install an extension → **From a local folder**, as
+above.
 
 ## Wire and API
 

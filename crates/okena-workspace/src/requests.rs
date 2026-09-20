@@ -152,6 +152,10 @@ pub struct NewAgentPrefill {
     /// Replaces the dialog's "New agent" heading.
     pub heading: Option<String>,
     pub goal: String,
+    /// The standing job the session is for, when the dialog was opened for
+    /// one. It names the flow the brief comes from, which the launcher's chip
+    /// shows, and makes `goal` the optional summary that flow wraps.
+    pub brief: Option<okena_core::harness::SessionBrief>,
     pub name: String,
     /// Task the session is about, carried through to the start.
     pub task: Option<okena_core::tasks::TaskRef>,

@@ -58,6 +58,12 @@ pub enum Flow {
     DocumentRefine,
     /// A free-form session against a goal the user typed.
     AgentSession,
+    /// Building an okena extension from a summary the user typed, started
+    /// from the Extensions page. Apart from [`Flow::AgentSession`] because
+    /// the brief is the point: the docs, the template and the target an
+    /// extension is built against are the same every time, and only the
+    /// summary changes.
+    ExtensionBuild,
     /// Writing or updating a repository's project map (ADR-0005).
     ProjectScan,
     /// Finding the links between several repositories and writing each into
@@ -84,6 +90,7 @@ impl Flow {
             Flow::KnowledgeDraft => "knowledge-draft",
             Flow::DocumentRefine => "doc-refine",
             Flow::AgentSession => "agent-session",
+            Flow::ExtensionBuild => "extension-build",
             Flow::ProjectScan => "project-scan",
             Flow::ProjectsScan => "projects-scan",
         }
@@ -104,6 +111,7 @@ impl Flow {
             Flow::KnowledgeDraft => "Write knowledge",
             Flow::DocumentRefine => "Change a document",
             Flow::AgentSession => "Free-form session",
+            Flow::ExtensionBuild => "Build an extension",
             Flow::ProjectScan => "Map a project",
             Flow::ProjectsScan => "Link projects",
         }
@@ -217,6 +225,9 @@ impl Flow {
             ],
             Flow::KnowledgeDraft => &["request", "path", "what", "commit_note", "context"],
             Flow::AgentSession => &["goal", "projects", "context"],
+            // `summary` rather than `goal`: it is optional, and what it
+            // describes is the extension, not the session.
+            Flow::ExtensionBuild => &["summary", "projects", "context"],
             Flow::ProjectScan => &[
                 "project", "path",     // The knowledge root the map goes into.
                 "map_root", // Absolute path of the `project-map` SKILL.md to follow.
@@ -246,6 +257,7 @@ impl Flow {
             Flow::KnowledgeDraft,
             Flow::DocumentRefine,
             Flow::AgentSession,
+            Flow::ExtensionBuild,
             Flow::ProjectScan,
             Flow::ProjectsScan,
         ]
