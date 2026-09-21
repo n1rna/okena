@@ -502,11 +502,24 @@ impl ResolvedBackend {
     }
 }
 
-fn session_backend_output(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+/// A command for a session-backend tool (`tmux`, `screen`, `dtach`), with the
+/// extended PATH on macOS.
+///
+/// An app bundle inherits a minimal PATH — `/usr/bin:/bin:/usr/sbin:/sbin` —
+/// which misses Homebrew, so a bare `tmux` spawn fails with `NotFound`. Every
+/// caller reads that as "no session" and falls back to the attach process, so
+/// the PATH has to be extended here rather than left to the caller.
+pub(crate) fn session_backend_command(program: &str) -> std::process::Command {
+    #![allow(unused_mut)]
     let mut command = crate::process::command(program);
-    command.args(args);
     #[cfg(target_os = "macos")]
     command.env("PATH", get_extended_path());
+    command
+}
+
+fn session_backend_output(program: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut command = session_backend_command(program);
+    command.args(args);
     crate::process::safe_output(&mut command)
 }
 

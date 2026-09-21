@@ -4,9 +4,9 @@ use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_extensions::{ExtensionSettingsStore, ThemeColors};
 use okena_usage::{
-    SegmentUnit, UsageRow, effective_time_pct, read_working_days, render_simple_bar,
-    render_usage_row, usage_body_container, usage_divider, usage_kv_row, usage_popover_container,
-    usage_popover_header, usage_trigger_items,
+    SegmentUnit, TriggerItem, UsageRow, WorkingDays, effective_time_pct, read_working_days,
+    render_simple_bar, render_usage_row, usage_body_container, usage_divider, usage_kv_row,
+    usage_popover_container, usage_popover_header, usage_trigger_items,
 };
 use parking_lot::Mutex;
 #[cfg(target_os = "macos")]
@@ -947,59 +947,77 @@ fn render_extra_usage_row(t: &ThemeColors, cx: &App, extra: &ExtraUsage) -> impl
         .child(render_simple_bar(t, extra.utilization))
 }
 
+/// The figures the status bar previews, left to right.
+///
+/// Rate-limit tiers come first, as the limits an account is actually spending
+/// against. An enterprise account has none of them — its whole allowance is
+/// the monthly extra-usage budget — so when no tier is shown that budget
+/// becomes the headline, rather than leaving a bare icon that says nothing
+/// until it is hovered.
+fn trigger_items(d: &UsageData, working: WorkingDays) -> Vec<TriggerItem> {
+    let mut items: Vec<TriggerItem> = Vec::new();
+    if let Some(tier) = d.five_hour.as_ref() {
+        let et = effective_time_pct(
+            tier.reset_epoch,
+            tier.period_secs,
+            Some(SegmentUnit::Hour),
+            working,
+            tier.time_elapsed_pct,
+        );
+        items.push(("5h".into(), tier.utilization, et));
+    }
+    if let Some(tier) = d.seven_day.as_ref() {
+        let et = effective_time_pct(
+            tier.reset_epoch,
+            tier.period_secs,
+            Some(SegmentUnit::Day),
+            working,
+            tier.time_elapsed_pct,
+        );
+        items.push(("7d".into(), tier.utilization, et));
+    }
+    for scoped in d
+        .weekly_scoped
+        .iter()
+        .filter(|scoped| should_show_scoped_in_trigger(scoped))
+    {
+        let tier = &scoped.tier;
+        let et = effective_time_pct(
+            tier.reset_epoch,
+            tier.period_secs,
+            Some(SegmentUnit::Day),
+            working,
+            tier.time_elapsed_pct,
+        );
+        items.push((scoped.label.clone().into(), tier.utilization, et));
+    }
+
+    if items.is_empty()
+        && let Some(extra) = d.extra_usage.as_ref()
+        && extra.is_enabled
+        && extra.monthly_limit > 0.0
+    {
+        // No reset is reported for the monthly budget, so there is no pace to
+        // compare against — the colour comes from the figure alone.
+        items.push(("Extra".into(), extra.utilization, None));
+    }
+
+    items
+}
+
 impl Render for ClaudeUsage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
 
         let working = read_working_days(cx);
         let data = self.data.read(cx).data.lock();
-        let mut items: Vec<(SharedString, f64, Option<f64>)> = Vec::new();
-        match data.as_ref() {
-            Some(d) => {
-                if let Some(tier) = d.five_hour.as_ref() {
-                    let et = effective_time_pct(
-                        tier.reset_epoch,
-                        tier.period_secs,
-                        Some(SegmentUnit::Hour),
-                        working,
-                        tier.time_elapsed_pct,
-                    );
-                    items.push(("5h".into(), tier.utilization, et));
-                }
-                if let Some(tier) = d.seven_day.as_ref() {
-                    let et = effective_time_pct(
-                        tier.reset_epoch,
-                        tier.period_secs,
-                        Some(SegmentUnit::Day),
-                        working,
-                        tier.time_elapsed_pct,
-                    );
-                    items.push(("7d".into(), tier.utilization, et));
-                }
-                for scoped in d
-                    .weekly_scoped
-                    .iter()
-                    .filter(|scoped| should_show_scoped_in_trigger(scoped))
-                {
-                    let tier = &scoped.tier;
-                    let et = effective_time_pct(
-                        tier.reset_epoch,
-                        tier.period_secs,
-                        Some(SegmentUnit::Day),
-                        working,
-                        tier.time_elapsed_pct,
-                    );
-                    items.push((scoped.label.clone().into(), tier.utilization, et));
-                }
-            }
-            None => {
-                drop(data);
-                // Wake the fetch loop once (e.g. after toggle on/off or if the
-                // first fetch failed). Only one signal is sent to avoid retry storms.
-                self.data.read(cx).wake_if_no_data();
-                return div().size_0().into_any_element();
-            }
-        }
+        let Some(items) = data.as_ref().map(|d| trigger_items(d, working)) else {
+            drop(data);
+            // Wake the fetch loop once (e.g. after toggle on/off or if the
+            // first fetch failed). Only one signal is sent to avoid retry storms.
+            self.data.read(cx).wake_if_no_data();
+            return div().size_0().into_any_element();
+        };
         drop(data);
 
         let entity_handle = cx.entity().clone();
@@ -1155,6 +1173,64 @@ mod tests {
         let ts = reset_in_50s.strftime("%Y-%m-%dT%H:%M:%S.000Z").to_string();
         let pct = compute_time_elapsed_pct(&ts, 100.0).unwrap();
         assert!((pct - 50.0).abs() < 5.0, "Expected ~50%, got: {}", pct);
+    }
+
+    /// An enterprise account is billed against a monthly budget and reports no
+    /// session or weekly tier at all, so without this the status bar shows a
+    /// bare icon and the figure is only reachable by hovering.
+    #[test]
+    fn an_enterprise_budget_is_the_headline_when_no_tier_is() {
+        let usage = parse_usage(&serde_json::json!({
+            "extra_usage": {
+                "is_enabled": true,
+                "monthly_limit": 150000.0,
+                "used_credits": 92146.0,
+                "utilization": 61.43
+            }
+        }));
+
+        let items = trigger_items(&usage, WorkingDays::all());
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].0, "Extra");
+        assert_eq!(items[0].1, 61.43);
+        assert_eq!(items[0].2, None, "a monthly budget reports no pace");
+    }
+
+    /// On a plan that has both, the budget stays out of the bar: the tiers are
+    /// what that account actually runs out of.
+    #[test]
+    fn a_budget_stays_behind_the_tiers_it_supplements() {
+        let usage = parse_usage(&serde_json::json!({
+            "five_hour": { "utilization": 10.0, "resets_at": "2026-07-07T14:00:00.000Z" },
+            "extra_usage": {
+                "is_enabled": true,
+                "monthly_limit": 150000.0,
+                "used_credits": 92146.0,
+                "utilization": 61.43
+            }
+        }));
+
+        let labels: Vec<_> = trigger_items(&usage, WorkingDays::all())
+            .into_iter()
+            .map(|(label, _, _)| label)
+            .collect();
+        assert_eq!(labels, vec!["5h"], "{labels:?}");
+    }
+
+    /// A budget that is switched off, or has no limit to measure against, is
+    /// no headline either — the bar stays as empty as it was.
+    #[test]
+    fn a_budget_with_nothing_to_measure_is_not_shown() {
+        for extra in [
+            serde_json::json!({ "is_enabled": false, "monthly_limit": 150000.0 }),
+            serde_json::json!({ "is_enabled": true, "monthly_limit": 0.0 }),
+        ] {
+            let usage = parse_usage(&serde_json::json!({ "extra_usage": extra.clone() }));
+            assert!(
+                trigger_items(&usage, WorkingDays::all()).is_empty(),
+                "{extra}"
+            );
+        }
     }
 
     #[test]
