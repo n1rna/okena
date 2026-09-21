@@ -863,6 +863,7 @@ mod hook_action_tests {
             },
         );
         let project = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: "Project p1".to_string(),
             path: "/tmp/test".to_string(),
@@ -1343,6 +1344,7 @@ mod set_show_in_overview_tests {
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),

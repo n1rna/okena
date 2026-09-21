@@ -121,7 +121,7 @@ impl SettingsPanel {
     fn knowledge_fingerprint(cx: &App) -> String {
         format!(
             "{:?}",
-            settings_entity(cx).read(cx).settings.harness.knowledge
+            settings_entity(cx).read(cx).settings.active_space().knowledge
         )
     }
 
@@ -634,7 +634,7 @@ impl SettingsPanel {
         let discovery = settings_entity(cx)
             .read(cx)
             .settings
-            .harness
+            .active_space()
             .knowledge
             .clone();
         let stores = self.knowledge.stores.clone();

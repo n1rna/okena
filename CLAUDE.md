@@ -44,10 +44,10 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 
 | Crate | Purpose |
 |-------|---------|
-| `okena-state` | Pure data types: `WorkspaceData`, `ProjectData`, `FolderData`, `WindowState`, `HooksConfig`, `Toast`. No GPUI. |
+| `okena-state` | Pure data types: `WorkspaceData`, `ProjectData`, `FolderData`, `WindowState`, `HooksConfig`, `Toast`. No GPUI. Each project and folder records the **space** it is in. |
 | `okena-layout` | `LayoutNode` recursive tree + algorithms (split/normalize/merge_visual_state) |
 | `okena-hooks` | Lifecycle hook execution (`HookRunner`, `HookMonitor`). Decoupled from `okena-workspace`. |
-| `okena-workspace` | `Workspace` entity, persistence, settings, sessions, action methods. Reactor-agnostic via `WorkspaceCx` (gpui optional). |
+| `okena-workspace` | `Workspace` entity, persistence, settings, sessions, action methods, spaces (`spaces.rs`). Reactor-agnostic via `WorkspaceCx` (gpui optional). |
 | `okena-terminal` | PTY management, shell config, session backends |
 | `okena-git` | Git status, diff parsing, worktree operations |
 | `okena-theme` | Theming system (built-in + custom themes) |
@@ -58,7 +58,7 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-review` | What a comparison is made of: path-based file roles, and the test split that moves `#[cfg(test)]` volume out of implementation — both inline scopes and whole files gated by a `mod` declaration elsewhere |
 | `okena-markdown` | Markdown parsing and rendering |
 | `okena-views-terminal` | Terminal pane, layout container, split/tabs views |
-| `okena-views-sidebar` | Sidebar, project list, folder list, drag-and-drop |
+| `okena-views-sidebar` | Sidebar, space selector, project list, folder list, drag-and-drop |
 | `okena-views-git` | Diff viewer, worktree dialog, git status UI |
 | `okena-views-remote` | Remote connection dialogs |
 | `okena-views-services` | Service panel views |
@@ -73,7 +73,7 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-ext-usage` | Usage extension: Claude, Codex and Copilot limits on the status bar, which agents chosen in its settings |
 | `okena-ext-status` | Status extension: Claude, Codex, GitHub and GitLab status pages on the status bar, which services chosen in its settings |
 | `okena-ext-updater` | Self-update system |
-| `okena-core` | Shared data types only (no networking): wire schema (`api`), WS message types (`ws`), profiles, theme colors, process bus, key handling. Depended on by every crate. |
+| `okena-core` | Shared data types only (no networking): wire schema (`api`), WS message types (`ws`), profiles, spaces (`spaces`, `connections`), theme colors, process bus, key handling. Depended on by every crate. |
 | `okena-transport` | Networking/transport over the `okena-core` schema: async client engine (WS connection + TLS pinning, `client` feature) and blocking HTTP + `remote_action` (`blocking-http` feature). Holds the heavy optional deps (tokio/reqwest/tungstenite/rustls) split out of `okena-core`. |
 | `okena-mobile-ffi` | uniffi FFI surface for the React Native mobile app (`mobile/rn`); self-contained ConnectionManager / TerminalHolder engine over `okena-core` |
 | `okena-app` | Desktop UI/app layer: GPUI views, app coordinator, keybindings, action dispatch. The `okena` binary is a thin shell over this. |
@@ -111,6 +111,8 @@ Project docs live in [`docs/`](./docs/) and follow a fixed structure — start a
 [`docs/INDEX.md`](./docs/INDEX.md) (the map). In short:
 
 - `docs/reference/` — how the system works now.
+  ([`spaces.md`](docs/reference/spaces.md) first if you are wondering why a
+  sidebar shows one set of projects and not another.)
 - `docs/decisions/` — ADRs (the *why*), immutable.
 - `docs/backlog/` — decided work not yet scheduled · `docs/sprints/` — active
   work-plans · `docs/archive/` — shipped.

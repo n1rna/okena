@@ -7,15 +7,59 @@ use super::{
     FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusSidebar, FocusTaskSearch, FocusUp,
     FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate, JumpToNextFailedCommand,
     JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt, MinimizeTerminal,
-    NewProject, NewWindow, OpenSettingsFile, Paste, Quit, ResetZoom, RestartDaemon, ReviewChanges,
+    NewProject, NewWindow, NextSpace, OpenSettingsFile, Paste, PreviousSpace, Quit, ResetZoom,
+    RestartDaemon, ReviewChanges,
     SaveDocument, ScrollDown, ScrollUp, Search, SearchNext, SearchPrev, SendEscape,
     ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch, ShowDiffViewer, ShowFileSearch,
     ShowHarness, ShowHookLog, ShowKeybindings, ShowLogConsole, ShowProfileManager,
     ShowProjectSwitcher, ShowSessionManager, ShowSettings, ShowThemeSelector, SplitHorizontal,
     SplitVertical, StartAllServices, StopAllServices, ToggleFullscreen, TogglePaneSwitcher,
     ToggleOverviewSearch, ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
-    ToggleUnread, ZoomIn, ZoomOut,
+    SwitchToSpace1, SwitchToSpace2, SwitchToSpace3, SwitchToSpace4, SwitchToSpace5,
+    SwitchToSpace6, SwitchToSpace7, SwitchToSpace8, SwitchToSpace9, ToggleUnread, ZoomIn, ZoomOut,
 };
+
+/// Names for the nine numbered space actions, in position order.
+///
+/// Spelled out because `ActionDescription` holds `&'static str`s and a boxed
+/// action factory — neither can be built from a loop variable.
+const SPACE_SWITCH_NAMES: [&str; 9] = [
+    "Switch to space 1",
+    "Switch to space 2",
+    "Switch to space 3",
+    "Switch to space 4",
+    "Switch to space 5",
+    "Switch to space 6",
+    "Switch to space 7",
+    "Switch to space 8",
+    "Switch to space 9",
+];
+
+const SPACE_SWITCH_DESCRIPTIONS: [&str; 9] = [
+    "Switch to the first space (always Default)",
+    "Switch to the second space",
+    "Switch to the third space",
+    "Switch to the fourth space",
+    "Switch to the fifth space",
+    "Switch to the sixth space",
+    "Switch to the seventh space",
+    "Switch to the eighth space",
+    "Switch to the ninth space",
+];
+
+type ActionFactory = fn() -> Box<dyn gpui::Action>;
+
+const SPACE_SWITCH_FACTORIES: [ActionFactory; 9] = [
+    || Box::new(SwitchToSpace1),
+    || Box::new(SwitchToSpace2),
+    || Box::new(SwitchToSpace3),
+    || Box::new(SwitchToSpace4),
+    || Box::new(SwitchToSpace5),
+    || Box::new(SwitchToSpace6),
+    || Box::new(SwitchToSpace7),
+    || Box::new(SwitchToSpace8),
+    || Box::new(SwitchToSpace9),
+];
 
 /// Get human-readable descriptions for all actions
 pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
@@ -431,6 +475,35 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
             factory: || Box::new(ShowSessionManager),
         },
     );
+    map.insert(
+        "NextSpace",
+        ActionDescription {
+            name: "Next space",
+            description: "Switch to the next space, wrapping at the end",
+            category: "Spaces",
+            factory: || Box::new(NextSpace),
+        },
+    );
+    map.insert(
+        "PreviousSpace",
+        ActionDescription {
+            name: "Previous space",
+            description: "Switch to the previous space, wrapping at the start",
+            category: "Spaces",
+            factory: || Box::new(PreviousSpace),
+        },
+    );
+    for (action, n) in crate::keybindings::SPACE_SWITCH_ACTIONS {
+        map.insert(
+            action,
+            ActionDescription {
+                name: SPACE_SWITCH_NAMES[n - 1],
+                description: SPACE_SWITCH_DESCRIPTIONS[n - 1],
+                category: "Spaces",
+                factory: SPACE_SWITCH_FACTORIES[n - 1],
+            },
+        );
+    }
     map.insert(
         "ShowHarness",
         ActionDescription {

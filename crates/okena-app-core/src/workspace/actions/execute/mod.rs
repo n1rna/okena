@@ -52,7 +52,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use context::{context_catalog, read_in_scope, session_scope};
-pub use knowledge::{execute_knowledge_action, knowledge_project_sources};
+pub use knowledge::{execute_knowledge_action, knowledge_project_sources, knowledge_sources};
 pub use project::{
     MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
 };
@@ -143,8 +143,12 @@ pub fn execute_task_provider_action(action: &ActionRequest) -> Option<ActionResu
             api_key,
             organization_url,
         } => tasks::connect_api_key(provider.clone(), api_key.clone(), organization_url.clone()),
-        ActionRequest::TasksList { provider } => tasks::list(provider.clone()),
-        ActionRequest::TaskContainers { provider } => tasks::containers(provider.clone()),
+        ActionRequest::TasksList { provider, scope } => {
+            tasks::list(provider.clone(), scope)
+        }
+        ActionRequest::TaskContainers { provider, scope } => {
+            tasks::containers(provider.clone(), scope)
+        }
         ActionRequest::TaskCreate {
             provider,
             title,
@@ -1032,7 +1036,7 @@ pub fn execute_action(
         | ActionRequest::KnowledgeStoreCommit { .. }
         | ActionRequest::KnowledgeStorePush { .. }) => knowledge::execute_knowledge_action(
             &action,
-            &knowledge::knowledge_project_sources(&ws.data.projects, settings),
+            &knowledge::knowledge_sources(&ws.data.projects, settings),
             settings,
         )
         .unwrap_or_else(|| ActionResult::Err("not a knowledge action".into())),
@@ -1259,6 +1263,24 @@ pub fn execute_action(
         | ActionRequest::ExtensionAgentTools { .. }
         | ActionRequest::ExtensionConfirm { .. } => {
             ActionResult::Err("extension actions must be handled by the daemon".to_string())
+        }
+
+        // Spaces and task connections span settings.json and workspace.json,
+        // and only the daemon holds both. The command loop runs them.
+        ActionRequest::SpaceCreate { .. }
+        | ActionRequest::SpaceRename { .. }
+        | ActionRequest::SpaceContents { .. }
+        | ActionRequest::SpaceDelete { .. }
+        | ActionRequest::SpaceActivate { .. }
+        | ActionRequest::SpaceStep { .. }
+        | ActionRequest::SpaceActivateNth { .. }
+        | ActionRequest::SpaceSetConnection { .. }
+        | ActionRequest::SpaceSetFilters { .. }
+        | ActionRequest::TaskConnections
+        | ActionRequest::TaskConnectionAdd { .. }
+        | ActionRequest::TaskConnectionRename { .. }
+        | ActionRequest::TaskConnectionRemove { .. } => {
+            ActionResult::Err("space actions must be handled by the daemon".to_string())
         }
     }
 }
@@ -2020,6 +2042,7 @@ mod reconnect_shell_tests {
         terminal_id: Option<&str>,
     ) -> Workspace {
         let project = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "project".into(),
             name: "Project".into(),
             path: "/project".into(),

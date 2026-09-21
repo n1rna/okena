@@ -44,6 +44,7 @@ pub(super) fn prompt_roots(
     layers_of(&discover::discover(&Sources {
         registry_path: okena_knowledge::registry::registry_path(&get_config_dir()),
         projects: super::knowledge::knowledge_project_sources(projects, settings),
+        stores: settings.active_space().knowledge.stores.clone(),
     }))
 }
 

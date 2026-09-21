@@ -57,8 +57,38 @@ actions!(
         SaveDocument,
         FocusTaskSearch,
         ToggleOverviewSearch,
+        // Spaces (QBL-430). Nine numbered actions rather than one taking an
+        // argument: `actions!` generates zero-sized types, and a numbered
+        // action has to be nameable in keybindings.json to be rebindable.
+        NextSpace,
+        PreviousSpace,
+        SwitchToSpace1,
+        SwitchToSpace2,
+        SwitchToSpace3,
+        SwitchToSpace4,
+        SwitchToSpace5,
+        SwitchToSpace6,
+        SwitchToSpace7,
+        SwitchToSpace8,
+        SwitchToSpace9,
     ]
 );
+
+/// The numbered space actions, by the position each jumps to (counting from 1).
+///
+/// One list so the bindings, the descriptions and the dispatch cannot drift —
+/// a tenth space action added to only two of the three would fail silently.
+pub const SPACE_SWITCH_ACTIONS: [(&str, usize); 9] = [
+    ("SwitchToSpace1", 1),
+    ("SwitchToSpace2", 2),
+    ("SwitchToSpace3", 3),
+    ("SwitchToSpace4", 4),
+    ("SwitchToSpace5", 5),
+    ("SwitchToSpace6", 6),
+    ("SwitchToSpace7", 7),
+    ("SwitchToSpace8", 8),
+    ("SwitchToSpace9", 9),
+];
 
 // Terminal-specific actions (defined in okena-views-terminal crate)
 pub use okena_views_terminal::actions::{
@@ -453,6 +483,17 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "ShowKeybindings" => Some(KeyBinding::new(keystroke, ShowKeybindings, context)),
         "ShowSessionManager" => Some(KeyBinding::new(keystroke, ShowSessionManager, context)),
         "ShowHarness" => Some(KeyBinding::new(keystroke, ShowHarness, context)),
+        "NextSpace" => Some(KeyBinding::new(keystroke, NextSpace, context)),
+        "PreviousSpace" => Some(KeyBinding::new(keystroke, PreviousSpace, context)),
+        "SwitchToSpace1" => Some(KeyBinding::new(keystroke, SwitchToSpace1, context)),
+        "SwitchToSpace2" => Some(KeyBinding::new(keystroke, SwitchToSpace2, context)),
+        "SwitchToSpace3" => Some(KeyBinding::new(keystroke, SwitchToSpace3, context)),
+        "SwitchToSpace4" => Some(KeyBinding::new(keystroke, SwitchToSpace4, context)),
+        "SwitchToSpace5" => Some(KeyBinding::new(keystroke, SwitchToSpace5, context)),
+        "SwitchToSpace6" => Some(KeyBinding::new(keystroke, SwitchToSpace6, context)),
+        "SwitchToSpace7" => Some(KeyBinding::new(keystroke, SwitchToSpace7, context)),
+        "SwitchToSpace8" => Some(KeyBinding::new(keystroke, SwitchToSpace8, context)),
+        "SwitchToSpace9" => Some(KeyBinding::new(keystroke, SwitchToSpace9, context)),
         "SaveDocument" => Some(KeyBinding::new(keystroke, SaveDocument, context)),
         "FocusTaskSearch" => Some(KeyBinding::new(keystroke, FocusTaskSearch, context)),
         "ShowThemeSelector" => Some(KeyBinding::new(keystroke, ShowThemeSelector, context)),

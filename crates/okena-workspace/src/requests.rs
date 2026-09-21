@@ -265,4 +265,13 @@ pub enum WorkbenchRequest {
         provider: String,
         external_id: String,
     },
+    /// Open the form that adds a space: a name, a task backend connection
+    /// (reused or new) and the filters to scope it to.
+    AddSpace,
+    /// Rename a space. Never Default, which the selector does not offer it on.
+    RenameSpace { space_id: String },
+    /// Confirm deleting a space, after naming the projects and agents in it.
+    DeleteSpace { space_id: String },
+    /// Edit a space's task backend connection and its filters.
+    EditSpaceTasks { space_id: String },
 }

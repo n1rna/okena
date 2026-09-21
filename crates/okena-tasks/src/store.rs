@@ -1,12 +1,20 @@
-//! Credential storage, one file per profile.
+//! Connection and credential storage, one file per profile.
 //!
 //! Lives at `<profile root>/tasks_credentials.json`, mode 0600 — the same
 //! at-rest treatment `remote_secret` gets, and per-profile for the same reason:
 //! a `dev` profile must not read the credentials a `default` profile holds.
 //!
-//! Only the credential is persisted. Task lists are remote state and are never
-//! written to disk — a stale cached issue list is worse than an empty one.
+//! Only the connections and their credentials are persisted. Task lists are
+//! remote state and are never written to disk — a stale cached issue list is
+//! worse than an empty one.
+//!
+//! Credentials are keyed by **connection id**, not by provider kind. Before
+//! spaces there was one login per kind and the two were the same string, so a
+//! file written then still reads: every `providers` key names a connection
+//! whose kind is that same id ([`connections_of`]), which is why nobody has to
+//! sign in again after the update.
 
+use okena_core::connections::{Connection, mint_id};
 use crate::provider::Credential;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -14,12 +22,53 @@ use std::path::PathBuf;
 
 const FILE_NAME: &str = "tasks_credentials.json";
 
-/// On-disk shape. Keyed by provider id (`"linear"`), so adding Jira later needs
-/// no migration.
+/// On-disk shape.
 #[derive(Default, Serialize, Deserialize)]
 struct CredentialFile {
+    /// Credentials by connection id. Named `providers` because that is what
+    /// the key meant when the file was first written, and renaming it would
+    /// cost every existing profile its login for nothing.
     #[serde(default)]
     providers: HashMap<String, StoredCredential>,
+    /// The connections themselves, in the order they were added. Absent in a
+    /// file written before spaces — see [`connections_of`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    connections: Vec<Connection>,
+}
+
+/// The connections a file describes, in display order.
+///
+/// A `providers` key with no listed connection is one from before spaces: it
+/// becomes a connection whose id and kind are that key, named after the
+/// backend. Nothing is written back here — the list is materialized the first
+/// time something actually edits it, so merely reading a profile never
+/// rewrites its credential file.
+fn connections_of(file: &CredentialFile) -> Vec<Connection> {
+    let mut out = file.connections.clone();
+    // Deterministic order for the synthesized ones: the kinds this build
+    // knows, in display order, then anything else alphabetically.
+    let mut loose: Vec<&String> = file
+        .providers
+        .keys()
+        .filter(|id| !out.iter().any(|c| &&c.id == id))
+        .collect();
+    loose.sort_by_key(|id| {
+        (
+            crate::KNOWN_PROVIDERS
+                .iter()
+                .position(|k| k == &id.as_str())
+                .unwrap_or(usize::MAX),
+            (*id).clone(),
+        )
+    });
+    for id in loose {
+        out.push(Connection::new(
+            id.clone(),
+            id.clone(),
+            okena_core::connections::kind_display_name(id),
+        ));
+    }
+    out
 }
 
 #[derive(Serialize, Deserialize)]
@@ -158,6 +207,66 @@ pub fn clear(provider: &str) -> Result<(), String> {
     write_file(&at, &file)
 }
 
+/// Every connection this profile holds, in display order.
+pub fn connections() -> Vec<Connection> {
+    let Some(at) = path() else {
+        return Vec::new();
+    };
+    connections_of(&read_file(&at))
+}
+
+/// One connection by id.
+pub fn connection(id: &str) -> Option<Connection> {
+    connections().into_iter().find(|c| c.id == id)
+}
+
+/// Add a connection to `kind`, named `name`, and return it.
+///
+/// The credential is stored separately, under the returned id — a connection
+/// exists before it is signed in, which is what lets the add-a-space form show
+/// the login form for a connection it has already named.
+pub fn add_connection(kind: &str, name: &str) -> Result<Connection, String> {
+    let at = path().ok_or("no active profile — cannot store connections")?;
+    let mut file = read_file(&at);
+    // Materialize first, so a pre-spaces `linear` credential becomes a listed
+    // connection rather than colliding with the id minted here.
+    let mut existing = connections_of(&file);
+    let taken: Vec<String> = existing.iter().map(|c| c.id.clone()).collect();
+    let added = Connection::new(mint_id(kind, &taken), kind, name);
+    existing.push(added.clone());
+    file.connections = existing;
+    write_file(&at, &file)?;
+    Ok(added)
+}
+
+/// Rename a connection. Unknown ids are an error rather than a silent no-op:
+/// a rename that vanishes is worse than one that says it could not happen.
+pub fn rename_connection(id: &str, name: &str) -> Result<(), String> {
+    let at = path().ok_or("no active profile — cannot store connections")?;
+    let mut file = read_file(&at);
+    let mut existing = connections_of(&file);
+    let Some(entry) = existing.iter_mut().find(|c| c.id == id) else {
+        return Err(format!("no connection called {id}"));
+    };
+    entry.name = name.to_string();
+    file.connections = existing;
+    write_file(&at, &file)
+}
+
+/// Forget a connection and the credential filed under it.
+///
+/// Whether a connection a space still uses may be removed is the caller's
+/// call, not this one's — see the settings page, which refuses and names them.
+pub fn remove_connection(id: &str) -> Result<(), String> {
+    let at = path().ok_or("no active profile — cannot store connections")?;
+    let mut file = read_file(&at);
+    let mut existing = connections_of(&file);
+    existing.retain(|c| c.id != id);
+    file.connections = existing;
+    file.providers.remove(id);
+    write_file(&at, &file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +351,98 @@ mod tests {
         assert!(back.providers.contains_key("linear"));
         // Tagged representation keeps the two kinds distinguishable on disk.
         assert!(json.contains("\"kind\":\"api_key\""), "got {json}");
+    }
+
+    #[test]
+    fn a_credential_file_from_before_spaces_reads_as_one_connection_per_login() {
+        // The whole no-one-signs-in-again promise: the key that used to name a
+        // provider now names a connection to that same provider, holding the
+        // same credential.
+        let json = r#"{"providers":{"linear":{"kind":"api_key","key":"lin_api_1"}}}"#;
+        let file: CredentialFile = serde_json::from_str(json).expect("old file decodes");
+        let connections = connections_of(&file);
+        assert_eq!(
+            connections,
+            vec![Connection::new("linear", "linear", "Linear")]
+        );
+    }
+
+    #[test]
+    fn both_legacy_logins_become_connections_in_display_order() {
+        let json = r#"{"providers":{
+            "azure_devops":{"kind":"personal_access_token","token":"p","organization_url":"https://dev.azure.com/contoso"},
+            "linear":{"kind":"api_key","key":"k"}
+        }}"#;
+        let file: CredentialFile = serde_json::from_str(json).expect("decodes");
+        let ids: Vec<String> = connections_of(&file).into_iter().map(|c| c.id).collect();
+        // KNOWN_PROVIDERS order, not the HashMap's.
+        assert_eq!(ids, ["linear", "azure_devops"]);
+    }
+
+    #[test]
+    fn a_listed_connection_is_not_synthesized_a_second_time() {
+        let mut file = CredentialFile::default();
+        file.connections
+            .push(Connection::new("linear", "linear", "Acme Linear"));
+        file.providers.insert(
+            "linear".into(),
+            StoredCredential::from(&Credential::ApiKey("k".into())),
+        );
+        let connections = connections_of(&file);
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].name, "Acme Linear");
+    }
+
+    #[test]
+    fn a_second_account_of_the_same_kind_sits_beside_the_first() {
+        let mut file = CredentialFile::default();
+        file.providers.insert(
+            "linear".into(),
+            StoredCredential::from(&Credential::ApiKey("k".into())),
+        );
+        file.connections = connections_of(&file);
+        file.connections
+            .push(Connection::new("linear-2", "linear", "Client A Linear"));
+        let ids: Vec<String> = connections_of(&file).into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["linear", "linear-2"]);
+    }
+
+    #[test]
+    fn connections_round_trip_alongside_the_credentials() {
+        let mut f = CredentialFile::default();
+        f.connections
+            .push(Connection::new("linear-2", "linear", "Client A"));
+        f.providers.insert(
+            "linear-2".into(),
+            StoredCredential::from(&Credential::ApiKey("k2".into())),
+        );
+        let json = serde_json::to_string(&f).expect("serialize");
+        let back: CredentialFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.connections, f.connections);
+        assert!(back.providers.contains_key("linear-2"));
+    }
+
+    #[test]
+    fn a_profile_with_no_connections_writes_no_connections_key() {
+        // A file that only ever held a legacy login must not grow a key older
+        // builds would not expect.
+        let mut f = CredentialFile::default();
+        f.providers.insert(
+            "linear".into(),
+            StoredCredential::from(&Credential::ApiKey("k".into())),
+        );
+        let json = serde_json::to_string(&f).expect("serialize");
+        assert!(!json.contains("connections"), "got {json}");
+    }
+
+    #[test]
+    fn an_unknown_kind_keeps_its_own_id_as_its_name() {
+        let mut file = CredentialFile::default();
+        file.providers.insert(
+            "jira".into(),
+            StoredCredential::from(&Credential::ApiKey("k".into())),
+        );
+        assert_eq!(connections_of(&file)[0].name, "jira");
     }
 
     #[test]

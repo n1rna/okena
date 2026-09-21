@@ -1058,6 +1058,7 @@ mod tests {
         did_stash: bool,
     ) -> Workspace {
         let parent = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "parent".into(),
             name: "Parent".into(),
             path: main_repo.to_string_lossy().into_owned(),
@@ -1092,6 +1093,7 @@ mod tests {
             verification_runs: Vec::new(),
         };
         let child = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "wt1".into(),
             name: "Feature".into(),
             path: worktree.to_string_lossy().into_owned(),
@@ -1167,6 +1169,7 @@ mod tests {
 
     fn plain_project(terminal_id: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "project-1".into(),
             name: "Project One".into(),
             path: "/tmp/project-one".into(),

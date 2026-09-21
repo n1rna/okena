@@ -23,11 +23,11 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The heading labels are filed under. Not a [`GroupAxis`]: a label is not a
 /// grouping the provider defines, it is a free tag, and conflating the two
 /// would let a provider define an axis that collides with it.
-pub(super) const LABELS_HEADING: &str = "Labels";
+pub(crate) const LABELS_HEADING: &str = "Labels";
 
 /// The heading statuses are filed under. Status is the provider's own workflow
 /// state, not a grouping it defines, so it is its own facet like labels.
-pub(super) const STATUS_HEADING: &str = "Status";
+pub(crate) const STATUS_HEADING: &str = "Status";
 
 /// What the task list is currently narrowed to.
 ///
@@ -191,7 +191,7 @@ impl TaskFilter {
 
 /// One value you can filter on, and how many of the loaded tasks carry it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct FacetValue {
+pub(crate) struct FacetValue {
     /// What `TaskFilter` stores: a group's provider id, or a label's name.
     pub id: String,
     pub name: String,
@@ -203,7 +203,7 @@ pub(super) struct FacetValue {
 /// Derived from the tasks on screen rather than fetched, so the filter never
 /// offers a choice that would empty the list.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct Facets {
+pub(crate) struct Facets {
     /// Axes in display order, each with its values most-used first.
     pub axes: Vec<(GroupAxis, Vec<FacetValue>)>,
     pub labels: Vec<FacetValue>,
@@ -214,7 +214,7 @@ pub(super) struct Facets {
 }
 
 impl Facets {
-    pub(super) fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.axes.is_empty() && self.labels.is_empty() && self.statuses.is_empty()
     }
 }
@@ -225,7 +225,7 @@ impl Facets {
 /// work in cannot change what you see, and a control that does nothing is
 /// worse than no control. An axis only *some* tasks have is kept — narrowing
 /// to "in a project" genuinely excludes the ones in none.
-pub(super) fn collect_facets(tasks: &[Task]) -> Facets {
+pub(crate) fn collect_facets(tasks: &[Task]) -> Facets {
     let mut by_axis: BTreeMap<GroupAxis, BTreeMap<String, FacetValue>> = BTreeMap::new();
     let mut labels: BTreeMap<String, FacetValue> = BTreeMap::new();
     let mut statuses: BTreeMap<String, FacetValue> = BTreeMap::new();
@@ -294,7 +294,7 @@ pub(super) fn collect_facets(tasks: &[Task]) -> Facets {
 /// "Shipping" — falling back to the normalized category only when the
 /// provider gave no name at all, which would otherwise render as a blank chip
 /// and a blank filter row.
-pub(super) fn status_name(task: &Task) -> &str {
+pub(crate) fn status_name(task: &Task) -> &str {
     if task.state_name.trim().is_empty() {
         task.state.label()
     } else {
@@ -367,6 +367,66 @@ mod tests {
             task("C", vec![project("p1"), iteration("c2")], &["bug", "ui"]),
             task("D", vec![], &["ui"]),
         ]
+    }
+
+    // ---- a space's hard scope (QBL-430) ----
+
+    #[test]
+    fn the_filter_bar_cannot_reach_outside_the_spaces_scope() {
+        // The scope is applied before the view ever sees a task, so the facets
+        // the bar offers are drawn from a list that never held the rest. There
+        // is no selection that brings the other project's tasks back.
+        use okena_core::tasks::TaskScope;
+        let all = vec![
+            task("A-1", vec![TaskGroup::new(GroupAxis::Project, "alpha", "Alpha")], &["infra"]),
+            task("B-1", vec![TaskGroup::new(GroupAxis::Project, "beta", "Beta")], &["ops"]),
+        ];
+        let mut scope = TaskScope::default();
+        scope.toggle_group(GroupAxis::Project, "alpha");
+
+        let visible = scope.apply(all.clone());
+        assert_eq!(visible.len(), 1, "the space only shows its own project");
+
+        // Nothing on offer names the other project…
+        let facets = collect_facets(&visible);
+        let offered: Vec<&str> = facets
+            .axes
+            .iter()
+            .flat_map(|(_, values)| values.iter().map(|v| v.id.as_str()))
+            .collect();
+        assert!(!offered.contains(&"beta"), "got {offered:?}");
+        assert!(!facets.labels.iter().any(|v| v.id == "ops"));
+
+        // …and even selecting it by hand cannot widen past the scope, because
+        // the bar filters the scoped list, not the provider's.
+        let mut filter = TaskFilter::default();
+        filter.toggle_group(GroupAxis::Project, "beta");
+        assert!(
+            visible.iter().filter(|t| filter.matches(t)).count() == 0,
+            "narrowing inside the scope can only ever remove rows"
+        );
+    }
+
+    #[test]
+    fn the_filter_bar_still_narrows_inside_the_scope() {
+        use okena_core::tasks::TaskScope;
+        let all = vec![
+            task("A-1", vec![TaskGroup::new(GroupAxis::Project, "alpha", "Alpha")], &["infra"]),
+            task("A-2", vec![TaskGroup::new(GroupAxis::Project, "alpha", "Alpha")], &["ops"]),
+            task("B-1", vec![TaskGroup::new(GroupAxis::Project, "beta", "Beta")], &["infra"]),
+        ];
+        let mut scope = TaskScope::default();
+        scope.toggle_group(GroupAxis::Project, "alpha");
+        let visible = scope.apply(all);
+
+        let mut filter = TaskFilter::default();
+        filter.toggle_label("infra");
+        let shown: Vec<&str> = visible
+            .iter()
+            .filter(|t| filter.matches(t))
+            .map(|t| t.display_key.as_str())
+            .collect();
+        assert_eq!(shown, ["A-1"]);
     }
 
     #[test]

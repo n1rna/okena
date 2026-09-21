@@ -17,6 +17,21 @@ pub struct FolderData {
     pub project_ids: Vec<String>,
     #[serde(default)]
     pub folder_color: FolderColor,
+    /// The space this folder belongs to. Folders group projects *inside* one
+    /// space's list; a space is above them, so each space has its own.
+    /// Missing means Default, which is what every folder written before
+    /// spaces existed is.
+    #[serde(default = "default_space")]
+    pub space_id: String,
+}
+
+/// The space an item with no recorded one belongs to.
+///
+/// Everything a profile had before spaces is in Default and nothing moves —
+/// this serde default is what makes that true for a `workspace.json` written
+/// by an older build.
+fn default_space() -> String {
+    okena_core::spaces::DEFAULT_SPACE_ID.to_string()
 }
 
 impl ProjectData {
@@ -456,6 +471,10 @@ pub struct ProjectData {
     pub id: String,
     pub name: String,
     pub path: String,
+    /// The space this project belongs to — and, since an agent session *is* a
+    /// project, the space its agent belongs to. Missing means Default.
+    #[serde(default = "default_space")]
+    pub space_id: String,
     /// Layout tree for terminal panes. None means project is a bookmark without terminals.
     pub layout: Option<LayoutNode>,
     #[serde(default)]
@@ -701,6 +720,7 @@ mod tests {
             id: "test-id".to_string(),
             name: "test".to_string(),
             path: path.to_string(),
+            space_id: default_space(),
             layout: None,
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -1055,6 +1075,7 @@ mod tests {
             name: "F".to_string(),
             project_ids: Vec::new(),
             folder_color: Default::default(),
+            space_id: default_space(),
         };
         let saved = serde_json::to_string(&folder).unwrap();
         let value: serde_json::Value = serde_json::from_str(&saved).unwrap();
@@ -1816,6 +1837,7 @@ mod tests {
             name: "Live".to_string(),
             project_ids: Vec::new(),
             folder_color: Default::default(),
+            space_id: default_space(),
         });
 
         // main_window: one live ref + several orphans across every storage.
@@ -2419,6 +2441,7 @@ mod agent_session_tests {
             id: "p1".into(),
             name: "p".into(),
             path: "/tmp/p".into(),
+            space_id: default_space(),
             layout: None,
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -2671,5 +2694,57 @@ mod agent_role_tests {
         badges.sort_unstable();
         badges.dedup();
         assert_eq!(badges.len(), roles.len(), "two roles share a badge");
+    }
+}
+
+#[cfg(test)]
+mod space_id_tests {
+    use super::{FolderData, ProjectData, WorkspaceData};
+
+    #[test]
+    fn a_project_written_before_spaces_belongs_to_default() {
+        // The whole "nothing is lost or moves" promise, at the row level.
+        let json = r#"{
+            "id": "p1", "name": "repo", "path": "/tmp/repo", "layout": null
+        }"#;
+        let p: ProjectData = serde_json::from_str(json).expect("an old row still loads");
+        assert_eq!(p.space_id, "default");
+    }
+
+    #[test]
+    fn a_folder_written_before_spaces_belongs_to_default() {
+        let json = r#"{ "id": "f1", "name": "Work", "project_ids": ["p1"] }"#;
+        let f: FolderData = serde_json::from_str(json).expect("an old folder still loads");
+        assert_eq!(f.space_id, "default");
+    }
+
+    #[test]
+    fn a_whole_workspace_file_from_before_spaces_lands_in_default() {
+        let json = r#"{
+            "version": 1,
+            "projects": [
+                { "id": "p1", "name": "a", "path": "/a", "layout": null },
+                { "id": "p2", "name": "b", "path": "/b", "layout": null }
+            ],
+            "project_order": ["p1", "p2"],
+            "folders": [{ "id": "f1", "name": "Work", "project_ids": [] }]
+        }"#;
+        let data: WorkspaceData = serde_json::from_str(json).expect("an old workspace loads");
+        assert!(data.projects.iter().all(|p| p.space_id == "default"));
+        assert!(data.folders.iter().all(|f| f.space_id == "default"));
+        assert_eq!(data.project_order, ["p1", "p2"]);
+    }
+
+    #[test]
+    fn a_space_id_survives_a_round_trip() {
+        let json = r#"{
+            "id": "p1", "name": "repo", "path": "/tmp/repo", "layout": null,
+            "space_id": "client-a"
+        }"#;
+        let p: ProjectData = serde_json::from_str(json).expect("loads");
+        assert_eq!(p.space_id, "client-a");
+        let saved = serde_json::to_string(&p).expect("serialize");
+        let back: ProjectData = serde_json::from_str(&saved).expect("reload");
+        assert_eq!(back.space_id, "client-a");
     }
 }

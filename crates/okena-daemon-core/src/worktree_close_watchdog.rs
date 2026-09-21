@@ -95,6 +95,7 @@ mod tests {
 
     fn workspace_with_pending_close(terminal_id: &str) -> Workspace {
         let mut project = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "worktree".into(),
             name: "Feature".into(),
             path: std::env::temp_dir().to_string_lossy().into_owned(),

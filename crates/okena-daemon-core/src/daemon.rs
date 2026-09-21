@@ -350,7 +350,11 @@ impl DaemonCore {
         kill_stale_terminal_sessions(backend.as_ref(), &params.stale_terminal_ids);
 
         // ── 3. Workspace + reactor ───────────────────────────────────────────
-        let workspace = Workspace::new(params.workspace_data);
+        let mut workspace = Workspace::new(params.workspace_data);
+        // The active space is persisted in settings; the workspace holds the
+        // copy the action layer stamps new rows with and filters by, so seed it
+        // here, before anything can create a project in the wrong space.
+        workspace.set_active_space(params.settings.active_space.clone());
         // Lifecycle hooks: construct the same services the GUI sets as globals
         // (`HookRunner::new(backend, terminals)` in app/mod.rs, `HookMonitor::new()`
         // in main.rs). The action layer already reaches them through
@@ -895,6 +899,7 @@ mod shutdown_tests {
     fn startup_retains_every_workspace_owned_terminal_kind() {
         let mut data = WorkspaceData::empty();
         let mut project = okena_state::ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: "Project".to_string(),
             path: "/tmp".to_string(),
@@ -1015,6 +1020,7 @@ mod shutdown_tests {
     fn shutdown_drains_terminal_kills_before_saving() {
         let mut data = WorkspaceData::empty();
         let mut project = okena_state::ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: "Project".to_string(),
             path: "/tmp".to_string(),
@@ -1107,6 +1113,7 @@ mod shutdown_tests {
     async fn shutdown_waits_for_backend_migration_before_final_save() {
         let mut data = WorkspaceData::empty();
         data.projects.push(okena_state::ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: "Project".to_string(),
             path: "/tmp".to_string(),

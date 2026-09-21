@@ -51,6 +51,9 @@ pub struct RemoteSyncOutcome {
     /// Terminals to focus (for projects that had a pending CreateTerminal and
     /// whose layout grew a new terminal during this sync).
     pub focus_targets: Vec<RemoteFocusTarget>,
+    /// The space the local daemon says is showing, when its snapshot was in
+    /// this batch. The daemon owns it; the client follows.
+    pub local_active_space: Option<String>,
 }
 
 /// Apply remote connection snapshots to `data`, reconciling materialized remote
@@ -67,7 +70,9 @@ pub fn apply_remote_snapshot(
     remote_sync: &mut RemoteSyncState,
     snapshots: &[RemoteSnapshot],
     window_id: WindowId,
+    active_space: &str,
 ) -> RemoteSyncOutcome {
+    let mut local_active_space: Option<String> = None;
     let mut expected_remote_ids: HashSet<String> = HashSet::new();
     let mut synced_conn_ids: HashSet<String> = HashSet::new();
     let active_conn_ids: HashSet<String> = snapshots.iter().map(|s| s.config.id.clone()).collect();
@@ -77,6 +82,12 @@ pub fn apply_remote_snapshot(
 
         if let Some(ref state) = snap.state {
             synced_conn_ids.insert(conn_id.clone());
+            // Only the local daemon's spaces are this profile's. A snapshot
+            // from another machine describes that machine's spaces, which mean
+            // nothing here.
+            if conn_id == okena_transport::LOCAL_DAEMON_CONNECTION_ID {
+                local_active_space = Some(state.active_space.clone());
+            }
             // Build the server folder lookup
             let server_folder_map: HashMap<&str, &okena_core::api::ApiFolder> =
                 state.folders.iter().map(|f| (f.id.as_str(), f)).collect();
@@ -100,6 +111,16 @@ pub fn apply_remote_snapshot(
                             name: sf.name.clone(),
                             project_ids: prefixed_project_ids,
                             folder_color: sf.folder_color,
+                            // As for projects: the local daemon's folders keep
+                            // their space, another machine's show wherever you
+                            // are.
+                            space_id: if conn_id
+                                == okena_transport::LOCAL_DAEMON_CONNECTION_ID
+                            {
+                                sf.space_id.clone()
+                            } else {
+                                active_space.to_string()
+                            },
                         });
                         remote_order.push(prefixed_folder_id);
                     } else {
@@ -271,6 +292,16 @@ pub fn apply_remote_snapshot(
                         id: prefixed_id.clone(),
                         name: api_project.name.clone(),
                         path: api_project.path.clone(),
+                        // A project from this profile's own daemon belongs to
+                        // the space the daemon put it in. One mirrored from
+                        // another machine belongs to no space of ours, so it
+                        // shows wherever you are — exactly as it did before
+                        // spaces existed.
+                        space_id: if conn_id == okena_transport::LOCAL_DAEMON_CONNECTION_ID {
+                            api_project.space_id.clone()
+                        } else {
+                            active_space.to_string()
+                        },
                         layout,
                         terminal_names,
                         hidden_terminals: HashMap::new(),
@@ -429,7 +460,10 @@ pub fn apply_remote_snapshot(
     data.project_order
         .retain(|id| valid_ids.contains(id.as_str()));
 
-    let mut outcome = RemoteSyncOutcome::default();
+    let mut outcome = RemoteSyncOutcome {
+        local_active_space,
+        ..Default::default()
+    };
 
     // Land the window's focus after a close the daemon has now applied. Resolved
     // by terminal id rather than path: the removal reshapes the tree (tab groups
@@ -565,6 +599,7 @@ fn mirror_verification_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use okena_core::spaces::DEFAULT_SPACE_ID;
     use okena_core::api::{
         ApiFolder, ApiHookTerminalEntry, ApiHookTerminalStatus, ApiLayoutNode, ApiProject,
         StateResponse,
@@ -600,6 +635,7 @@ mod tests {
 
     fn api_project(id: &str, layout: Option<ApiLayoutNode>) -> ApiProject {
         ApiProject {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: format!("proj-{id}"),
             path: format!("/srv/{id}"),
@@ -655,6 +691,8 @@ mod tests {
         folders: Vec<ApiFolder>,
     ) -> StateResponse {
         StateResponse {
+            spaces: Vec::new(),
+            active_space: okena_core::spaces::default_space_id(),
             state_version: 1,
             projects,
             focused_project_id: None,
@@ -665,6 +703,66 @@ mod tests {
             hooks: Vec::new(),
             extensions: Vec::new(),
         }
+    }
+
+    // ---- spaces (QBL-430) ----
+
+    #[test]
+    fn the_local_daemons_projects_keep_the_space_it_put_them_in() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let mut client_a = api_project("a", Some(terminal("ta")));
+        client_a.space_id = "client-a".into();
+        let mut state = state_with(vec![client_a], vec!["a".into()], vec![]);
+        state.active_space = "client-a".into();
+        let snap = RemoteSnapshot {
+            config: config(okena_transport::LOCAL_DAEMON_CONNECTION_ID),
+            state: Some(state),
+        };
+
+        let outcome =
+            apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main, DEFAULT_SPACE_ID);
+
+        assert_eq!(data.projects[0].space_id, "client-a");
+        assert_eq!(outcome.local_active_space.as_deref(), Some("client-a"));
+    }
+
+    #[test]
+    fn another_machines_projects_show_wherever_you_are() {
+        // A remote connection mirrors someone else's profile; its space ids
+        // name spaces that do not exist here, so the rows would vanish if they
+        // were taken at face value.
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let mut theirs = api_project("a", Some(terminal("ta")));
+        theirs.space_id = "their-space".into();
+        let mut folder_owner = api_project("b", Some(terminal("tb")));
+        folder_owner.space_id = "their-space".into();
+        let mut state = state_with(
+            vec![theirs, folder_owner],
+            vec!["a".into(), "f1".into()],
+            vec![ApiFolder {
+                id: "f1".into(),
+                name: "Theirs".into(),
+                project_ids: vec!["b".into()],
+                folder_color: FolderColor::Default,
+                space_id: "their-space".into(),
+            }],
+        );
+        state.active_space = "their-space".into();
+        let snap = RemoteSnapshot {
+            config: config("c1"),
+            state: Some(state),
+        };
+
+        let outcome =
+            apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main, "client-a");
+
+        assert!(data.projects.iter().all(|p| p.space_id == "client-a"), "{:?}",
+            data.projects.iter().map(|p| (&p.id, &p.space_id)).collect::<Vec<_>>());
+        assert!(data.folders.iter().all(|f| f.space_id == "client-a"));
+        // And it does not drag the local selector along with it.
+        assert!(outcome.local_active_space.is_none());
     }
 
     #[test]
@@ -683,7 +781,7 @@ mod tests {
             )),
         };
 
-        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main, DEFAULT_SPACE_ID);
 
         assert_eq!(data.project_order, vec!["remote:c1:a", "remote:c1:b"]);
         let ids: Vec<&str> = data.projects.iter().map(|p| p.id.as_str()).collect();
@@ -727,7 +825,7 @@ mod tests {
             state: Some(state_with(vec![p], vec!["a".into()], vec![])),
         };
 
-        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main, DEFAULT_SPACE_ID);
 
         let proj = &data.projects[0];
         assert!(proj.pinned);
@@ -764,11 +862,11 @@ mod tests {
         };
 
         // Added closed, then updated back open: both paths carry the mark.
-        apply_remote_snapshot(&mut data, &mut rs, &[snap(Some(7), true)], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(Some(7), true)], WindowId::Main, DEFAULT_SPACE_ID);
         assert_eq!(data.projects[0].closed_at, Some(7));
         assert!(rs.snapshot("remote:c1:s").unwrap().cwd_missing);
 
-        apply_remote_snapshot(&mut data, &mut rs, &[snap(None, false)], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(None, false)], WindowId::Main, DEFAULT_SPACE_ID);
         assert_eq!(data.projects[0].closed_at, None);
         assert!(!rs.snapshot("remote:c1:s").unwrap().cwd_missing);
     }
@@ -786,10 +884,10 @@ mod tests {
             }
         };
 
-        apply_remote_snapshot(&mut data, &mut rs, &[snap(&["r1"])], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(&["r1"])], WindowId::Main, DEFAULT_SPACE_ID);
         assert_eq!(data.projects[0].repo_ids, ["remote:c1:r1"]);
 
-        apply_remote_snapshot(&mut data, &mut rs, &[snap(&["r1", "r2"])], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(&["r1", "r2"])], WindowId::Main, DEFAULT_SPACE_ID);
         assert_eq!(data.projects[0].repo_ids, ["remote:c1:r1", "remote:c1:r2"]);
     }
 
@@ -803,6 +901,7 @@ mod tests {
                 vec![api_project("a", None), api_project("b", None)],
                 vec!["f1".into(), "b".into()],
                 vec![ApiFolder {
+                    space_id: okena_core::spaces::default_space_id(),
                     id: "f1".into(),
                     name: "Group".into(),
                     project_ids: vec!["a".into()],
@@ -811,7 +910,7 @@ mod tests {
             )),
         };
 
-        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[snap], WindowId::Main, DEFAULT_SPACE_ID);
 
         assert_eq!(data.project_order, vec!["remote:c1:f1", "remote:c1:b"]);
         assert_eq!(data.folders.len(), 1);
@@ -837,7 +936,7 @@ mod tests {
                 vec![],
             )),
         };
-        apply_remote_snapshot(&mut data, &mut rs, &[first], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[first], WindowId::Main, DEFAULT_SPACE_ID);
 
         // Locally the user switched tabs and zoomed the first terminal.
         if let Some(LayoutNode::Tabs {
@@ -863,7 +962,7 @@ mod tests {
                 vec![],
             )),
         };
-        apply_remote_snapshot(&mut data, &mut rs, &[second], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[second], WindowId::Main, DEFAULT_SPACE_ID);
 
         match data.projects[0].layout.as_ref().unwrap() {
             LayoutNode::Tabs {
@@ -902,7 +1001,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
 
         let Some(LayoutNode::Tabs {
             children,
@@ -937,7 +1037,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
 
         let Some(LayoutNode::Tabs {
             children,
@@ -996,7 +1097,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
 
         assert!(matches!(
             data.projects[0].layout,
@@ -1026,7 +1128,7 @@ mod tests {
                 vec![],
             )),
         };
-        apply_remote_snapshot(&mut data, &mut rs, &[c1, c2], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[c1, c2], WindowId::Main, DEFAULT_SPACE_ID);
         assert_eq!(data.projects.len(), 2);
 
         // Re-sync with only c1 present — c2's projects must be pruned.
@@ -1038,7 +1140,7 @@ mod tests {
                 vec![],
             )),
         };
-        apply_remote_snapshot(&mut data, &mut rs, &[c1_only], WindowId::Main);
+        apply_remote_snapshot(&mut data, &mut rs, &[c1_only], WindowId::Main, DEFAULT_SPACE_ID);
 
         let ids: Vec<&str> = data.projects.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["remote:c1:a"]);
@@ -1062,7 +1164,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
         assert_eq!(data.projects.len(), 1);
 
         // Same connection now reports no state (disconnected).
@@ -1074,7 +1177,8 @@ mod tests {
                 state: None,
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
         assert!(data.projects.is_empty());
         assert!(data.project_order.is_empty());
     }
@@ -1103,7 +1207,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
         if let Some(LayoutNode::Tabs { active_tab, .. }) = data.projects[0].layout.as_mut() {
             *active_tab = 1;
         }
@@ -1123,7 +1228,8 @@ mod tests {
                 state: None,
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
 
         assert!(data.projects.is_empty());
         assert!(rs.preserved_project_layouts().contains_key("remote:c1:a"));
@@ -1147,7 +1253,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
 
         assert_eq!(data.projects.len(), 1);
         assert!(data.main_window.hidden_project_ids.contains("remote:c1:a"));
@@ -1180,7 +1287,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
         data.service_panel_heights
             .insert("remote:c1:a".to_string(), 180.0);
         data.hook_panel_heights
@@ -1194,8 +1302,9 @@ mod tests {
                 state: None,
             }],
             WindowId::Main,
-        );
-        apply_remote_snapshot(&mut data, &mut rs, &[], WindowId::Main);
+        DEFAULT_SPACE_ID,
+    );
+        apply_remote_snapshot(&mut data, &mut rs, &[], WindowId::Main, DEFAULT_SPACE_ID);
 
         assert!(rs.preserved_project_layouts().is_empty());
         assert!(!data.service_panel_heights.contains_key("remote:c1:a"));
@@ -1220,7 +1329,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
 
         // Queue pending focus for the project (as a CreateTerminal dispatch would).
         rs.queue_focus(
@@ -1247,7 +1357,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
 
         assert_eq!(outcome.focus_targets.len(), 1);
         let target = &outcome.focus_targets[0];
@@ -1275,7 +1386,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
         rs.queue_focus(
             WindowId::Main,
             "remote:c1:a",
@@ -1295,7 +1407,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        );
+        DEFAULT_SPACE_ID,
+    );
 
         assert!(outcome.focus_targets.is_empty());
         assert!(rs.drain_pending_focus(WindowId::Main).is_empty());
@@ -1319,7 +1432,8 @@ mod tests {
                 )),
             }],
             WindowId::Main,
-        )
+        DEFAULT_SPACE_ID,
+    )
     }
 
     fn api_tabs(children: Vec<ApiLayoutNode>, active_tab: usize) -> ApiLayoutNode {

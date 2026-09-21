@@ -127,6 +127,7 @@ mod tests {
 
     fn plain_project(id: &str, path: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             task_ref: None,
             also_tasks: Vec::new(),
             repo_ids: Vec::new(),

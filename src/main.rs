@@ -679,6 +679,30 @@ fn main() {
             harness_state,
         ));
 
+        // Shared space-selector state, for the same reason: the app owns
+        // settings, where the spaces live, and the sidebar draws the dots.
+        let spaces_state = cx.new(|_| okena_workspace::spaces_state::SpacesState::new());
+        cx.set_global(okena_workspace::spaces_state::GlobalSpacesState(
+            spaces_state,
+        ));
+        {
+            // Seed it, then keep it in step: adding, renaming, deleting or
+            // switching a space is a settings change, and the selector must
+            // follow every one of them without a restart.
+            let settings = settings::settings_entity(cx);
+            let publish = |entity: &gpui::Entity<settings::SettingsState>, cx: &mut gpui::App| {
+                let held = entity.read(cx);
+                let (spaces, active) = (
+                    held.settings.spaces.clone(),
+                    held.settings.active_space.clone(),
+                );
+                okena_workspace::spaces_state::publish_spaces(spaces, active, cx);
+            };
+            publish(&settings, cx);
+            cx.observe(&settings, move |entity, cx| publish(&entity, cx))
+                .detach();
+        }
+
         // Memory each connected daemon measures for its terminals, filed by
         // the remote manager and read by the status bar, agent panel and sidebar.
         let process_memory =

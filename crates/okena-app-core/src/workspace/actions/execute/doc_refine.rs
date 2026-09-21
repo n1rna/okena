@@ -101,11 +101,11 @@ pub(super) fn refine_knowledge_document(
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
 ) -> ActionResult {
-    let projects = super::knowledge::knowledge_project_sources(&ws.data.projects, settings);
+    let sources = super::knowledge::knowledge_sources(&ws.data.projects, settings);
     let registry = okena_knowledge::registry::registry_path(&get_config_dir());
     // Refining rewrites the file, so okena's own store is refused here for the
     // same reason a save is: the next start would undo whatever the agent did.
-    let root = match super::knowledge::resolve_writable_root(&registry, &projects, Some(&root)) {
+    let root = match super::knowledge::resolve_writable_root(&registry, &sources, Some(&root)) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };

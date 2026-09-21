@@ -41,6 +41,10 @@ Device build (needs Android NDK / Xcode — see `README.md`): `npm run ubrn:andr
   ubrn are validated against npm/yarn.
 - **State: zustand** stores with polling (mirrors the old provider cadence): fast (500ms) while
   connecting, slow (1–2s) when connected.
+- **Spaces** ([reference](../../docs/reference/spaces.md)): `getProjects` / `getFolders` are
+  already limited to the active space **in Rust**, so another space's project never reaches TS.
+  `workspaceStore` polls `getSpaces` / `getActiveSpace` and `SpaceSelector` switches with
+  `activateSpace`. Spaces are added, renamed and deleted on the desktop.
 - **ESLint** enforces correctness only; `prettier/prettier`, `no-bitwise` (cell/ARGB decoding),
   `no-void` (fire-and-forget), and `curly` are off by design (see `.eslintrc.js`).
 - **uniffi ⇄ ubrn version pairing** must match: `uniffi = "0.31"` (crate) ↔

@@ -138,6 +138,7 @@ mod tests {
 
     fn workspace_with_terminal() -> WorkspaceData {
         let project = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: "Project p1".to_string(),
             path: "/tmp".to_string(),

@@ -868,6 +868,26 @@ impl OverlayManager {
         self.open_modal(entity, cx);
     }
 
+    /// Add, rename, re-scope or delete a space.
+    ///
+    /// All four go to the daemon, which owns both files a space spans; the
+    /// dialog closes when the change lands and the selector follows on the
+    /// next snapshot.
+    pub fn show_space_dialog(
+        &mut self,
+        client: okena_transport::remote_action::RemoteActionClient,
+        mode: crate::views::overlays::space_dialog::SpaceDialogMode,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::views::overlays::space_dialog::{SpaceDialog, SpaceDialogEvent};
+        let dialog = cx.new(|cx| SpaceDialog::new(client, mode, cx));
+        cx.subscribe(&dialog, |this, _, event: &SpaceDialogEvent, cx| match event {
+            SpaceDialogEvent::Close => this.close_modal(cx),
+        })
+        .detach();
+        self.open_modal(dialog, cx);
+    }
+
     /// Toggle project switcher overlay.
     pub fn toggle_project_switcher(&mut self, cx: &mut Context<Self>) {
         if self.is_modal::<ProjectSwitcher>() {

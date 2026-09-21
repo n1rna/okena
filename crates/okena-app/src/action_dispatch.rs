@@ -1315,7 +1315,9 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         ActionRequest::ProjectLinks => ActionRequest::ProjectLinks,
         // Task actions carry provider ids, not okena ids, so they cross
         // unchanged.
-        ActionRequest::TaskContainers { provider } => ActionRequest::TaskContainers { provider },
+        ActionRequest::TaskContainers { provider, scope } => {
+            ActionRequest::TaskContainers { provider, scope }
+        }
         ActionRequest::TaskCreate {
             provider,
             title,
@@ -1357,7 +1359,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             organization_url,
         },
         ActionRequest::TasksDisconnect { provider } => ActionRequest::TasksDisconnect { provider },
-        ActionRequest::TasksList { provider } => ActionRequest::TasksList { provider },
+        ActionRequest::TasksList { provider, scope } => ActionRequest::TasksList { provider, scope },
         ActionRequest::AddDiscoveredWorktree {
             parent_project_id,
             worktree_path,
@@ -1806,7 +1808,21 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
         | ActionRequest::ExtensionQuery { .. }
         | ActionRequest::ExtensionAgentCall { .. }
         | ActionRequest::ExtensionAgentTools { .. }
-        | ActionRequest::ExtensionConfirm { .. }) => a,
+        | ActionRequest::ExtensionConfirm { .. }
+        // A space id and a connection id mean the same thing on both sides.
+        | ActionRequest::SpaceCreate { .. }
+        | ActionRequest::SpaceRename { .. }
+        | ActionRequest::SpaceContents { .. }
+        | ActionRequest::SpaceDelete { .. }
+        | ActionRequest::SpaceActivate { .. }
+        | ActionRequest::SpaceStep { .. }
+        | ActionRequest::SpaceActivateNth { .. }
+        | ActionRequest::SpaceSetConnection { .. }
+        | ActionRequest::SpaceSetFilters { .. }
+        | ActionRequest::TaskConnections
+        | ActionRequest::TaskConnectionAdd { .. }
+        | ActionRequest::TaskConnectionRename { .. }
+        | ActionRequest::TaskConnectionRemove { .. }) => a,
     }
 }
 

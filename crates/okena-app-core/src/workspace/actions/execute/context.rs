@@ -24,6 +24,7 @@ pub fn context_catalog(projects: &[ProjectData], settings: &AppSettings) -> Cata
     let knowledge = okena_knowledge::discover::discover(&okena_knowledge::discover::Sources {
         registry_path: okena_knowledge::registry::registry_path(&get_config_dir()),
         projects: super::knowledge::knowledge_project_sources(projects, settings),
+        stores: settings.active_space().knowledge.stores.clone(),
     });
     let specs = okena_openspec::discover::discover(
         &super::specs::dirs(settings),

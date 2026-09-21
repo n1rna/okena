@@ -16,6 +16,30 @@ export interface StateResponse {
   project_order?: string[];
   folders?: ApiFolder[];
   windows?: ApiWindow[];
+  /**
+   * The profile's spaces, in selector order, Default first. Absent from a
+   * daemon that predates spaces.
+   *
+   * `projects` carries rows from every space, so a client has to know which
+   * one is showing to list the right ones — see `space_id` on each project.
+   */
+  spaces?: ApiSpace[];
+  /** Which space is showing. One per profile: switching it here switches it everywhere. */
+  active_space?: string;
+}
+
+/**
+ * A space: a separate set of projects, agents, tasks and roots inside one
+ * profile. Not a "workspace" — okena already uses that word for the one set of
+ * projects and layouts saved per profile.
+ */
+export interface ApiSpace {
+  id: string;
+  name: string;
+  /** The task backend connection it reads, by connection id. */
+  connection?: string | null;
+  /** One of this space's agents is waiting on you. Marks its dot from anywhere. */
+  agent_waiting?: boolean;
 }
 
 export interface ApiProject {
@@ -35,6 +59,8 @@ export interface ApiProject {
   default_shell?: ShellType | null;
   hook_terminals?: ApiHookTerminalEntry[];
   hooks?: ApiHooksConfig;
+  /** The space this project belongs to. Missing means Default. */
+  space_id?: string;
 }
 
 export interface ApiFolder {
@@ -42,6 +68,8 @@ export interface ApiFolder {
   name: string;
   project_ids: string[];
   folder_color?: string;
+  /** The space this folder belongs to. Missing means Default. */
+  space_id?: string;
 }
 
 export type PrState = "Open" | "Merged" | "Closed" | "Draft";
@@ -326,6 +354,8 @@ export type ActionRequest =
   | { action: "git_unstage_file"; project_id: string; file_path: string }
   | { action: "git_discard_file"; project_id: string; file_path: string }
   | { action: "git_blame"; project_id: string; relative_path: string }
+  | { action: "space_activate"; space_id: string }
+  | { action: "space_step"; by: number }
   | { action: "add_project"; name: string; path: string }
   | { action: "clone_project"; url: string; parent_dir: string; directory: string; name: string }
   | { action: "reorder_project_in_folder"; folder_id: string; project_id: string; new_index: number }

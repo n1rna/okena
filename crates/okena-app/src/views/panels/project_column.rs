@@ -1935,6 +1935,7 @@ mod tests {
 
     fn project_with_name(name: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: name.to_string(),
             path: "/tmp/repo-worktree".to_string(),

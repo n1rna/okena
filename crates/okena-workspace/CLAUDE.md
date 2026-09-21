@@ -40,7 +40,9 @@ imports keep working. Same for `crate::settings::HooksConfig`,
 |------|---------|
 | `state.rs` | The `Workspace` coordinator + tests (data types live in `okena-state`) |
 | `persistence.rs` | Load/save `workspace.json`. Validation, migration, layout normalization on load. |
-| `settings.rs` | `AppSettings` schema, debounced auto-save. Re-exports `HooksConfig` from `okena-state`. |
+| `settings.rs` | `AppSettings` schema, debounced auto-save, the `spaces` list + `active_space` and their migration. Re-exports `HooksConfig` from `okena-state` and the per-space root configs from `okena-core`. |
+| `spaces.rs` | Create / rename / delete / activate a space, and what one holds. GPUI-free and pure: a space spans `settings.json` and `workspace.json`, so the rules that cross both live here and the daemon does the writing. See [`docs/reference/spaces.md`](../../docs/reference/spaces.md). |
+| `spaces_state.rs` | The shared space list the sidebar's selector draws, as a global `Entity` (gpui-only) — same shape as `harness_state.rs`. |
 | `hooks.rs` / `hook_monitor.rs` | Re-exports the hook execution surface from `okena-hooks`. |
 | `sessions.rs` | Workspace export/import, named sessions. |
 | `actions/` | Workspace mutations split by domain: project, folder, layout, terminal, focus. All take `&mut impl WorkspaceCx`. |
@@ -53,6 +55,7 @@ imports keep working. Same for `crate::settings::HooksConfig`,
 ## Key Patterns
 
 - **Windows are viewports**: per-window state (hidden set, folder filter, sizes, collapse, bounds) lives on `WindowState` in `okena-state`, not on this entity. See ADR-0002.
+- **Spaces are above folders**: `Workspace::active_space` mirrors `AppSettings::active_space` (which is where it is persisted); `actions/` stamps new rows with it and `visibility.rs` filters by it. Whoever switches spaces writes both, in one action — the action layer must not reach into settings.
 - **RequestBroker**: Decouples workspace actions from UI. Code that needs to show an overlay pushes a request; WindowView observer picks it up. Avoids circular entity dependencies.
 - **Folder model**: Folder IDs go into `project_order` alongside project IDs. Projects inside a folder live in `folder.project_ids`, NOT duplicated in `project_order`.
 - **`#[serde(default)]`**: Used on new fields for backward-compatible workspace.json migration.

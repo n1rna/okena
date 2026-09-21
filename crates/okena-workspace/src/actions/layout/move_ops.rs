@@ -695,6 +695,7 @@ mod tests {
 
     fn project(id: &str, layout: LayoutNode) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             task_ref: None,
             also_tasks: Vec::new(),
             repo_ids: Vec::new(),

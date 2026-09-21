@@ -608,6 +608,10 @@ impl Workspace {
         let parent_layout = parent.layout.clone();
         let parent_hooks = parent.hooks.clone();
         let parent_color = parent.folder_color;
+        // A worktree is a second checkout of a project, so it lives wherever
+        // that project does. Nothing else would make sense: a worktree in
+        // another space than its repo could never be grouped under it.
+        let parent_space = parent.space_id.clone();
 
         // Create new project with cloned layout (or new terminal if parent has no layout)
         let id = uuid::Uuid::new_v4().to_string();
@@ -619,6 +623,7 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: project_path.to_string(),
+            space_id: parent_space,
             // When hooks are deferred the worktree directory doesn't exist yet,
             // so use None (no terminals spawned until creation finishes). Otherwise
             // clone the parent's structure; if the parent has NO layout, still seed
@@ -788,9 +793,9 @@ impl Workspace {
     ) -> Result<String, String> {
         // For monorepo projects, resolve the subdirectory offset so the
         // project path points to the right place inside the worktree.
-        let parent_path = self
+        let (parent_path, parent_space) = self
             .project(parent_id)
-            .map(|p| p.path.clone())
+            .map(|p| (p.path.clone(), p.space_id.clone()))
             .ok_or_else(|| "Parent project not found".to_string())?;
         let (git_root, subdir) =
             okena_git::resolve_git_root_and_subdir(std::path::Path::new(&parent_path));
@@ -819,6 +824,7 @@ impl Workspace {
             id: id.clone(),
             name: project_name,
             path: project_path,
+            space_id: parent_space,
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),

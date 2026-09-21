@@ -612,6 +612,7 @@ mod tests {
 
     fn make_project(name: &str, path: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: name.to_string(),
             name: name.to_string(),
             path: path.to_string(),

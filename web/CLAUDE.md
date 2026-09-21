@@ -30,3 +30,7 @@ Vite dev server proxies `/v1/*` and `/health` to `http://localhost:19100`. Befor
 - **REST API:** `/v1/pair`, `/v1/state`, `/v1/actions`, `/v1/refresh`
 - **WebSocket** (`/v1/stream`): binary frame protocol for PTY I/O, JSON for control messages, auto-reconnect with exponential backoff
 - **Layout:** recursive tree of splits/tabs/terminals, mirroring desktop's `LayoutNode`
+- **Spaces:** the daemon sends `spaces` / `active_space` and a `space_id` on every project and
+  folder; `utils/sidebar.ts` lists only the active space's and `components/SpaceSelector.tsx`
+  switches with `space_activate`. Spaces are added, renamed and deleted on the desktop. See
+  [`../docs/reference/spaces.md`](../docs/reference/spaces.md).

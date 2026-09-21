@@ -16,6 +16,7 @@ fn new_project_row(
     id: String,
     name: String,
     path: String,
+    space_id: String,
     layout: Option<LayoutNode>,
     default_shell: Option<okena_terminal::shell_config::ShellType>,
 ) -> ProjectData {
@@ -23,6 +24,7 @@ fn new_project_row(
         id,
         name,
         path,
+        space_id,
         layout,
         terminal_names: HashMap::new(),
         hidden_terminals: HashMap::new(),
@@ -371,10 +373,12 @@ impl Workspace {
 
         let id = uuid::Uuid::new_v4().to_string();
         let layout = with_terminal.then(LayoutNode::new_terminal);
+        let space_id = self.active_space().to_string();
         self.data.projects.push(new_project_row(
             id.clone(),
             name,
             path,
+            space_id,
             layout,
             default_shell,
         ));
@@ -408,9 +412,10 @@ impl Workspace {
         // No layout: `column_content` renders the creating placeholder, and
         // `spawn_uninitialized_terminals` has nothing to spawn into yet. The
         // shell is detected in `finish_pending_project`, once the path is real.
+        let space_id = self.active_space().to_string();
         self.data
             .projects
-            .push(new_project_row(id.clone(), name, path, None, None));
+            .push(new_project_row(id.clone(), name, path, space_id, None, None));
         self.data.project_order.push(id.clone());
         self.data.add_project_hide_in_other_windows(&id, window_id);
         self.notify_data(cx);
@@ -1410,6 +1415,7 @@ mod worktree_rename_tests {
 
     fn project(id: &str, path: &Path) -> okena_state::ProjectData {
         okena_state::ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             task_ref: None,
             also_tasks: Vec::new(),
             repo_ids: Vec::new(),
@@ -1550,6 +1556,7 @@ mod tests {
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
@@ -1613,6 +1620,7 @@ mod tests {
         data.projects = vec![make_project("p1"), make_project("p2")];
         data.project_order = vec!["f1".to_string()];
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
@@ -1897,6 +1905,7 @@ mod gpui_tests {
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
@@ -1964,6 +1973,106 @@ mod gpui_tests {
             assert!(!ws.data().main_window.hidden_project_ids.contains(&new_id));
             let after = ws.data().window(WindowId::Extra(extra_id)).unwrap();
             assert!(after.hidden_project_ids.contains(&new_id));
+        });
+    }
+
+    #[gpui::test]
+    fn a_session_started_beside_a_projects_repos_lands_in_their_space(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A coordinating agent in Client A starting a sub-agent while the user
+        // looks at Default: the sub-agent belongs in Client A, with the repos
+        // it was handed.
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        let (repo, session) = workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_active_space("client-a");
+            let repo = ws
+                .add_project(
+                    "repo".into(),
+                    "/tmp/repo".into(),
+                    false,
+                    &HooksConfig::default(),
+                    WindowId::Main,
+                    cx,
+                )
+                .expect("add repo");
+            // The user switches away before the agent starts its sub-agent.
+            ws.set_active_space("default");
+            let session = ws
+                .add_project(
+                    "QBL-1".into(),
+                    "/tmp/session".into(),
+                    false,
+                    &HooksConfig::default(),
+                    WindowId::Main,
+                    cx,
+                )
+                .expect("add session");
+            (repo, session)
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            assert_eq!(
+                ws.project(&session).map(|p| p.space_id.as_str()),
+                Some("default"),
+                "it is created in the space showing"
+            );
+            assert!(ws.place_in_space_of(&session, std::slice::from_ref(&repo)));
+            assert_eq!(
+                ws.project(&session).map(|p| p.space_id.as_str()),
+                Some("client-a"),
+                "…and moved to where its repos are"
+            );
+            // Idempotent, and a no-op when nothing names a known project.
+            assert!(!ws.place_in_space_of(&session, std::slice::from_ref(&repo)));
+            assert!(!ws.place_in_space_of(&session, &["gone".to_string()]));
+            assert!(!ws.place_in_space_of(&session, &[]));
+        });
+    }
+
+    #[gpui::test]
+    fn a_project_added_in_one_space_is_absent_in_the_other(cx: &mut gpui::TestAppContext) {
+        // The acceptance walk-through, at the entity layer: add a project in
+        // Client A, switch to Default, it is not there; switch back, it is.
+        let workspace = cx.new(|_cx| Workspace::new(make_workspace_data()));
+
+        let client_id = workspace.update(cx, |ws: &mut Workspace, cx| {
+            assert!(ws.set_active_space("client-a"));
+            ws.add_project(
+                "client-repo".to_string(),
+                "/tmp/client-repo".to_string(),
+                false,
+                &HooksConfig::default(),
+                WindowId::Main,
+                cx,
+            )
+            .expect("add project")
+        });
+
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            assert_eq!(
+                ws.project(&client_id).map(|p| p.space_id.as_str()),
+                Some("client-a"),
+                "a new project is stamped with the space it was added in"
+            );
+            let here: Vec<&str> = ws
+                .visible_projects(WindowId::Main, None, false)
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect();
+            assert_eq!(here, [client_id.as_str()]);
+
+            assert!(ws.set_active_space("default"));
+            assert!(
+                ws.visible_projects(WindowId::Main, None, false).is_empty(),
+                "Client A's project must not show in Default"
+            );
+
+            assert!(ws.set_active_space("client-a"));
+            assert_eq!(ws.visible_projects(WindowId::Main, None, false).len(), 1);
+            // Switching back is a no-op the second time.
+            assert!(!ws.set_active_space("client-a"));
         });
     }
 
@@ -4185,6 +4294,7 @@ mod gpui_tests {
     fn rolling_back_a_pending_project_drops_it_everywhere(cx: &mut gpui::TestAppContext) {
         let mut data = make_workspace_data();
         data.folders = vec![crate::state::FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec![],

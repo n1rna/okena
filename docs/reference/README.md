@@ -10,7 +10,8 @@ behaviour.
 
 <!-- index the reference docs here, one line each -->
 
-- [`glossary.md`](glossary.md) — domain terms: workspace, project, worktree, folder, layout, window.
+- [`glossary.md`](glossary.md) — domain terms: space, workspace, project, worktree, folder, layout, window.
+- [`spaces.md`](spaces.md) — spaces: the selector, what a switch changes, per-space task connections and filters, per-space roots, and what every client shows.
 - [`configuration.md`](configuration.md) — settings file, keybindings, per-project config.
 - [`hooks.md`](hooks.md) — lifecycle hooks: events, config shape, execution.
 - [`services.md`](services.md) — Docker Compose integration and port detection.

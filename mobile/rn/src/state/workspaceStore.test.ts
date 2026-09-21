@@ -6,7 +6,7 @@
  * the terminal id set is untouched (CORR-15).
  */
 
-import type { ProjectInfo } from '../native/okena';
+import type { ProjectInfo, SpaceInfo } from '../native/okena';
 import {
   configureWorkspaceStore,
   useWorkspaceStore,
@@ -45,8 +45,9 @@ const TABS_SECOND_ACTIVE = JSON.stringify({
   ],
 });
 
-function stubNative(layouts: string[]): WorkspaceNative {
+function stubNative(layouts: string[], spaces: SpaceInfo[] = []): WorkspaceNative {
   let tick = 0;
+  let active = spaces[0]?.id ?? 'default';
   return {
     getProjects: () => [PROJECT],
     getFocusedProjectId: () => PROJECT.id,
@@ -55,6 +56,12 @@ function stubNative(layouts: string[]): WorkspaceNative {
     getFullscreenTerminal: () => undefined,
     getProjectLayoutJson: () => layouts[Math.min(tick++, layouts.length - 1)]!,
     secondsSinceActivity: () => 0,
+    getSpaces: () => spaces,
+    getActiveSpace: () => active,
+    // The daemon owns the active space; the stub stands in for the round trip.
+    activateSpace: async (_connId, spaceId) => {
+      active = spaceId;
+    },
   };
 }
 
@@ -92,5 +99,72 @@ describe('workspace layout tracking', () => {
 
     useWorkspaceStore.getState().stop();
     expect(useWorkspaceStore.getState().projectLayoutJson).toBeNull();
+  });
+});
+
+describe('spaces (QBL-430)', () => {
+  const DEFAULT: SpaceInfo = { id: 'default', name: 'Default', agentWaiting: false };
+  const CLIENT_A: SpaceInfo = { id: 'client-a', name: 'Client A', agentWaiting: false };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    useWorkspaceStore.getState().stop();
+    jest.useRealTimers();
+  });
+
+  it('publishes the spaces and which one is showing', () => {
+    configureWorkspaceStore({
+      native: stubNative([TABS_FIRST_ACTIVE], [DEFAULT, CLIENT_A]),
+    });
+
+    useWorkspaceStore.getState().start('conn-1');
+
+    expect(useWorkspaceStore.getState().spaces).toEqual([DEFAULT, CLIENT_A]);
+    expect(useWorkspaceStore.getState().activeSpace).toBe('default');
+  });
+
+  it('switching spaces follows the daemon and drops the old selection', () => {
+    configureWorkspaceStore({
+      native: stubNative([TABS_FIRST_ACTIVE], [DEFAULT, CLIENT_A]),
+    });
+
+    useWorkspaceStore.getState().start('conn-1');
+    expect(useWorkspaceStore.getState().selectedProjectId).not.toBeNull();
+
+    useWorkspaceStore.getState().activateSpace('client-a');
+    // The selection belonged to the space being left.
+    expect(useWorkspaceStore.getState().selectedTerminalId).toBeNull();
+
+    // The daemon owns the switch, so the store only shows it after a poll.
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().activeSpace).toBe('client-a');
+  });
+
+  it('a daemon with no spaces leaves the selector with nothing to draw', () => {
+    configureWorkspaceStore({ native: stubNative([TABS_FIRST_ACTIVE]) });
+
+    useWorkspaceStore.getState().start('conn-1');
+
+    expect(useWorkspaceStore.getState().spaces).toEqual([]);
+    expect(useWorkspaceStore.getState().activeSpace).toBe('default');
+  });
+
+  it('a rename repaints the selector even though no id changed', () => {
+    const renamed: SpaceInfo = { ...CLIENT_A, name: 'Acme' };
+    let spaces = [DEFAULT, CLIENT_A];
+    const native = stubNative([TABS_FIRST_ACTIVE], spaces);
+    configureWorkspaceStore({
+      native: { ...native, getSpaces: () => spaces },
+    });
+
+    useWorkspaceStore.getState().start('conn-1');
+    expect(useWorkspaceStore.getState().spaces[1]!.name).toBe('Client A');
+
+    spaces = [DEFAULT, renamed];
+    jest.advanceTimersByTime(WORKSPACE_POLL_MS);
+    expect(useWorkspaceStore.getState().spaces[1]!.name).toBe('Acme');
   });
 });

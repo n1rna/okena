@@ -961,6 +961,7 @@ mod entry_mutation_tests {
 
     fn workspace_with_project(path: &Path) -> Workspace {
         let project = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             task_ref: None,
             also_tasks: Vec::new(),
             repo_ids: Vec::new(),

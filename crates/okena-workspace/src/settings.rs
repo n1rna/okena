@@ -1,4 +1,11 @@
 use okena_core::theme::ThemeMode;
+// A space's Specs and Knowledge roots. They live in `okena-core` so the wire
+// and the CLI can name them too; re-exported here because `settings::` is
+// where every caller already looks for them.
+pub use okena_core::spaces::{
+    DEFAULT_KNOWLEDGE_CLONE_DIR, DEFAULT_SPEC_CLONE_DIR, KnowledgeConfig, SpaceData,
+    SpecDiscoveryConfig,
+};
 pub use okena_core::types::{DiffViewMode, StatusBarStyle};
 use okena_terminal::session_backend::SessionBackend;
 use okena_terminal::shell_config::ShellType;
@@ -106,29 +113,30 @@ pub struct HarnessConfig {
     #[serde(default = "default_true")]
     pub agent_mcp_injection: bool,
 
-    /// The one task manager the harness reads, by provider id: `linear` or
-    /// `azure_devops`.
-    ///
-    /// One at a time on purpose: tasks from two managers are never merged into
-    /// one queue, so the choice is which queue to look at, not a filter.
-    #[serde(default = "default_task_provider")]
-    pub task_provider: String,
+    // The three fields below named the *one* task backend, the *one* set of
+    // Specs roots and the *one* set of Knowledge roots a profile had before
+    // spaces. Each space owns its own now ([`AppSettings::spaces`]), so these
+    // are read once to build the Default space and never written again —
+    // `skip_serializing` is what makes them disappear on the next save instead
+    // of lingering as a second, silently ignored source of truth.
+    /// Legacy: the one task manager the harness read, by provider id.
+    /// Becomes the Default space's connection.
+    #[serde(default, rename = "task_provider", skip_serializing)]
+    pub legacy_task_provider: Option<String>,
 
-    /// Legacy single spec repository.
-    ///
-    /// Superseded by `specs`: OpenSpec stores are found through OpenSpec's
-    /// own registry now. Still read so an existing setup keeps working — it
-    /// counts as one of `specs.folders` until the folder list is edited.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spec_repo: Option<String>,
+    /// Legacy single spec repository, superseded by `specs` before spaces
+    /// existed. Folded into the Default space's spec folders.
+    #[serde(default, rename = "spec_repo", skip_serializing)]
+    pub legacy_spec_repo: Option<String>,
 
-    /// Where the Specs view finds OpenSpec roots.
-    #[serde(default)]
-    pub specs: SpecDiscoveryConfig,
+    /// Legacy: where the Specs view found OpenSpec roots. Becomes the Default
+    /// space's `specs`.
+    #[serde(default, rename = "specs", skip_serializing)]
+    pub legacy_specs: Option<SpecDiscoveryConfig>,
 
-    /// Knowledge discovery, and where cloned knowledge stores go.
-    #[serde(default)]
-    pub knowledge: KnowledgeConfig,
+    /// Legacy: knowledge discovery. Becomes the Default space's `knowledge`.
+    #[serde(default, rename = "knowledge", skip_serializing)]
+    pub legacy_knowledge: Option<KnowledgeConfig>,
 
     /// Override the flags used to hand an agent its MCP config.
     ///
@@ -149,10 +157,10 @@ impl Default for HarnessConfig {
             // disagree with a deserialized one.
             agent_mcp_injection: true,
             agent_mcp_args: None,
-            task_provider: default_task_provider(),
-            spec_repo: None,
-            specs: SpecDiscoveryConfig::default(),
-            knowledge: KnowledgeConfig::default(),
+            legacy_task_provider: None,
+            legacy_spec_repo: None,
+            legacy_specs: None,
+            legacy_knowledge: None,
         }
     }
 }
@@ -161,28 +169,6 @@ impl Default for HarnessConfig {
 /// settings file written then keeps behaving exactly as it did.
 fn default_task_provider() -> String {
     "linear".to_string()
-}
-
-impl HarnessConfig {
-    /// Folders to show as spec roots: the configured list, plus the legacy
-    /// `spec_repo` when it is still set and not already listed.
-    pub fn spec_folders(&self) -> Vec<String> {
-        let mut folders: Vec<String> = self
-            .specs
-            .folders
-            .iter()
-            .map(|f| f.trim())
-            .filter(|f| !f.is_empty())
-            .map(str::to_string)
-            .collect();
-        if let Some(repo) = self.spec_repo.as_deref().map(str::trim)
-            && !repo.is_empty()
-            && !folders.iter().any(|f| f == repo)
-        {
-            folders.insert(0, repo.to_string());
-        }
-        folders
-    }
 }
 
 /// Per-agent launch options, by the agents okena knows.
@@ -375,129 +361,6 @@ impl CodexOptions {
     }
 }
 
-/// Where the Specs view finds OpenSpec roots.
-///
-/// Discovery follows OpenSpec's own model
-/// (<https://openspec.dev/docs/stores>): stores registered on this machine,
-/// repositories that carry their own `openspec/` tree or point at a store with
-/// `store:`, plus any folders listed here.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpecDiscoveryConfig {
-    /// List the stores in OpenSpec's machine registry — what
-    /// `openspec store list` shows.
-    #[serde(default = "default_true")]
-    pub registry: bool,
-
-    /// Treat okena projects as OpenSpec roots when their repository holds an
-    /// `openspec/` tree, and follow their `store:` pointers.
-    #[serde(default = "default_true")]
-    pub projects: bool,
-
-    /// Extra folders to show that are neither registered stores nor projects.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub folders: Vec<String>,
-
-    /// OpenSpec's data directory, where `stores/registry.yaml` lives.
-    ///
-    /// Unset resolves it the way the CLI does (`$XDG_DATA_HOME/openspec`, else
-    /// `~/.local/share/openspec`, `%LOCALAPPDATA%\openspec` on Windows). Needed
-    /// when the CLI runs with an `XDG_DATA_HOME` the daemon never saw — an app
-    /// launched from the dock does not inherit a shell profile.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_dir: Option<String>,
-
-    /// OpenSpec's config directory, where `config.json` (and `defaultStore`)
-    /// lives. Same resolution and reason as `data_dir`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_dir: Option<String>,
-
-    /// Folder a store is cloned into when no destination is given. Unset is
-    /// `~/openspec`, the convention the CLI uses.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clone_dir: Option<String>,
-}
-
-/// Where an OpenSpec clone goes when no destination is given, before `~`
-/// expansion.
-pub const DEFAULT_SPEC_CLONE_DIR: &str = "~/openspec";
-
-impl SpecDiscoveryConfig {
-    /// The clone folder with `~` expanded; blank counts as unset.
-    pub fn clone_dir(&self) -> std::path::PathBuf {
-        let dir = self
-            .clone_dir
-            .as_deref()
-            .map(str::trim)
-            .filter(|d| !d.is_empty())
-            .unwrap_or(DEFAULT_SPEC_CLONE_DIR);
-        okena_core::fs::expand_home(dir)
-    }
-}
-
-impl Default for SpecDiscoveryConfig {
-    fn default() -> Self {
-        Self {
-            // Must match the serde defaults above.
-            registry: true,
-            projects: true,
-            folders: Vec::new(),
-            data_dir: None,
-            config_dir: None,
-            clone_dir: None,
-        }
-    }
-}
-
-/// Where a clone goes when no destination is given, before `~` expansion.
-pub const DEFAULT_KNOWLEDGE_CLONE_DIR: &str = "~/knowledge";
-
-/// Knowledge stores (ADR-0003).
-///
-/// The stores themselves are not listed here: checkout paths are machine
-/// state, kept in okena's per-profile registry (`knowledge/stores.yaml`), so a
-/// synced `settings.json` never carries paths that don't exist elsewhere.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KnowledgeConfig {
-    /// Find knowledge in okena projects: the stores a repo follows in
-    /// `.okena/knowledge.yaml`, and its own `.okena/knowledge/` folders.
-    #[serde(default = "default_true")]
-    pub projects: bool,
-
-    /// Folder a store is cloned into when no destination is given. Unset is
-    /// `~/knowledge`, beside OpenSpec's `~/openspec` convention.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clone_dir: Option<String>,
-    //
-    // There is deliberately no setting naming one root as the source of launch
-    // briefs (QBL-415). Templates, partials and skills resolve across every
-    // healthy root in discovery order, so overriding one is a matter of putting
-    // the file somewhere, not of pointing a setting at it. A `prompts` key left
-    // in an older settings.json is ignored on load and gone on the next save.
-}
-
-impl Default for KnowledgeConfig {
-    fn default() -> Self {
-        Self {
-            // Must match the serde default above.
-            projects: true,
-            clone_dir: None,
-        }
-    }
-}
-
-impl KnowledgeConfig {
-    /// The clone folder with `~` expanded; blank counts as unset.
-    pub fn clone_dir(&self) -> std::path::PathBuf {
-        let dir = self
-            .clone_dir
-            .as_deref()
-            .map(str::trim)
-            .filter(|d| !d.is_empty())
-            .unwrap_or(DEFAULT_KNOWLEDGE_CLONE_DIR);
-        okena_core::fs::expand_home(dir)
-    }
-}
-
 /// Configuration for worktree creation and close defaults
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorktreeConfig {
@@ -670,7 +533,7 @@ fn default_status_bar_metrics_graph() -> bool {
 }
 
 /// Current settings schema version - increment when making breaking changes
-pub const SETTINGS_VERSION: u32 = 4;
+pub const SETTINGS_VERSION: u32 = 5;
 
 /// App settings (persisted separately from workspace)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -678,6 +541,21 @@ pub struct AppSettings {
     /// Settings schema version for migration support
     #[serde(default = "default_settings_version")]
     pub version: u32,
+
+    /// The spaces this profile holds, in selector order, Default first.
+    ///
+    /// Never empty in a loaded `AppSettings` — [`AppSettings::ensure_spaces`]
+    /// runs on every path that produces one, and builds Default out of the
+    /// legacy `harness` fields for a profile that predates spaces.
+    #[serde(default)]
+    pub spaces: Vec<SpaceData>,
+
+    /// Which space is showing. The active space belongs to the profile, not to
+    /// a window or a client: switching it anywhere switches it everywhere, and
+    /// it is the same after a restart.
+    #[serde(default = "default_active_space")]
+    pub active_space: String,
+
     #[serde(default)]
     pub theme_mode: ThemeMode,
     /// Custom theme file stem (e.g. "example-theme" for themes/example-theme.json).
@@ -921,10 +799,126 @@ pub struct AppSettings {
     pub allow_clipboard_read: bool,
 }
 
+/// The space returned when a caller reaches for the active one before
+/// [`AppSettings::ensure_spaces`] has run — a hand-built `AppSettings` in a
+/// test, say. It is a plain Default space, so reading through it behaves the
+/// way a profile with no spaces file always did rather than panicking.
+static FALLBACK_SPACE: std::sync::LazyLock<SpaceData> = std::sync::LazyLock::new(|| {
+    SpaceData::default_space(
+        Some(default_task_provider()),
+        SpecDiscoveryConfig::default(),
+        KnowledgeConfig::default(),
+    )
+});
+
+impl AppSettings {
+    /// Put the space list into the shape everything else may assume: Default
+    /// exists, Default is first, ids are unique, and `active_space` names one
+    /// of them.
+    ///
+    /// Also the migration. A profile written before spaces has no list at all,
+    /// so one is built from the legacy `harness` fields — the same task
+    /// backend, the same Specs roots (legacy `spec_repo` folded in), the same
+    /// Knowledge settings. Everything that profile had is in Default and
+    /// nothing moves, which is the whole promise of the update.
+    pub fn ensure_spaces(&mut self) {
+        if self.spaces.is_empty() {
+            let mut specs = self.harness.legacy_specs.take().unwrap_or_default();
+            if let Some(repo) = self.harness.legacy_spec_repo.take()
+                && !repo.trim().is_empty()
+                && !specs.folders.iter().any(|f| f.trim() == repo.trim())
+            {
+                specs.folders.insert(0, repo.trim().to_string());
+            }
+            specs.folders.retain(|f| !f.trim().is_empty());
+            let knowledge = self.harness.legacy_knowledge.take().unwrap_or_default();
+            let connection = self
+                .harness
+                .legacy_task_provider
+                .take()
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .or_else(|| Some(default_task_provider()));
+            self.spaces
+                .push(SpaceData::default_space(connection, specs, knowledge));
+        }
+
+        // Default is always there, and always first: Cmd+1 goes to it.
+        match self.spaces.iter().position(|s| s.is_default()) {
+            Some(0) => {}
+            Some(at) => {
+                let d = self.spaces.remove(at);
+                self.spaces.insert(0, d);
+            }
+            None => self.spaces.insert(
+                0,
+                SpaceData::default_space(
+                    Some(default_task_provider()),
+                    SpecDiscoveryConfig::default(),
+                    KnowledgeConfig::default(),
+                ),
+            ),
+        }
+
+        // A hand-edited file could name two spaces the same id; the first wins,
+        // because dropping the later one is the only choice that keeps every
+        // project's `space_id` pointing at what its author meant.
+        let mut seen: HashSet<String> = HashSet::new();
+        self.spaces.retain(|s| seen.insert(s.id.clone()));
+
+        if !self.spaces.iter().any(|s| s.id == self.active_space) {
+            self.active_space = default_active_space();
+        }
+    }
+
+    /// The space showing. Total: falls back to the first space, then to a
+    /// plain Default, so no caller has to handle "there is no space".
+    pub fn active_space(&self) -> &SpaceData {
+        self.spaces
+            .iter()
+            .find(|s| s.id == self.active_space)
+            .or_else(|| self.spaces.first())
+            .unwrap_or(&FALLBACK_SPACE)
+    }
+
+    /// The space showing, to edit. Repairs the list first, so this always
+    /// hands back something that is really in `spaces`.
+    pub fn active_space_mut(&mut self) -> &mut SpaceData {
+        self.ensure_spaces();
+        let at = self
+            .spaces
+            .iter()
+            .position(|s| s.id == self.active_space)
+            .unwrap_or(0);
+        &mut self.spaces[at]
+    }
+
+    /// One space by id.
+    pub fn space(&self, id: &str) -> Option<&SpaceData> {
+        self.spaces.iter().find(|s| s.id == id)
+    }
+
+    /// One space by id, to edit.
+    pub fn space_mut(&mut self, id: &str) -> Option<&mut SpaceData> {
+        self.spaces.iter_mut().find(|s| s.id == id)
+    }
+
+    /// Where `id` sits in the selector, counting from 1 — what its shortcut is.
+    pub fn space_position(&self, id: &str) -> Option<usize> {
+        self.spaces.iter().position(|s| s.id == id).map(|i| i + 1)
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
+            spaces: vec![SpaceData::default_space(
+                Some(default_task_provider()),
+                SpecDiscoveryConfig::default(),
+                KnowledgeConfig::default(),
+            )],
+            active_space: default_active_space(),
             custom_theme_id: None,
             theme_mode: ThemeMode::default(),
             active_session: None,
@@ -985,6 +979,10 @@ impl Default for AppSettings {
             allow_clipboard_read: false,
         }
     }
+}
+
+fn default_active_space() -> String {
+    okena_core::spaces::DEFAULT_SPACE_ID.to_string()
 }
 
 fn default_settings_version() -> u32 {
@@ -1244,6 +1242,17 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
         fold_into_usage_and_status(&mut settings);
         settings.version = 4;
     }
+
+    // v4 -> v5: spaces. The one task backend and the one set of Specs and
+    // Knowledge roots become the Default space's. Nothing moves and nothing is
+    // lost — `ensure_spaces` does the fold, and it runs unconditionally below
+    // because a file that already has a `spaces` list still needs its
+    // invariants (Default present and first, `active_space` real) checked.
+    if settings.version == 4 {
+        log::info!("Migrating settings from v4 to v5 (spaces)");
+        settings.version = 5;
+    }
+    settings.ensure_spaces();
 
     // Ensure version is current
     if settings.version < SETTINGS_VERSION {
@@ -1543,7 +1552,7 @@ mod tests {
         }"#;
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         let migrated = migrate_settings(settings);
-        assert_eq!(migrated.version, 4);
+        assert_eq!(migrated.version, SETTINGS_VERSION);
         let on = &migrated.enabled_extensions;
         assert!(on.contains("usage") && on.contains("status") && on.contains("updater"));
         assert!(!on.contains("claude-code") && !on.contains("github"));
@@ -1587,12 +1596,154 @@ mod tests {
                 }
             }
         }"#;
-        let loaded: AppSettings = serde_json::from_str(json).expect("an old file still loads");
-        assert!(!loaded.harness.knowledge.projects);
-        assert_eq!(loaded.harness.knowledge.clone_dir.as_deref(), Some("~/k"));
+        let mut loaded: AppSettings = serde_json::from_str(json).expect("an old file still loads");
+        // The block is read into the Default space now (QBL-430), which is
+        // where knowledge settings live.
+        loaded.ensure_spaces();
+        let knowledge = &loaded.active_space().knowledge;
+        assert!(!knowledge.projects);
+        assert_eq!(knowledge.clone_dir.as_deref(), Some("~/k"));
 
         let saved = serde_json::to_string(&loaded).expect("serialize");
         assert!(!saved.contains("prompts"), "the dead key survived a save");
+    }
+
+    // ---- spaces (QBL-430) ----
+
+    #[test]
+    fn a_settings_file_from_before_spaces_becomes_one_default_space() {
+        // The acceptance case: after the update everything is in Default and
+        // looks exactly as it did.
+        let json = r#"{
+            "version": 4,
+            "harness": {
+                "task_provider": "azure_devops",
+                "specs": { "registry": false, "projects": true, "folders": ["~/specs"] },
+                "knowledge": { "projects": false, "clone_dir": "~/k" }
+            }
+        }"#;
+        let loaded: AppSettings = serde_json::from_str(json).expect("loads");
+        let migrated = migrate_settings(loaded);
+
+        assert_eq!(migrated.spaces.len(), 1);
+        let d = migrated.active_space();
+        assert!(d.is_default());
+        assert_eq!(d.name, "Default");
+        assert_eq!(d.connection.as_deref(), Some("azure_devops"));
+        assert_eq!(d.specs.folders, ["~/specs"]);
+        assert!(!d.specs.registry);
+        assert!(!d.knowledge.projects);
+        assert_eq!(d.knowledge.clone_dir.as_deref(), Some("~/k"));
+        assert!(d.tasks.is_empty(), "Default keeps no filters");
+        assert_eq!(migrated.active_space, "default");
+    }
+
+    #[test]
+    fn the_legacy_spec_repo_is_folded_into_the_default_spaces_folders() {
+        let json = r#"{
+            "version": 4,
+            "harness": { "spec_repo": "~/legacy", "specs": { "folders": ["~/specs"] } }
+        }"#;
+        let migrated = migrate_settings(serde_json::from_str(json).expect("loads"));
+        assert_eq!(migrated.active_space().specs.folders, ["~/legacy", "~/specs"]);
+    }
+
+    #[test]
+    fn the_legacy_keys_are_gone_after_a_save() {
+        // Two sources of truth for the same setting is the failure mode this
+        // guards: once the fold has happened the harness block must not still
+        // carry a task backend and a root list.
+        let json = r#"{
+            "version": 4,
+            "harness": { "task_provider": "linear", "spec_repo": "~/legacy",
+                         "specs": { "folders": ["~/s"] }, "knowledge": { "projects": false } }
+        }"#;
+        let migrated = migrate_settings(serde_json::from_str(json).expect("loads"));
+        let saved = serde_json::to_string(&migrated).expect("serialize");
+        assert!(!saved.contains("task_provider"), "got {saved}");
+        assert!(!saved.contains("spec_repo"), "got {saved}");
+        assert!(saved.contains("\"spaces\""), "got {saved}");
+        // And it round-trips without gaining a space.
+        let back: AppSettings = serde_json::from_str(&saved).expect("reload");
+        assert_eq!(back.spaces.len(), 1);
+        assert_eq!(back.active_space().specs.folders, ["~/legacy", "~/s"]);
+    }
+
+    #[test]
+    fn a_profile_with_no_settings_file_still_has_a_default_space() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.spaces.len(), 1);
+        assert!(settings.active_space().is_default());
+        assert_eq!(settings.active_space().connection.as_deref(), Some("linear"));
+    }
+
+    #[test]
+    fn default_is_reinstated_when_a_hand_edited_file_drops_it() {
+        let mut settings = AppSettings {
+            spaces: vec![SpaceData::new("client-a", "Client A")],
+            ..Default::default()
+        };
+        settings.ensure_spaces();
+        assert!(settings.spaces[0].is_default());
+        assert_eq!(settings.spaces.len(), 2);
+    }
+
+    #[test]
+    fn default_is_moved_to_the_front_so_the_first_shortcut_reaches_it() {
+        let mut settings = AppSettings::default();
+        let default = settings.spaces[0].clone();
+        settings.spaces = vec![SpaceData::new("client-a", "Client A"), default];
+        settings.ensure_spaces();
+        assert_eq!(settings.spaces[0].id, "default");
+        assert_eq!(settings.space_position("client-a"), Some(2));
+    }
+
+    #[test]
+    fn a_duplicate_space_id_is_dropped_rather_than_shadowing_the_first() {
+        let mut settings = AppSettings::default();
+        let mut second = SpaceData::new("client-a", "Client A");
+        second.name = "The second one".into();
+        settings.spaces.push(SpaceData::new("client-a", "Client A"));
+        settings.spaces.push(second);
+        settings.ensure_spaces();
+        assert_eq!(settings.spaces.len(), 2);
+        assert_eq!(settings.space("client-a").map(|s| s.name.as_str()), Some("Client A"));
+    }
+
+    #[test]
+    fn an_active_space_that_no_longer_exists_falls_back_to_default() {
+        let mut settings = AppSettings {
+            active_space: "deleted".into(),
+            ..Default::default()
+        };
+        settings.ensure_spaces();
+        assert_eq!(settings.active_space, "default");
+        assert!(settings.active_space().is_default());
+    }
+
+    #[test]
+    fn spaces_survive_a_round_trip_with_their_filters_and_roots() {
+        let mut settings = AppSettings::default();
+        let mut client = SpaceData::new("client-a", "Client A");
+        client.connection = Some("linear-2".into());
+        client.tasks.toggle_group(okena_core::tasks::GroupAxis::Project, "alpha");
+        client.specs.folders = vec!["~/client-a/specs".into()];
+        settings.spaces.push(client);
+        settings.active_space = "client-a".into();
+
+        let saved = serde_json::to_string(&settings).expect("serialize");
+        let back: AppSettings = serde_json::from_str(&saved).expect("deserialize");
+        assert_eq!(back.active_space, "client-a");
+        let space = back.active_space();
+        assert_eq!(space.connection.as_deref(), Some("linear-2"));
+        assert_eq!(space.tasks.selected_count(), 1);
+        assert_eq!(space.specs.folders, ["~/client-a/specs"]);
+    }
+
+    #[test]
+    fn a_space_naming_no_connection_still_reads_the_backend_everyone_had() {
+        let space = SpaceData::new("client-a", "Client A");
+        assert_eq!(space.connection_id(), "linear");
     }
 
     #[test]

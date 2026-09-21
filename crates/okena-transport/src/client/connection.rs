@@ -1993,6 +1993,8 @@ mod tests {
             event_tx,
         );
         client.set_remote_state(Some(StateResponse {
+            spaces: Vec::new(),
+            active_space: okena_core::spaces::default_space_id(),
             state_version: 1,
             projects: Vec::new(),
             focused_project_id: None,

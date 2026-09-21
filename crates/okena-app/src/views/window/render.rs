@@ -3,7 +3,10 @@ use crate::keybindings::{
     About, AddTab, CheckForUpdates, ClearFocus, CloseWindow, CreateWorktree, EqualizeLayout,
     FocusActiveProject, FocusSidebar, InstallUpdate, NewProject, NewWindow, OpenSettingsFile,
     RestartDaemon, ReviewChanges, ShowBranchSwitcher, ShowCommandPalette, ShowContentSearch,
-    ShowDiffViewer, ShowFileSearch, ShowHarness, ShowHookLog, ShowKeybindings, ShowLogConsole,
+    NextSpace, PreviousSpace, ShowDiffViewer, ShowFileSearch, ShowHarness, ShowHookLog,
+    ShowKeybindings, ShowLogConsole, SwitchToSpace1, SwitchToSpace2, SwitchToSpace3,
+    SwitchToSpace4, SwitchToSpace5, SwitchToSpace6, SwitchToSpace7, SwitchToSpace8,
+    SwitchToSpace9,
     ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
     ShowThemeSelector, StartAllServices, StopAllServices, ToggleOverviewSearch, TogglePaneSwitcher,
     ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
@@ -1238,6 +1241,42 @@ impl Render for WindowView {
                 move |this, _: &ShowHarness, _window, cx| {
                     this.show_harness_view(okena_core::harness::HarnessSection::Tasks, cx);
                 }
+            }))
+            // Spaces: cycle, and jump to the Nth. The daemon owns which space
+            // is showing, so each of these asks and the answer comes back on
+            // the next snapshot — the same path a click on a dot takes.
+            .on_action(cx.listener(|this, _: &NextSpace, _window, cx| {
+                this.step_space(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PreviousSpace, _window, cx| {
+                this.step_space(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchToSpace1, _window, cx| {
+                this.switch_to_nth_space(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchToSpace2, _window, cx| {
+                this.switch_to_nth_space(2, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchToSpace3, _window, cx| {
+                this.switch_to_nth_space(3, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchToSpace4, _window, cx| {
+                this.switch_to_nth_space(4, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchToSpace5, _window, cx| {
+                this.switch_to_nth_space(5, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchToSpace6, _window, cx| {
+                this.switch_to_nth_space(6, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchToSpace7, _window, cx| {
+                this.switch_to_nth_space(7, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchToSpace8, _window, cx| {
+                this.switch_to_nth_space(8, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SwitchToSpace9, _window, cx| {
+                this.switch_to_nth_space(9, cx);
             }))
             // Handle show theme selector action
             .on_action(cx.listener({

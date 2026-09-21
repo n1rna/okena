@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 fn make_project(id: &str) -> ProjectData {
     ProjectData {
+        space_id: okena_core::spaces::default_space_id(),
         id: id.to_string(),
         name: format!("Project {}", id),
         path: "/tmp/test".to_string(),

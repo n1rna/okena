@@ -7,6 +7,8 @@ sprint → decisions → reference → archive.
 ## Folders
 
 - [`reference/`](reference/README.md) — how the system works now.
+  Start with [`reference/spaces.md`](reference/spaces.md) if you are wondering
+  why the sidebar shows one set of projects and not another.
 - [`ideas/`](ideas/README.md) — proposals, no commitment.
 - [`decisions/`](decisions/README.md) — ADRs (the *why*), immutable.
 - [`backlog/`](backlog/README.md) — decided work, not yet scheduled.

@@ -11,6 +11,7 @@
 //! depends on. `okena-tasks` re-exports these and owns the client side.
 
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Identifies a task globally: which provider it came from, plus that
 /// provider's own stable id.
@@ -350,6 +351,129 @@ impl Task {
     pub fn group(&self, axis: &GroupAxis) -> Option<&TaskGroup> {
         self.groups.iter().find(|g| &g.axis == axis)
     }
+
+    /// The status to show and filter on: the provider's own word for it, or
+    /// the normalized state's label when the provider gave none. One function
+    /// so a chip, a filter and a saved scope can never disagree about what a
+    /// task's status is called.
+    pub fn status_name(&self) -> &str {
+        if self.state_name.trim().is_empty() {
+            self.state.label()
+        } else {
+            &self.state_name
+        }
+    }
+}
+
+/// A saved, hard scope on one connection's tasks.
+///
+/// The Tasks filter bar's two rules, kept somewhere they can be persisted and
+/// applied before a task reaches a client: **any** of the values picked within
+/// one facet, **all** of the facets together. A space's filters are this. The
+/// filter bar narrows further inside a scope and can never widen past it,
+/// because the scope is applied first and the bar only ever sees what survived.
+///
+/// Empty means "everything", so `Default` is the unscoped scope and no caller
+/// has to special-case a space that set no filters.
+///
+/// ```jsonc
+/// { "groups": { "project": ["alpha"], "iteration": ["s7"] },
+///   "labels": ["infra"], "statuses": ["In Review"] }
+/// ```
+///
+/// `deny_unknown_fields` on purpose: a mistyped key would otherwise deserialize
+/// to the *empty* scope, which matches every task — a filtered space silently
+/// widening to everything is the one failure this type exists to prevent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskScope {
+    /// Selected group ids per axis, by the provider's stable id rather than
+    /// the name — a project renamed mid-week must not silently empty a space.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<GroupAxis, BTreeSet<String>>,
+    /// Selected labels, by name: a label has nothing else.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub labels: BTreeSet<String>,
+    /// Selected statuses, by the provider's own name for them — the same
+    /// string [`Task::status_name`] returns.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub statuses: BTreeSet<String>,
+}
+
+impl TaskScope {
+    /// Whether this scope narrows anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+            && self.statuses.is_empty()
+            && self.groups.values().all(BTreeSet::is_empty)
+    }
+
+    /// How many values are selected in total, for a "3 filters" summary.
+    pub fn selected_count(&self) -> usize {
+        self.labels.len()
+            + self.statuses.len()
+            + self.groups.values().map(BTreeSet::len).sum::<usize>()
+    }
+
+    /// Whether `task` is inside the scope.
+    pub fn matches(&self, task: &Task) -> bool {
+        for (axis, wanted) in &self.groups {
+            if wanted.is_empty() {
+                continue;
+            }
+            let hit = task
+                .groups
+                .iter()
+                .any(|g| &g.axis == axis && wanted.contains(&g.id));
+            if !hit {
+                return false;
+            }
+        }
+        if !self.labels.is_empty() && !task.labels.iter().any(|l| self.labels.contains(l)) {
+            return false;
+        }
+        if !self.statuses.is_empty() && !self.statuses.contains(task.status_name()) {
+            return false;
+        }
+        true
+    }
+
+    /// Keep only the tasks inside the scope. The one place a scope is applied,
+    /// so "hard scope" means the same thing to the view, the daemon and MCP.
+    pub fn apply(&self, tasks: Vec<Task>) -> Vec<Task> {
+        if self.is_empty() {
+            return tasks;
+        }
+        tasks.into_iter().filter(|t| self.matches(t)).collect()
+    }
+
+    /// Toggle one group id on `axis`, dropping an axis left empty so a scope
+    /// never serializes an axis that selects nothing.
+    pub fn toggle_group(&mut self, axis: GroupAxis, id: &str) {
+        let set = self.groups.entry(axis.clone()).or_default();
+        if !set.remove(id) {
+            set.insert(id.to_string());
+        }
+        if set.is_empty() {
+            self.groups.remove(&axis);
+        }
+    }
+
+    pub fn toggle_label(&mut self, label: &str) {
+        if !self.labels.remove(label) {
+            self.labels.insert(label.to_string());
+        }
+    }
+
+    pub fn toggle_status(&mut self, status: &str) {
+        if !self.statuses.remove(status) {
+            self.statuses.insert(status.to_string());
+        }
+    }
+
+    pub fn group_selected(&self, axis: &GroupAxis, id: &str) -> bool {
+        self.groups.get(axis).is_some_and(|v| v.contains(id))
+    }
 }
 
 /// Backlink stored on a worktree project, pointing at the task it was started
@@ -465,12 +589,31 @@ impl TaskAuthState {
 /// One provider's identity and auth state, as reported by the daemon.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskProviderStatus {
-    /// Provider id, e.g. `"linear"`.
+    /// Connection id — what a space stores and what `provider_for` resolves.
+    /// For the first connection to a backend this is the provider kind itself
+    /// (`"linear"`), which is what it always was before spaces.
     pub provider: String,
-    /// Human-facing name for the UI, e.g. `"Linear"`.
+    /// Human-facing name for the UI. The connection's own name, so two Linear
+    /// accounts can be told apart.
     pub display_name: String,
+    /// Which backend this connection talks to: `linear`, `azure_devops`.
+    /// Defaults to `provider` for a response from a build that predates
+    /// connections, where the two were the same string.
+    #[serde(default)]
+    pub kind: String,
     #[serde(flatten)]
     pub auth: TaskAuthState,
+}
+
+impl TaskProviderStatus {
+    /// The backend this talks to, with the pre-connections fallback applied.
+    pub fn kind(&self) -> &str {
+        if self.kind.is_empty() {
+            &self.provider
+        } else {
+            &self.kind
+        }
+    }
 }
 
 /// Payload of the `TasksAuthStatus` action.
@@ -565,8 +708,9 @@ mod auth_status_tests {
     fn round_trips_through_json() {
         let original = TaskAuthStatusResponse {
             providers: vec![TaskProviderStatus {
-                provider: "linear".into(),
-                display_name: "Linear".into(),
+                provider: "linear-2".into(),
+                display_name: "Client A Linear".into(),
+                kind: "linear".into(),
                 auth: TaskAuthState::Connected {
                     account: Some("Nima".into()),
                 },
@@ -575,6 +719,19 @@ mod auth_status_tests {
         let json = serde_json::to_value(&original).expect("serialize");
         let back: TaskAuthStatusResponse = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, original);
+        assert_eq!(back.providers[0].kind(), "linear");
+    }
+
+    #[test]
+    fn a_status_from_before_connections_reads_its_id_as_its_kind() {
+        // Older daemons sent one row per provider *kind*, with no `kind` field
+        // — the id was the kind. A newer client must still know what backend
+        // it is looking at.
+        let decoded = decode(serde_json::json!({
+            "providers": [{ "provider": "linear", "display_name": "Linear",
+                            "state": "connected", "account": "Nima" }]
+        }));
+        assert_eq!(decoded.providers[0].kind(), "linear");
     }
 }
 
@@ -778,5 +935,175 @@ mod state_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod task_scope_tests {
+    use super::{GroupAxis, Task, TaskGroup, TaskId, TaskScope, TaskState};
+
+    fn task(key: &str, groups: &[(GroupAxis, &str)], labels: &[&str], status: &str) -> Task {
+        Task {
+            id: TaskId {
+                provider: "linear".into(),
+                external_id: key.into(),
+            },
+            display_key: key.into(),
+            title: key.into(),
+            description: None,
+            state: TaskState::Todo,
+            state_name: status.into(),
+            url: String::new(),
+            branch_name: String::new(),
+            updated_at: String::new(),
+            kind: Default::default(),
+            parent_id: None,
+            parent_key: None,
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            groups: groups
+                .iter()
+                .map(|(axis, id)| TaskGroup::new(axis.clone(), *id, *id))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_empty_scope_is_everything() {
+        let scope = TaskScope::default();
+        assert!(scope.is_empty());
+        assert!(scope.matches(&task("A-1", &[], &[], "Todo")));
+        assert_eq!(scope.apply(vec![task("A-1", &[], &[], "Todo")]).len(), 1);
+    }
+
+    #[test]
+    fn within_one_axis_any_of_the_values_matches() {
+        // Picking a second project is how you widen a view you narrowed.
+        let mut scope = TaskScope::default();
+        scope.toggle_group(GroupAxis::Project, "alpha");
+        scope.toggle_group(GroupAxis::Project, "beta");
+        assert!(scope.matches(&task("A", &[(GroupAxis::Project, "alpha")], &[], "Todo")));
+        assert!(scope.matches(&task("B", &[(GroupAxis::Project, "beta")], &[], "Todo")));
+        assert!(!scope.matches(&task("C", &[(GroupAxis::Project, "gamma")], &[], "Todo")));
+    }
+
+    #[test]
+    fn across_axes_every_facet_must_match() {
+        // A team AND an iteration means both — this is the rule that makes a
+        // space's filters a scope rather than a suggestion.
+        let mut scope = TaskScope::default();
+        scope.toggle_group(GroupAxis::Team, "core");
+        scope.toggle_group(GroupAxis::Iteration, "s7");
+        let both = task(
+            "A",
+            &[(GroupAxis::Team, "core"), (GroupAxis::Iteration, "s7")],
+            &[],
+            "Todo",
+        );
+        let team_only = task("B", &[(GroupAxis::Team, "core")], &[], "Todo");
+        assert!(scope.matches(&both));
+        assert!(!scope.matches(&team_only));
+    }
+
+    #[test]
+    fn a_task_missing_the_axis_entirely_is_outside_the_scope() {
+        let mut scope = TaskScope::default();
+        scope.toggle_group(GroupAxis::Project, "alpha");
+        assert!(!scope.matches(&task("A", &[], &[], "Todo")));
+    }
+
+    #[test]
+    fn labels_and_statuses_are_facets_like_any_other() {
+        let mut scope = TaskScope::default();
+        scope.toggle_label("infra");
+        scope.toggle_status("In Review");
+        assert!(scope.matches(&task("A", &[], &["infra", "ops"], "In Review")));
+        assert!(!scope.matches(&task("B", &[], &["ops"], "In Review")));
+        assert!(!scope.matches(&task("C", &[], &["infra"], "Todo")));
+    }
+
+    #[test]
+    fn a_status_the_provider_did_not_name_falls_back_to_the_state_label() {
+        let mut t = task("A", &[], &[], "");
+        t.state = TaskState::InProgress;
+        assert_eq!(t.status_name(), TaskState::InProgress.label());
+        let mut scope = TaskScope::default();
+        scope.toggle_status(TaskState::InProgress.label());
+        assert!(scope.matches(&t));
+    }
+
+    #[test]
+    fn untoggling_the_last_value_drops_the_axis_rather_than_leaving_it_empty() {
+        // An axis selecting nothing must not serialize, and must not read back
+        // as "this axis filters" — an empty set matches every task.
+        let mut scope = TaskScope::default();
+        scope.toggle_group(GroupAxis::Project, "alpha");
+        scope.toggle_group(GroupAxis::Project, "alpha");
+        assert!(scope.groups.is_empty());
+        assert!(scope.is_empty());
+    }
+
+    #[test]
+    fn a_scope_round_trips_through_json_with_its_axes_named() {
+        let mut scope = TaskScope::default();
+        scope.toggle_group(GroupAxis::Iteration, "s7");
+        scope.toggle_group(GroupAxis::Other("squad".into()), "red");
+        scope.toggle_label("infra");
+        scope.toggle_status("Todo");
+        let json = serde_json::to_string(&scope).expect("serialize");
+        // The exact shape, pinned: it is what a space stores in settings.json,
+        // what crosses the wire on a task call, and what the reference doc
+        // shows. Those three drifting apart is how a scope stops filtering.
+        assert_eq!(
+            json,
+            r#"{"groups":{"iteration":["s7"],"squad":["red"]},"labels":["infra"],"statuses":["Todo"]}"#
+        );
+        let back: TaskScope = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, scope);
+    }
+
+    #[test]
+    fn a_mistyped_scope_is_refused_rather_than_read_as_no_filters_at_all() {
+        // `{"project":[...]}` looks plausible — it is what the axis map holds —
+        // but it is a level too shallow. Accepting it would leave a space that
+        // means to be filtered showing every task on its connection.
+        let e = serde_json::from_str::<TaskScope>(r#"{"project":["alpha"]}"#)
+            .expect_err("refused");
+        assert!(e.to_string().contains("unknown field"), "{e}");
+        // The right shape still reads.
+        let ok: TaskScope =
+            serde_json::from_str(r#"{"groups":{"project":["alpha"]}}"#).expect("reads");
+        assert!(ok.group_selected(&GroupAxis::Project, "alpha"));
+    }
+
+    #[test]
+    fn an_unset_scope_serializes_to_an_empty_object() {
+        // A space that filters nothing must not write three empty collections
+        // into settings.json.
+        let json = serde_json::to_string(&TaskScope::default()).expect("serialize");
+        assert_eq!(json, "{}");
+    }
+
+    #[test]
+    fn apply_keeps_only_what_is_inside() {
+        let mut scope = TaskScope::default();
+        scope.toggle_group(GroupAxis::Project, "alpha");
+        let kept = scope.apply(vec![
+            task("A", &[(GroupAxis::Project, "alpha")], &[], "Todo"),
+            task("B", &[(GroupAxis::Project, "beta")], &[], "Todo"),
+        ]);
+        assert_eq!(
+            kept.iter().map(|t| t.display_key.as_str()).collect::<Vec<_>>(),
+            ["A"]
+        );
+    }
+
+    #[test]
+    fn selected_count_adds_every_facet_up() {
+        let mut scope = TaskScope::default();
+        scope.toggle_group(GroupAxis::Project, "alpha");
+        scope.toggle_group(GroupAxis::Project, "beta");
+        scope.toggle_label("infra");
+        scope.toggle_status("Todo");
+        assert_eq!(scope.selected_count(), 4);
     }
 }

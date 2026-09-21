@@ -1,5 +1,6 @@
 import { useApp } from "../state/store";
 import { SidebarProject } from "./SidebarProject";
+import { SpaceSelector } from "./SpaceSelector";
 import { buildSidebarItems } from "../utils/sidebar";
 
 export function Sidebar({ isMobile = false }: { isMobile?: boolean }) {
@@ -8,6 +9,7 @@ export function Sidebar({ isMobile = false }: { isMobile?: boolean }) {
 
   return (
     <div className="h-full overflow-y-auto bg-[var(--ok-panel)]">
+      <SpaceSelector workspace={state.workspace} />
       <div className="border-b border-[var(--ok-border)] px-3 py-3">
         <div className="text-[13px] font-bold leading-4 text-[var(--ok-text)]">Okena</div>
         <div className="mt-1 text-[10px] text-[var(--ok-text-muted)]">remote workspace</div>

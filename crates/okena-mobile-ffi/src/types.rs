@@ -12,6 +12,7 @@ use crate::api::{
     state::{
         FolderInfo as NativeFolderInfo, FullscreenInfo as NativeFullscreenInfo,
         ProjectInfo as NativeProjectInfo, ServiceInfo as NativeServiceInfo,
+        SpaceInfo as NativeSpaceInfo,
     },
     terminal::{
         CellData as NativeCellData, CursorShape as NativeCursorShape,
@@ -221,6 +222,28 @@ impl From<NativeFolderInfo> for FolderInfo {
             name: f.name,
             project_ids: f.project_ids,
             folder_color: f.folder_color,
+        }
+    }
+}
+
+/// One space: a separate set of projects, agents, tasks and roots.
+///
+/// Not a "workspace" — okena already uses that word for the one set of
+/// projects and layouts saved per profile.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct SpaceInfo {
+    pub id: String,
+    pub name: String,
+    /// One of this space's agents is waiting on you.
+    pub agent_waiting: bool,
+}
+
+impl From<NativeSpaceInfo> for SpaceInfo {
+    fn from(s: NativeSpaceInfo) -> Self {
+        SpaceInfo {
+            id: s.id,
+            name: s.name,
+            agent_waiting: s.agent_waiting,
         }
     }
 }

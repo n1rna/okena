@@ -169,6 +169,8 @@ mod tests {
 
     fn make_state(projects: Vec<ApiProject>) -> StateResponse {
         StateResponse {
+            spaces: Vec::new(),
+            active_space: okena_core::spaces::default_space_id(),
             state_version: 1,
             projects,
             focused_project_id: None,
@@ -213,6 +215,7 @@ mod tests {
             })
         };
         ApiProject {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: id.to_string(),
             path: "/tmp".to_string(),
@@ -454,6 +457,7 @@ mod tests {
     #[test]
     fn collect_terminal_sizes_extracts_from_layout() {
         let state = make_state(vec![ApiProject {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".into(),
             name: "p1".into(),
             path: "/tmp".into(),

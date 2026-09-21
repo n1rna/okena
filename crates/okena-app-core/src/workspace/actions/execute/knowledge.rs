@@ -29,16 +29,41 @@ const MAX_DOC_BYTES: u64 = 2 * 1024 * 1024;
 ///
 /// None when project discovery is off, and never a worktree (a second checkout
 /// of a repo already listed) or an agent session (rooted above repos, not in
-/// one).
+/// one). Only the active space's projects: each space has its own roots, so a
+/// repo in another space must not put a store on this one's list.
+/// What a space looks for knowledge in.
+///
+/// The two halves travel together because both are the *space's*: its own
+/// projects, and the registered stores it follows, in its own order. Bundling
+/// them keeps every helper below taking one scope rather than two arguments
+/// that must not be mixed between spaces.
+#[derive(Clone, Debug, Default)]
+pub struct KnowledgeSources {
+    pub projects: Vec<ProjectSource>,
+    /// `None` is every registered store — what a profile had before spaces.
+    /// `Some` is exactly those, in that order.
+    pub follows: Option<Vec<String>>,
+}
+
+/// The knowledge sources for the active space.
+pub fn knowledge_sources(projects: &[ProjectData], settings: &AppSettings) -> KnowledgeSources {
+    KnowledgeSources {
+        projects: knowledge_project_sources(projects, settings),
+        follows: settings.active_space().knowledge.stores.clone(),
+    }
+}
+
 pub fn knowledge_project_sources(
     projects: &[ProjectData],
     settings: &AppSettings,
 ) -> Vec<ProjectSource> {
-    if !settings.harness.knowledge.projects {
+    let space = settings.active_space();
+    if !space.knowledge.projects {
         return Vec::new();
     }
     projects
         .iter()
+        .filter(|p| p.space_id == settings.active_space)
         .filter(|p| p.worktree_info.is_none() && !p.is_any_agent_session())
         .map(|p| ProjectSource {
             name: p.name.clone(),
@@ -50,12 +75,12 @@ pub fn knowledge_project_sources(
 /// Run a knowledge action; `None` for any other action.
 pub fn execute_knowledge_action(
     action: &ActionRequest,
-    projects: &[ProjectSource],
+    sources: &KnowledgeSources,
     settings: &AppSettings,
 ) -> Option<ActionResult> {
     let registry = registry::registry_path(&get_config_dir());
     ensure_defaults(&registry);
-    execute_at(&registry, action, projects, settings)
+    execute_at(&registry, action, sources, settings)
 }
 
 /// Put okena's own briefs on disk and in the registry, once per run.
@@ -93,55 +118,55 @@ pub(super) fn defaults_store() -> std::path::PathBuf {
 fn execute_at(
     registry: &Path,
     action: &ActionRequest,
-    projects: &[ProjectSource],
+    sources: &KnowledgeSources,
     settings: &AppSettings,
 ) -> Option<ActionResult> {
     Some(match action {
         ActionRequest::KnowledgeStores => to_result(
-            serde_json::to_value(stores(registry, projects)),
+            serde_json::to_value(stores(registry, sources)),
             "knowledge stores",
         ),
-        ActionRequest::KnowledgeTree { root } => tree_of(registry, projects, root.as_deref()),
+        ActionRequest::KnowledgeTree { root } => tree_of(registry, sources, root.as_deref()),
         ActionRequest::KnowledgeRead { root, path } => {
-            read(registry, projects, root.as_deref(), path)
+            read(registry, sources, root.as_deref(), path)
         }
         ActionRequest::KnowledgeWrite {
             root,
             path,
             content,
             revision,
-        } => write(registry, projects, root.as_deref(), path, content, revision),
+        } => write(registry, sources, root.as_deref(), path, content, revision),
         ActionRequest::KnowledgeFileCreate {
             root,
             path,
             content,
-        } => in_root(registry, projects, root.as_deref(), |key, dir| {
+        } => in_root(registry, sources, root.as_deref(), |key, dir| {
             super::document_files::create_file(key, dir, path, content, MAX_DOC_BYTES)
         }),
         ActionRequest::KnowledgeFolderCreate { root, path } => {
-            in_root(registry, projects, root.as_deref(), |key, dir| {
+            in_root(registry, sources, root.as_deref(), |key, dir| {
                 super::document_files::create_folder(key, dir, path)
             })
         }
         ActionRequest::KnowledgeFileRename { root, from, to } => {
-            in_root(registry, projects, root.as_deref(), |key, dir| {
+            in_root(registry, sources, root.as_deref(), |key, dir| {
                 super::document_files::rename(key, dir, tree::resolve_document, from, to)
             })
         }
         ActionRequest::KnowledgeFileDelete { root, path } => {
-            in_root(registry, projects, root.as_deref(), |key, dir| {
+            in_root(registry, sources, root.as_deref(), |key, dir| {
                 super::document_files::delete(key, dir, tree::resolve_document, path)
             })
         }
-        ActionRequest::KnowledgeOverrides { path } => overrides(registry, projects, path),
+        ActionRequest::KnowledgeOverrides { path } => overrides(registry, sources, path),
         ActionRequest::KnowledgeOverride { root, path } => {
-            override_into(registry, projects, root, path)
+            override_into(registry, sources, root, path)
         }
         ActionRequest::KnowledgeStoreClone { url, path } => match git::clone_store(
             registry,
             url,
             path.as_deref(),
-            &settings.harness.knowledge.clone_dir(),
+            &settings.active_space().knowledge.clone_dir(),
         ) {
             Ok(out) => registered(out),
             Err(e) => failed(e),
@@ -182,18 +207,18 @@ fn execute_at(
                 Err(e) => failed(e),
             }
         }
-        ActionRequest::KnowledgeStoreFetch { root } => sync(registry, projects, root, |path| {
+        ActionRequest::KnowledgeStoreFetch { root } => sync(registry, sources, root, |path| {
             git::fetch(path).map(|()| git::status(path).unwrap_or_default())
         }),
-        ActionRequest::KnowledgeStorePull { root } => sync(registry, projects, root, git::pull),
+        ActionRequest::KnowledgeStorePull { root } => sync(registry, sources, root, git::pull),
         ActionRequest::KnowledgeStoreCommit {
             root,
             paths,
             message,
-        } => sync(registry, projects, root, |path| {
+        } => sync(registry, sources, root, |path| {
             git::commit(path, paths, message)
         }),
-        ActionRequest::KnowledgeStorePush { root } => sync(registry, projects, root, git::push),
+        ActionRequest::KnowledgeStorePush { root } => sync(registry, sources, root, git::push),
         _ => return None,
     })
 }
@@ -218,16 +243,17 @@ fn registered(out: RegisterOutcome) -> ActionResult {
     })))
 }
 
-fn discovered(registry: &Path, projects: &[ProjectSource]) -> KnowledgeStores {
+fn discovered(registry: &Path, sources: &KnowledgeSources) -> KnowledgeStores {
     discover::discover(&Sources {
         registry_path: registry.to_path_buf(),
-        projects: projects.to_vec(),
+        projects: sources.projects.clone(),
+        stores: sources.follows.clone(),
     })
 }
 
 /// Every root, with sync state on each store.
-fn stores(registry: &Path, projects: &[ProjectSource]) -> KnowledgeStores {
-    let mut stores = discovered(registry, projects);
+fn stores(registry: &Path, sources: &KnowledgeSources) -> KnowledgeStores {
+    let mut stores = discovered(registry, sources);
     git::attach_status(&mut stores);
     stores
 }
@@ -242,8 +268,8 @@ fn stores(registry: &Path, projects: &[ProjectSource]) -> KnowledgeStores {
 /// where a copy could go and whether putting it there would have any effect.
 /// The daemon answers rather than the client, because the order is resolution's
 /// and nothing else should be reimplementing it.
-fn overrides(registry: &Path, projects: &[ProjectSource], path: &str) -> ActionResult {
-    let layers = candidates(registry, projects);
+fn overrides(registry: &Path, sources: &KnowledgeSources, path: &str) -> ActionResult {
+    let layers = candidates(registry, sources);
     let layered = prompts::is_layered(path);
     let listed: Vec<serde_json::Value> = layers
         .iter()
@@ -273,8 +299,8 @@ fn overrides(registry: &Path, projects: &[ProjectSource], path: &str) -> ActionR
 
 /// Every root a copy could go in, in resolution order: healthy, and not
 /// okena's own.
-fn candidates(registry: &Path, projects: &[ProjectSource]) -> Vec<KnowledgeRoot> {
-    discovered(registry, projects)
+fn candidates(registry: &Path, sources: &KnowledgeSources) -> Vec<KnowledgeRoot> {
+    discovered(registry, sources)
         .roots
         .into_iter()
         .filter(|r| r.healthy && !r.builtin)
@@ -290,15 +316,15 @@ fn candidates(registry: &Path, projects: &[ProjectSource]) -> Vec<KnowledgeRoot>
 /// one was made for.
 fn override_into(
     registry: &Path,
-    projects: &[ProjectSource],
+    sources: &KnowledgeSources,
     root: &str,
     path: &str,
 ) -> ActionResult {
-    let target = match resolve_writable_root(registry, projects, Some(root)) {
+    let target = match resolve_writable_root(registry, sources, Some(root)) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
-    let defaults = match discovered(registry, projects)
+    let defaults = match discovered(registry, sources)
         .roots
         .into_iter()
         .find(|r| r.builtin && r.healthy)
@@ -365,10 +391,10 @@ fn read_only(root: &KnowledgeRoot) -> String {
 /// refusal has to live at the daemon.
 pub(super) fn resolve_writable_root(
     registry: &Path,
-    projects: &[ProjectSource],
+    sources: &KnowledgeSources,
     key: Option<&str>,
 ) -> Result<KnowledgeRoot, String> {
-    let root = resolve_root(registry, projects, key)?;
+    let root = resolve_root(registry, sources, key)?;
     if root.builtin {
         return Err(read_only(&root));
     }
@@ -379,10 +405,10 @@ pub(super) fn resolve_writable_root(
 /// never a path taken on trust.
 pub(super) fn resolve_root(
     registry: &Path,
-    projects: &[ProjectSource],
+    sources: &KnowledgeSources,
     key: Option<&str>,
 ) -> Result<KnowledgeRoot, String> {
-    let stores = discovered(registry, projects);
+    let stores = discovered(registry, sources);
     let root = match key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(key) => stores.root(key).cloned().ok_or_else(|| {
             format!(
@@ -404,8 +430,8 @@ pub(super) fn resolve_root(
     Ok(root)
 }
 
-fn tree_of(registry: &Path, projects: &[ProjectSource], key: Option<&str>) -> ActionResult {
-    let root = match resolve_root(registry, projects, key) {
+fn tree_of(registry: &Path, sources: &KnowledgeSources, key: Option<&str>) -> ActionResult {
+    let root = match resolve_root(registry, sources, key) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -417,11 +443,11 @@ fn tree_of(registry: &Path, projects: &[ProjectSource], key: Option<&str>) -> Ac
 
 fn read(
     registry: &Path,
-    projects: &[ProjectSource],
+    sources: &KnowledgeSources,
     key: Option<&str>,
     path: &str,
 ) -> ActionResult {
-    let root = match resolve_root(registry, projects, key) {
+    let root = match resolve_root(registry, sources, key) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -458,13 +484,13 @@ fn read(
 /// [`read`]: a write must not be a way out of a root that a read is not.
 fn write(
     registry: &Path,
-    projects: &[ProjectSource],
+    sources: &KnowledgeSources,
     key: Option<&str>,
     path: &str,
     content: &str,
     revision: &str,
 ) -> ActionResult {
-    let root = match resolve_writable_root(registry, projects, key) {
+    let root = match resolve_writable_root(registry, sources, key) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -497,11 +523,11 @@ fn write(
 /// rename simply stops showing.
 fn in_root(
     registry: &Path,
-    projects: &[ProjectSource],
+    sources: &KnowledgeSources,
     key: Option<&str>,
     op: impl FnOnce(&str, &Path) -> ActionResult,
 ) -> ActionResult {
-    match resolve_writable_root(registry, projects, key) {
+    match resolve_writable_root(registry, sources, key) {
         Ok(root) => op(&root.key, Path::new(&root.path)),
         Err(e) => ActionResult::Err(e),
     }
@@ -523,11 +549,11 @@ fn register(registry: &Path, path: &str) -> ActionResult {
 /// with its sync state after.
 fn sync(
     registry: &Path,
-    projects: &[ProjectSource],
+    sources: &KnowledgeSources,
     key: &str,
     op: impl FnOnce(&Path) -> Result<okena_core::knowledge::KnowledgeGitStatus, KnowledgeError>,
 ) -> ActionResult {
-    let root = match resolve_root(registry, projects, Some(key)) {
+    let root = match resolve_root(registry, sources, Some(key)) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -629,11 +655,11 @@ pub(super) fn draft(
     }
     let context_items =
         super::context::resolve_for_launch(&ws.data.projects, settings, &context_refs);
-    let projects = knowledge_project_sources(&ws.data.projects, settings);
+    let sources = knowledge_sources(&ws.data.projects, settings);
     let registry = registry::registry_path(&get_config_dir());
     // A draft session exists to write into the root, so okena's own is refused
     // here for the same reason a save is.
-    let root = match resolve_writable_root(&registry, &projects, root.as_deref()) {
+    let root = match resolve_writable_root(&registry, &sources, root.as_deref()) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -827,13 +853,34 @@ mod tests {
     }
 
     fn run(sandbox: &Path, projects: &[ProjectSource], action: ActionRequest) -> ActionResult {
+        run_following(sandbox, projects, None, action)
+    }
+
+    /// Run an action as a space that follows exactly `follows`, in that order.
+    fn run_following(
+        sandbox: &Path,
+        projects: &[ProjectSource],
+        follows: Option<&[&str]>,
+        action: ActionRequest,
+    ) -> ActionResult {
         execute_at(
             &registry(sandbox),
             &action,
-            projects,
+            &super::KnowledgeSources {
+                projects: projects.to_vec(),
+                follows: follows.map(|f| f.iter().map(|s| s.to_string()).collect()),
+            },
             &AppSettings::default(),
         )
         .expect("a knowledge action")
+    }
+
+    /// The sources a space with these projects and every registered store has.
+    fn sources(projects: &[ProjectSource]) -> super::KnowledgeSources {
+        super::KnowledgeSources {
+            projects: projects.to_vec(),
+            follows: None,
+        }
     }
 
     /// Decode a successful action's payload into whatever the binding asks for.
@@ -883,7 +930,7 @@ mod tests {
             .collect();
         assert_eq!(names, ["app"]);
 
-        settings.harness.knowledge.projects = false;
+        settings.active_space_mut().knowledge.projects = false;
         assert!(knowledge_project_sources(&[plain], &settings).is_empty());
     }
 
@@ -1379,9 +1426,10 @@ mod tests {
             name: "web".into(),
             path: repo.clone(),
         }];
+        let sources = sources(&projects);
         // The layers a launch would resolve through, in the daemon's order.
         let layers = || -> Vec<(String, std::path::PathBuf)> {
-            discovered(&registry(&sandbox), &projects)
+            discovered(&registry(&sandbox), &sources)
                 .roots
                 .into_iter()
                 .filter(|r| r.healthy && !r.builtin)
@@ -1517,4 +1565,102 @@ mod tests {
         );
         std::fs::remove_dir_all(&sandbox).ok();
     }
+
+    // ---- a space's own roots (QBL-430) ----
+
+    #[test]
+    fn a_space_sees_only_the_stores_it_follows_in_its_own_order() {
+        let sandbox = tmpdir("space-roots");
+        let a = sandbox.join("a");
+        let b = sandbox.join("b");
+        store(&a, "acme-eng");
+        store(&b, "beta-eng");
+        for path in [&a, &b] {
+            let _registered: serde_json::Value = ok!(run(
+                &sandbox,
+                &[],
+                ActionRequest::KnowledgeStoreRegister {
+                    path: path.to_string_lossy().into_owned(),
+                },
+            ));
+        }
+
+        // Default follows every registered store.
+        let all: KnowledgeStores = ok!(run(&sandbox, &[], ActionRequest::KnowledgeStores));
+        let keys: Vec<&str> = all
+            .roots
+            .iter()
+            .filter(|r| !r.builtin)
+            .map(|r| r.key.as_str())
+            .collect();
+        assert!(keys.contains(&"store:acme-eng"), "{keys:?}");
+        assert!(keys.contains(&"store:beta-eng"), "{keys:?}");
+
+        // A space that follows one sees one…
+        let one: KnowledgeStores = ok!(run_following(
+            &sandbox,
+            &[],
+            Some(&["beta-eng"]),
+            ActionRequest::KnowledgeStores
+        ));
+        let keys: Vec<&str> = one
+            .roots
+            .iter()
+            .filter(|r| !r.builtin)
+            .map(|r| r.key.as_str())
+            .collect();
+        assert_eq!(keys, ["store:beta-eng"]);
+
+        // …and the order it lists them in is the order they are shown.
+        let ordered: KnowledgeStores = ok!(run_following(
+            &sandbox,
+            &[],
+            Some(&["beta-eng", "acme-eng"]),
+            ActionRequest::KnowledgeStores
+        ));
+        let keys: Vec<&str> = ordered
+            .roots
+            .iter()
+            .filter(|r| !r.builtin)
+            .map(|r| r.key.as_str())
+            .collect();
+        assert_eq!(keys, ["store:beta-eng", "store:acme-eng"]);
+    }
+
+    #[test]
+    fn a_new_space_follows_no_store_at_all() {
+        let sandbox = tmpdir("space-empty");
+        let a = sandbox.join("a");
+        store(&a, "acme-eng");
+        let _registered: serde_json::Value = ok!(run(
+            &sandbox,
+            &[],
+            ActionRequest::KnowledgeStoreRegister {
+                path: a.to_string_lossy().into_owned(),
+            },
+        ));
+        let none: KnowledgeStores = ok!(run_following(
+            &sandbox,
+            &[],
+            Some(&[]),
+            ActionRequest::KnowledgeStores
+        ));
+        assert!(
+            none.roots.iter().all(|r| r.builtin),
+            "a new space starts with no roots of its own"
+        );
+    }
+
+    #[test]
+    fn following_a_store_that_was_unregistered_is_skipped_not_an_error() {
+        let sandbox = tmpdir("space-stale");
+        let listed: KnowledgeStores = ok!(run_following(
+            &sandbox,
+            &[],
+            Some(&["gone"]),
+            ActionRequest::KnowledgeStores
+        ));
+        assert!(listed.roots.iter().all(|r| r.builtin));
+    }
+
 }

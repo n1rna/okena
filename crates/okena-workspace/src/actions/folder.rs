@@ -10,15 +10,39 @@ impl Workspace {
     /// Create a new folder, appending it to project_order
     pub fn create_folder(&mut self, name: String, cx: &mut impl WorkspaceCx) -> String {
         let id = uuid::Uuid::new_v4().to_string();
+        let space_id = self.active_space().to_string();
         self.data.folders.push(FolderData {
             id: id.clone(),
             name,
             project_ids: Vec::new(),
             folder_color: FolderColor::default(),
+            space_id,
         });
         self.data.project_order.push(id.clone());
         self.notify_data(cx);
         id
+    }
+
+    /// Delete every folder belonging to `space_id`.
+    ///
+    /// Part of deleting a space. Its projects go through the ordinary delete
+    /// first; its folders would otherwise stay in `workspace.json` forever —
+    /// invisible, because nothing shows another space's folders, and
+    /// unreachable, because the space they name is gone.
+    ///
+    /// Returns how many were removed.
+    pub fn delete_folders_in_space(&mut self, space_id: &str, cx: &mut impl WorkspaceCx) -> usize {
+        let ids: Vec<String> = self
+            .data
+            .folders
+            .iter()
+            .filter(|f| f.space_id == space_id)
+            .map(|f| f.id.clone())
+            .collect();
+        for id in &ids {
+            self.delete_folder(id, cx);
+        }
+        ids.len()
     }
 
     /// Delete a folder, splicing its contained projects back into project_order at the folder's position
@@ -217,6 +241,7 @@ mod tests {
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
@@ -309,6 +334,7 @@ mod tests {
             vec!["p1", "f1", "p3"],
         );
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p2".to_string()],
@@ -327,6 +353,7 @@ mod tests {
             vec!["f1", "p2", "p3"],
         );
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string()],
@@ -353,6 +380,7 @@ mod gpui_tests {
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
@@ -423,6 +451,7 @@ mod gpui_tests {
         let mut data =
             make_workspace_data(vec![make_project("p1"), make_project("p2")], vec!["f1"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
@@ -447,6 +476,7 @@ mod gpui_tests {
             vec!["f1", "p1", "p2"],
         );
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec![],
@@ -472,12 +502,14 @@ mod gpui_tests {
         );
         data.folders = vec![
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
                 folder_color: FolderColor::default(),
             },
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
@@ -517,6 +549,7 @@ mod gpui_tests {
         // ONLY main_window and leaves FolderData.collapsed=false.
         let mut data = make_workspace_data(vec![], vec!["f1"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec![],
@@ -546,6 +579,7 @@ mod gpui_tests {
         // slice 05.
         let mut data = make_workspace_data(vec![], vec!["f1"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec![],
@@ -574,6 +608,7 @@ mod gpui_tests {
         // would surface here.
         let mut data = make_workspace_data(vec![], vec!["f1"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec![],
@@ -599,6 +634,7 @@ mod gpui_tests {
         // expanding removes the entry rather than storing false.
         let mut data = make_workspace_data(vec![], vec!["f1"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec![],
@@ -639,6 +675,7 @@ mod gpui_tests {
         // read leg of the toggle would always see main's state).
         let mut data = make_workspace_data(vec![], vec!["f1"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec![],
@@ -696,6 +733,7 @@ mod gpui_tests {
         // the next render.
         let mut data = make_workspace_data(vec![make_project("p1")], vec!["f1"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string()],
@@ -723,12 +761,14 @@ mod gpui_tests {
         );
         data.folders = vec![
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
                 folder_color: FolderColor::default(),
             },
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
@@ -772,12 +812,14 @@ mod gpui_tests {
         );
         data.folders = vec![
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
                 folder_color: FolderColor::default(),
             },
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
@@ -801,6 +843,29 @@ mod gpui_tests {
                 ws.active_folder_filter(WindowId::Main),
                 Some(&"f1".to_string())
             );
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_a_space_takes_its_folders_with_it(cx: &mut gpui::TestAppContext) {
+        // Otherwise they linger in workspace.json forever: invisible, because
+        // nothing shows another space's folders, and unreachable, because the
+        // space they name is gone.
+        let workspace = cx.new(|_cx| Workspace::new(WorkspaceData::empty()));
+
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            ws.set_active_space("client-a");
+            ws.create_folder("Theirs".into(), cx);
+            ws.set_active_space("default");
+            ws.create_folder("Mine".into(), cx);
+
+            assert_eq!(ws.delete_folders_in_space("client-a", cx), 1);
+            let left: Vec<&str> = ws.data().folders.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(left, ["Mine"]);
+            assert_eq!(ws.data().project_order.len(), 1, "the order shrank with it");
+
+            // Idempotent, and a space with no folders is a no-op.
+            assert_eq!(ws.delete_folders_in_space("client-a", cx), 0);
         });
     }
 }

@@ -24,6 +24,9 @@ okena-theme = { path = "../okena-theme", default-features = false }
 # `default-features = false` drops its `gpui` default feature so the headless
 # daemon links no gpui.
 okena-app-core = { path = "../okena-app-core", default-features = false }
+# Task backend connections: the daemon owns the credential file, so adding,
+# renaming and removing a connection happens here.
+okena-tasks = { path = "../okena-tasks" }
 # Remote bridge types (`BridgeReceiver`, `BridgeMessage`, `RemoteCommand`).
 # `default-features = false` drops its `gpui` default feature.
 okena-remote-server = { path = "../okena-remote-server", default-features = false }
@@ -31,6 +34,7 @@ okena-remote-server = { path = "../okena-remote-server", default-features = fals
 # Tokio reactor backing the gpui-free trait impls.
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "test-util"] }
 parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
 # PTY event channel type (`PtyEvent` receiver) shared with `okena-terminal`.

@@ -1307,6 +1307,7 @@ pub fn default_workspace() -> WorkspaceData {
             id: project_id.clone(),
             name: "Default".to_string(),
             path: home_dir,
+            space_id: okena_core::spaces::DEFAULT_SPACE_ID.to_string(),
             layout: Some(LayoutNode::new_terminal()),
             terminal_names: HashMap::new(),
             hidden_terminals: HashMap::new(),
@@ -1743,6 +1744,7 @@ mod tests {
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
@@ -1991,6 +1993,7 @@ mod tests {
             vec![make_project("p1")],
             vec!["f1", "p1"],
             vec![FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder".to_string(),
                 project_ids: vec!["p1".to_string(), "deleted_project".to_string()],
@@ -2145,6 +2148,7 @@ mod tests {
             vec![make_project("p1"), make_project("p2"), make_project("p3")],
             vec!["bad_folder", "p1"], // p2, p3 orphaned; bad_folder invalid
             vec![FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder".to_string(),
                 project_ids: vec!["p3".to_string(), "deleted".to_string()],
@@ -2575,6 +2579,7 @@ mod tests {
             vec![make_project("p1"), make_project("p2")],
             vec!["f1", "p1"],
             vec![FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "My Folder".to_string(),
                 project_ids: vec!["p2".to_string()],
@@ -2731,6 +2736,7 @@ mod tests {
             vec![make_project("p1"), wt_project],
             vec!["f1"],
             vec![FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder".to_string(),
                 project_ids: vec!["p1".to_string(), "wt1".to_string()],
@@ -3323,6 +3329,7 @@ mod tests {
             ],
             vec!["f1"],
             vec![FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder".to_string(),
                 project_ids: vec!["parent".to_string(), "wt1".to_string()],

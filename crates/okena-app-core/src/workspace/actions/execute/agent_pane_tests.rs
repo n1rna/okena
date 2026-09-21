@@ -133,6 +133,7 @@ fn settings() -> AppSettings {
 
 fn project(session: bool, default_shell: Option<ShellType>, layout: LayoutNode) -> ProjectData {
     ProjectData {
+        space_id: okena_core::spaces::default_space_id(),
         id: "session".into(),
         name: "Session".into(),
         path: "/work/tree".into(),

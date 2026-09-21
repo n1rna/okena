@@ -428,22 +428,21 @@ impl SettingsState {
     }
 
     /// List every store in OpenSpec's machine registry in the Specs view.
+    ///
+    /// Roots are per space (QBL-430), so this and its siblings edit the space
+    /// showing. Another space's roots are untouched.
     pub fn set_spec_discovery_registry(&mut self, value: bool, cx: &mut Context<Self>) {
-        self.settings.harness.specs.registry = value;
+        self.settings.active_space_mut().specs.registry = value;
         self.save_and_notify(cx);
     }
 
     /// Find OpenSpec roots and `store:` pointers in okena projects.
     pub fn set_spec_discovery_projects(&mut self, value: bool, cx: &mut Context<Self>) {
-        self.settings.harness.specs.projects = value;
+        self.settings.active_space_mut().specs.projects = value;
         self.save_and_notify(cx);
     }
 
-    /// Replace the extra spec folders.
-    ///
-    /// The legacy `spec_repo` is folded in by the caller's list (see
-    /// `HarnessConfig::spec_folders`), so it is cleared here: once someone has
-    /// edited the list, the list is the whole truth.
+    /// Replace the active space's extra spec folders.
     pub fn set_spec_folders(&mut self, folders: Vec<String>, cx: &mut Context<Self>) {
         let mut cleaned: Vec<String> = Vec::new();
         for folder in folders.into_iter().filter_map(opt_trimmed) {
@@ -451,8 +450,7 @@ impl SettingsState {
                 cleaned.push(folder);
             }
         }
-        self.settings.harness.specs.folders = cleaned;
-        self.settings.harness.spec_repo = None;
+        self.settings.active_space_mut().specs.folders = cleaned;
         self.save_and_notify(cx);
     }
 
@@ -477,32 +475,32 @@ impl SettingsState {
     /// Override where OpenSpec's store registry lives. Blank follows the CLI's
     /// own resolution.
     pub fn set_spec_data_dir(&mut self, value: String, cx: &mut Context<Self>) {
-        self.settings.harness.specs.data_dir = opt_trimmed(value);
+        self.settings.active_space_mut().specs.data_dir = opt_trimmed(value);
         self.save_and_notify(cx);
     }
 
     /// Override where OpenSpec's `config.json` lives. Blank follows the CLI's
     /// own resolution.
     pub fn set_spec_config_dir(&mut self, value: String, cx: &mut Context<Self>) {
-        self.settings.harness.specs.config_dir = opt_trimmed(value);
+        self.settings.active_space_mut().specs.config_dir = opt_trimmed(value);
         self.save_and_notify(cx);
     }
 
     /// Find knowledge in okena projects' `.okena/` folders.
     pub fn set_knowledge_discovery_projects(&mut self, value: bool, cx: &mut Context<Self>) {
-        self.settings.harness.knowledge.projects = value;
+        self.settings.active_space_mut().knowledge.projects = value;
         self.save_and_notify(cx);
     }
 
     /// Where a store is cloned when no destination is given. Blank is
     /// `~/knowledge`.
     pub fn set_knowledge_clone_dir(&mut self, value: String, cx: &mut Context<Self>) {
-        self.settings.harness.knowledge.clone_dir = opt_trimmed(value);
+        self.settings.active_space_mut().knowledge.clone_dir = opt_trimmed(value);
         self.save_and_notify(cx);
     }
 
     pub fn set_spec_clone_dir(&mut self, value: String, cx: &mut Context<Self>) {
-        self.settings.harness.specs.clone_dir = opt_trimmed(value);
+        self.settings.active_space_mut().specs.clone_dir = opt_trimmed(value);
         self.save_and_notify(cx);
     }
 
@@ -580,14 +578,27 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Which task manager the harness reads. Blank leaves it as it was: there
-    /// is always exactly one active provider.
-    pub fn set_harness_task_provider(&mut self, value: String, cx: &mut Context<Self>) {
-        let value = value.trim();
-        if value.is_empty() || self.settings.harness.task_provider == value {
+    /// Which task backend connection the active space reads. Blank leaves it
+    /// as it was: a space reads exactly one connection.
+    pub fn set_space_connection(&mut self, value: String, cx: &mut Context<Self>) {
+        let value = value.trim().to_string();
+        if value.is_empty() || self.settings.active_space().connection.as_deref() == Some(&value) {
             return;
         }
-        self.settings.harness.task_provider = value.to_string();
+        self.settings.active_space_mut().connection = Some(value);
+        self.save_and_notify(cx);
+    }
+
+    /// Replace the active space's hard task scope.
+    pub fn set_space_task_scope(
+        &mut self,
+        scope: okena_core::tasks::TaskScope,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.active_space().tasks == scope {
+            return;
+        }
+        self.settings.active_space_mut().tasks = scope;
         self.save_and_notify(cx);
     }
 

@@ -2520,6 +2520,7 @@ mod tests {
 
     fn project_with_terminal(id: &str, terminal_id: &str) -> okena_state::ProjectData {
         okena_state::ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: "Project".to_string(),
             path: "/tmp".to_string(),

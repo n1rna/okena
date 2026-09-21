@@ -86,10 +86,18 @@ impl HarnessPane {
     fn load_containers(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
         let provider = self.tasks.provider.clone();
+        // Offer the space's own teams first, so a new task defaults to
+        // somewhere the space can actually see it afterwards.
+        let scope = crate::settings::settings_entity(cx)
+            .read(cx)
+            .settings
+            .active_space()
+            .tasks
+            .clone();
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 client
-                    .post_action(ActionRequest::TaskContainers { provider })
+                    .post_action(ActionRequest::TaskContainers { provider, scope })
                     .and_then(|v| v.ok_or_else(|| "Missing teams".to_string()))
                     .map(|v| {
                         v.get("containers")

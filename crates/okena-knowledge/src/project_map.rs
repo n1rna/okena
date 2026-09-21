@@ -948,6 +948,7 @@ infrastructure:
                 name: "api".into(),
                 path: repo.clone(),
             }],
+            stores: None,
         });
         let keys: Vec<_> = found.roots.iter().map(|r| r.key.clone()).collect();
         assert_eq!(keys, [report.root_key.expect("a root key")]);

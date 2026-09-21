@@ -24,8 +24,9 @@ use std::collections::{HashMap, HashSet};
 use okena_core::agent_activity::AgentActivity;
 use okena_core::api::{
     ApiFolder, ApiFullscreen, ApiGitStatus, ApiHookExecution, ApiProject, ApiServiceInfo,
-    ApiWindow, ApiWorktreeMetadata, StateResponse,
+    ApiSpace, ApiWindow, ApiWorktreeMetadata, StateResponse,
 };
+use okena_core::spaces::SpaceData;
 use okena_workspace::state::{FolderData, ProjectData, WorkspaceData};
 
 /// Pure visibility projection for the remote `ApiProject.show_in_overview` wire
@@ -53,6 +54,7 @@ pub fn build_api_project(
     agent_activity: &HashMap<String, AgentActivity>,
 ) -> ApiProject {
     ApiProject {
+        space_id: p.space_id.clone(),
         agent_activity: p
             .layout
             .as_ref()
@@ -177,6 +179,7 @@ pub fn build_folders(folders: &[FolderData]) -> Vec<ApiFolder> {
             name: f.name.clone(),
             project_ids: f.project_ids.clone(),
             folder_color: f.folder_color,
+            space_id: f.space_id.clone(),
         })
         .collect()
 }
@@ -230,7 +233,43 @@ pub fn build_state_response(
         hooks,
         // The daemon fills these in from its extension host.
         extensions: Vec::new(),
+        // …and these from its settings, which this function does not take.
+        spaces: Vec::new(),
+        active_space: okena_core::spaces::default_space_id(),
     }
+}
+
+/// The spaces to put in a snapshot, in selector order, each flagged with
+/// whether one of its agents is waiting on the user.
+///
+/// Takes the `ApiProject`s the same snapshot carries rather than the raw
+/// workspace, so "waiting" means exactly what a client would conclude from the
+/// rows it was sent — the daemon and the sidebar cannot disagree about which
+/// dot is marked.
+pub fn build_spaces(spaces: &[SpaceData], projects: &[ApiProject]) -> Vec<ApiSpace> {
+    spaces
+        .iter()
+        .map(|space| ApiSpace {
+            id: space.id.clone(),
+            name: space.name.clone(),
+            connection: space.connection.clone(),
+            agent_waiting: projects
+                .iter()
+                .filter(|p| p.space_id == space.id)
+                // A closed session is history; it is not waiting on anyone.
+                .filter(|p| p.closed_at.is_none())
+                .any(project_wants_attention),
+        })
+        .collect()
+}
+
+/// Whether a session is asking for the user: either the agent said so itself,
+/// or one of its terminals looks like it is sitting at a prompt.
+fn project_wants_attention(p: &ApiProject) -> bool {
+    p.agent
+        .as_ref()
+        .is_some_and(|a| a.state.is_some_and(|s| s.wants_attention()))
+        || p.agent_activity.values().any(|a| a.wants_attention())
 }
 
 #[cfg(test)]

@@ -989,6 +989,7 @@ mod tests {
             },
         );
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: id.to_string(),
             path: std::env::temp_dir().to_string_lossy().into_owned(),

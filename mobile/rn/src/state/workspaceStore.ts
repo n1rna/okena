@@ -33,6 +33,8 @@ import type {
   OkenaNative,
   ProjectId,
   ProjectInfo,
+  SpaceId,
+  SpaceInfo,
   TerminalId,
 } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
@@ -53,6 +55,9 @@ export type WorkspaceNative = Pick<
   | 'getFullscreenTerminal'
   | 'getProjectLayoutJson'
   | 'secondsSinceActivity'
+  | 'getSpaces'
+  | 'getActiveSpace'
+  | 'activateSpace'
 >;
 
 /** Dependencies the store calls out to. Overridable for tests. */
@@ -66,7 +71,15 @@ export interface WorkspaceDeps {
  */
 export interface WorkspaceState {
   // ── state ────────────────────────────────────────────────────────────────
-  /** Projects from the cached remote state. */
+  /**
+   * The spaces the daemon holds, in selector order, Default first. Empty when
+   * there is nothing to choose between, or against a daemon from before
+   * spaces.
+   */
+  spaces: SpaceInfo[];
+  /** Which space is showing. `projects` and `folders` hold only its own. */
+  activeSpace: SpaceId;
+  /** Projects from the cached remote state — the active space's. */
   projects: ProjectInfo[];
   /** Folders from the cached remote state. */
   folders: FolderInfo[];
@@ -103,6 +116,11 @@ export interface WorkspaceState {
   selectProject(projectId: ProjectId): void;
   /** Select a terminal within the current project. Mirrors `selectTerminal`. */
   selectTerminal(terminalId: TerminalId): void;
+  /**
+   * Switch to a space. Fire-and-forget: the daemon owns which one is showing,
+   * and the next poll brings the new list of projects with it.
+   */
+  activateSpace(spaceId: SpaceId): void;
   /**
    * The currently-selected project object, or the first project as a fallback,
    * or `null`. Mirrors the Dart `selectedProject` getter. (Provided as a
@@ -177,6 +195,11 @@ function arrayEquals<T>(a: readonly T[], b: readonly T[]): boolean {
   return true;
 }
 
+/** What the selector draws for each space, so a rename or a waiting agent counts as a change. */
+function spaceKeys(spaces: SpaceInfo[]): string[] {
+  return spaces.map((s) => `${s.id}:${s.name}:${s.agentWaiting ? 1 : 0}`);
+}
+
 /** Resolve the selected project from a project list + selected id (Dart `selectedProject`). */
 function resolveSelectedProject(
   projects: ProjectInfo[],
@@ -198,6 +221,8 @@ function pollState(
   const newProjects = native.getProjects(connId);
   const focusedId = native.getFocusedProjectId(connId);
   const newFolders = native.getFolders(connId);
+  const newSpaces = native.getSpaces(connId);
+  const newActiveSpace = native.getActiveSpace(connId);
   const newProjectOrder = native.getProjectOrder(connId);
   const newFullscreen = native.getFullscreenTerminal(connId) ?? null;
 
@@ -220,6 +245,16 @@ function pollState(
   }
   if (!arrayEquals(newProjectOrder, prev.projectOrder)) {
     patch.projectOrder = newProjectOrder;
+    changed = true;
+  }
+  // A rename or an agent starting to wait changes a dot without changing any
+  // id, so compare what the selector actually draws.
+  if (!arrayEquals(spaceKeys(newSpaces), spaceKeys(prev.spaces))) {
+    patch.spaces = newSpaces;
+    changed = true;
+  }
+  if (newActiveSpace !== prev.activeSpace) {
+    patch.activeSpace = newActiveSpace;
     changed = true;
   }
   if (newFullscreen?.terminalId !== prev.fullscreenTerminal?.terminalId) {
@@ -303,6 +338,8 @@ function pollState(
  */
 export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
   create<WorkspaceState>((set, get) => ({
+    spaces: [],
+    activeSpace: 'default',
     projects: [],
     folders: [],
     projectOrder: [],
@@ -323,6 +360,8 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
     stop() {
       stopPolling();
       set({
+        spaces: [],
+        activeSpace: 'default',
         projects: [],
         folders: [],
         projectOrder: [],
@@ -348,6 +387,21 @@ export const useWorkspaceStore: UseBoundStore<StoreApi<WorkspaceState>> =
 
     selectTerminal(terminalId) {
       set({ selectedTerminalId: terminalId });
+    },
+
+    activateSpace(spaceId) {
+      const connId = activeConnId;
+      if (!connId || spaceId === get().activeSpace) return;
+      // The selections belong to the space being left; clearing them lets the
+      // next poll auto-select inside the space arrived in.
+      previousTerminalIds = null;
+      set({ selectedProjectId: null, selectedTerminalId: null, projectLayoutJson: null });
+      void deps()
+        .native.activateSpace(connId, spaceId)
+        .catch(() => {
+          // The next poll shows what actually happened; a failed switch leaves
+          // the highlight where it was.
+        });
     },
 
     getSelectedProject() {

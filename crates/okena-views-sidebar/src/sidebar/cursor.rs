@@ -6,7 +6,7 @@ use crate::{SidebarConfirm, SidebarDown, SidebarEscape, SidebarToggleExpand, Sid
 use gpui::*;
 use okena_workspace::state::ProjectData;
 use okena_workspace::state::agent_links::SessionPlacement;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 impl Sidebar {
     /// Initialize cursor to the focused project or first item
@@ -46,18 +46,9 @@ impl Sidebar {
         }
         let agents = self.agent_placement(cx);
         let workspace = self.workspace.read(cx);
-        let all_projects: HashMap<&str, &ProjectData> = workspace
-            .data()
-            .projects
-            .iter()
-            .map(|p| (p.id.as_str(), p))
-            .collect();
-        let all_project_ids: HashSet<&str> = workspace
-            .data()
-            .projects
-            .iter()
-            .map(|p| p.id.as_str())
-            .collect();
+        // The same map the render walk resolves through: the cursor has to
+        // reach exactly the rows on screen, no more and no fewer.
+        let (all_projects, all_project_ids) = super::visible_projects_by_id(workspace);
 
         // Pre-collect service names per project (avoids borrow issues with cx)
         let service_names: HashMap<String, Vec<String>> = if let Some(ref sm) = self.service_manager
@@ -95,7 +86,7 @@ impl Sidebar {
 
         // Build worktree children map
         let mut worktree_children_map: HashMap<String, Vec<&ProjectData>> = HashMap::new();
-        for parent in &workspace.data().projects {
+        for parent in workspace.projects_in_active_space() {
             if !parent.worktree_ids.is_empty() {
                 let mut children = Vec::new();
                 for wt_id in &parent.worktree_ids {
@@ -113,7 +104,7 @@ impl Sidebar {
 
         for id in &workspace.data().project_order {
             // Check if this is a folder
-            if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
+            if let Some(folder) = super::visible_folder(workspace, id) {
                 cursor_items.push(SidebarCursorItem::Folder {
                     folder_id: folder.id.clone(),
                 });

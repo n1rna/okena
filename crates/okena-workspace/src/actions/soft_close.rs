@@ -598,6 +598,7 @@ mod tests {
 
     fn project_with(layout: LayoutNode) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: "Project p1".to_string(),
             path: "/tmp/test".to_string(),
