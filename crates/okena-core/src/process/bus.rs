@@ -803,15 +803,37 @@ fn terminate_and_reap(tree: &ProcessTree, child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// A spawned child and everything it goes on to start, as one killable unit:
+/// a process group on Unix, a job object on Windows.
+///
+/// The bus puts every command it runs in one of these, and so should any other
+/// caller that spawns a program on a deadline. Killing the `Child` handle alone
+/// reaches the direct child only — descendants survive, and they keep the
+/// stdout/stderr pipes they inherited open, so collecting the output blocks for
+/// as long as they live however short the deadline was.
 #[cfg(unix)]
-struct ProcessTree {
+pub struct ProcessTree {
     process_group: libc::pid_t,
     terminated: AtomicBool,
 }
 
+impl ProcessTree {
+    /// Whether `child` has exited, **without reaping it**.
+    ///
+    /// Use this rather than [`std::process::Child::try_wait`] to drive a wait
+    /// loop over a tree: reaping the group leader frees its pid, and with it
+    /// the group id that [`terminate`](Self::terminate) is about to signal,
+    /// while descendants are still running under it.
+    pub fn exited(child: &mut std::process::Child) -> std::io::Result<bool> {
+        process_exited(child)
+    }
+}
+
 #[cfg(unix)]
 impl ProcessTree {
-    fn spawn(cmd: &mut std::process::Command) -> std::io::Result<(std::process::Child, Arc<Self>)> {
+    pub fn spawn(
+        cmd: &mut std::process::Command,
+    ) -> std::io::Result<(std::process::Child, Arc<Self>)> {
         use std::os::unix::process::CommandExt;
 
         // SAFETY: the closure runs in the forked child before exec and calls
@@ -855,7 +877,9 @@ impl ProcessTree {
         ))
     }
 
-    fn terminate(&self) {
+    /// Kill the whole tree. Idempotent, and safe to call on a leader that has
+    /// exited but not yet been reaped.
+    pub fn terminate(&self) {
         if self.terminated.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -870,14 +894,16 @@ impl ProcessTree {
 }
 
 #[cfg(windows)]
-struct ProcessTree {
+pub struct ProcessTree {
     job: std::os::windows::io::OwnedHandle,
     terminated: AtomicBool,
 }
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn spawn(cmd: &mut std::process::Command) -> std::io::Result<(std::process::Child, Arc<Self>)> {
+    pub fn spawn(
+        cmd: &mut std::process::Command,
+    ) -> std::io::Result<(std::process::Child, Arc<Self>)> {
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use std::os::windows::process::CommandExt;
         use windows_sys::Win32::System::JobObjects::{
@@ -940,7 +966,9 @@ impl ProcessTree {
         ))
     }
 
-    fn terminate(&self) {
+    /// Kill the whole tree. Idempotent, and safe to call on a leader that has
+    /// exited but not yet been reaped.
+    pub fn terminate(&self) {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::TerminateJobObject;
 
