@@ -445,6 +445,7 @@ an override of your own stays where you put it and simply stops applying.
 | `knowledge-draft` | Adding to or updating a knowledge root | `request`, `path`, `what`, `commit_note`, `context` |
 | `doc-refine` | Changing one open spec, change file or knowledge file, without committing | `request`, `file`, `path`, `root_path`, `what`, `context` |
 | `agent-session` | A free-form session against a goal you typed. Break down and Refine send their rendered brief as the goal | `goal`, `projects`, `context` |
+| `extension-build` | Building an okena [extension](extensions.md) from a summary, started by **Build an extension** on the Extensions page. The summary is optional, so it is a block | `summary`, `projects`, `context` |
 | `project-scan` | Writing or updating a repository's [project map](project-map.md#scanning) | `project`, `path`, `map_root`, `skill`, `start` |
 | `projects-scan` | Finding [links](project-map.md#scanning-links) between repositories | `projects`, `skill` |
 

@@ -251,6 +251,8 @@ async fn start_session(id: &str, agent: &ExtAgentLaunch, cx: &Context) -> Result
     let (reply, answer) = tokio::sync::oneshot::channel();
     let command = okena_remote_server::bridge::RemoteCommand::Action(ActionRequest::AgentStartSession {
         goal: agent.goal.clone(),
+        // An extension writes the whole goal itself; no standing brief wraps it.
+        brief: None,
         name: agent.name.clone().unwrap_or_default(),
         root: agent.root.clone().unwrap_or_default(),
         project_ids: agent.project_ids.clone(),

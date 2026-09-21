@@ -883,6 +883,7 @@ pub fn execute_action(
         ),
         ActionRequest::AgentStartSession {
             goal,
+            brief,
             name,
             root,
             project_ids,
@@ -896,6 +897,7 @@ pub fn execute_action(
             ws,
             window_id,
             goal,
+            brief,
             name,
             root,
             project_ids,

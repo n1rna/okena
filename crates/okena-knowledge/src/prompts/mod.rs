@@ -390,6 +390,81 @@ mod tests {
     }
 
     #[test]
+    fn the_extension_build_brief_is_okenas_own_until_a_root_overrides_it() {
+        // What the Extensions page's "Build an extension" launches with: the
+        // built-in points the agent at the docs, the template and the target,
+        // and stops short of installing.
+        let b = brief(
+            Flow::ExtensionBuild,
+            &[],
+            &vars(&[
+                ("summary", "\n\na widget that shows the build queue"),
+                ("projects", ""),
+                ("context", ""),
+            ]),
+        );
+        assert_eq!(b.source, Source::Builtin);
+        assert_eq!(b.name, "extension-build");
+        assert!(b.rendered.is_complete(), "{:?}", b.rendered.unknown);
+        for expected in [
+            "a widget that shows the build queue",
+            "docs/reference/extensions.md",
+            "examples/extension-template",
+            "examples/extension-library",
+            "wasm32-wasip2",
+            "Settings → Extensions",
+            "Do not install it",
+        ] {
+            assert!(
+                b.text().contains(expected),
+                "missing {expected}: {}",
+                b.text()
+            );
+        }
+
+        // No summary: still a whole brief, with nothing left dangling.
+        let empty = brief(
+            Flow::ExtensionBuild,
+            &[],
+            &vars(&[("summary", ""), ("projects", ""), ("context", "")]),
+        );
+        assert!(empty.rendered.is_complete(), "{:?}", empty.rendered.unknown);
+        assert!(
+            empty.text().starts_with("Build an okena extension."),
+            "{}",
+            empty.text()
+        );
+        assert!(empty.text().contains("examples/extension-template"));
+
+        // A knowledge root's own copy replaces it, and says so, which is what
+        // the launcher chip's tooltip names.
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            dir.path(),
+            "templates/briefs/extension-build.md",
+            "---\nname: acme-extension\n---\nBuild it the acme way: {summary}",
+        );
+        let b = brief(
+            Flow::ExtensionBuild,
+            &[("store:acme", dir.path())],
+            &vars(&[
+                ("summary", "a queue widget"),
+                ("projects", ""),
+                ("context", ""),
+            ]),
+        );
+        assert_eq!(b.text(), "Build it the acme way: a queue widget");
+        assert_eq!(b.name, "acme-extension");
+        assert_eq!(
+            b.source,
+            Source::Root {
+                key: "store:acme".into(),
+                path: "templates/briefs/extension-build.md".into()
+            }
+        );
+    }
+
+    #[test]
     fn a_fragment_renders_one_partial_with_its_values() {
         let mut vars = Vars::new();
         vars.insert("also", "QBL-2, QBL-3".to_string());
@@ -405,6 +480,8 @@ mod tests {
             TaskStart | TasksStart | TaskCoordinate | TasksCoordinate | TaskVerify => Some("opus"),
             TaskBreakDown | TaskCreate | TaskRefine | SpecDraft | DocumentRefine
             | KnowledgeDraft | ProjectScan | ProjectsScan => Some("sonnet"),
+            // Building an extension is implementation work, not a helper.
+            ExtensionBuild => Some("opus"),
             AgentSession => None,
         };
         for flow in Flow::all() {

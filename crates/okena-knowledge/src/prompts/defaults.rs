@@ -23,6 +23,7 @@ pub const fn file(flow: Flow) -> &'static str {
         Flow::KnowledgeDraft => include_str!("templates/briefs/knowledge-draft.md"),
         Flow::DocumentRefine => include_str!("templates/briefs/doc-refine.md"),
         Flow::AgentSession => include_str!("templates/briefs/agent-session.md"),
+        Flow::ExtensionBuild => include_str!("templates/briefs/extension-build.md"),
         Flow::ProjectScan => include_str!("templates/briefs/project-scan.md"),
         Flow::ProjectsScan => include_str!("templates/briefs/projects-scan.md"),
     }
