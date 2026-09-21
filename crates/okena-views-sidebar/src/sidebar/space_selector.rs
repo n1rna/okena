@@ -108,12 +108,11 @@ impl Sidebar {
         let t = theme(cx);
         let spaces = okena_workspace::spaces_state::spaces(cx);
         let active = okena_workspace::spaces_state::active_space(cx);
-        // One space is no choice: the row would be a single dot that does
-        // nothing, so it is not drawn until there is somewhere to go. The
-        // **+** lives in the list header's menu for that case.
-        if spaces.len() < 2 && !self.space_selector_forced {
-            return div().into_any_element();
-        }
+        // Drawn even with one space, and even with none. The **+** that adds
+        // a space lives in this row, so hiding the row on a profile that has
+        // only Default hid the only way to leave that state: no dots, no
+        // button, no spaces — ever. A lone dot beside a **+** is a small price
+        // for the feature being reachable at all.
 
         let active_at = spaces.iter().position(|s| s.id == active).unwrap_or(0);
         let fit = fit_selector(

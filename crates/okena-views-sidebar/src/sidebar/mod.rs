@@ -282,9 +282,6 @@ pub struct Sidebar {
     /// The spaces behind the **+N** chip while its menu is open: id, name, and
     /// whether one of its agents is waiting.
     pub(super) space_overflow_menu: Option<Vec<(String, String, bool)>>,
-    /// Draw the selector even with one space. Set while the add-a-space form
-    /// is open, so the row it came from does not vanish under it.
-    pub(super) space_selector_forced: bool,
     /// The space whose menu is open (rename / tasks / delete), and where its
     /// dot was, so the menu appears under it.
     pub(super) space_menu: Option<(String, Point<Pixels>)>,
@@ -387,7 +384,6 @@ impl Sidebar {
             create_button_bounds: Bounds::default(),
             space_row_bounds: Bounds::default(),
             space_overflow_menu: None,
-            space_selector_forced: false,
             space_menu: None,
             overflow_button_bounds: Bounds::default(),
         }
