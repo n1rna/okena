@@ -548,6 +548,16 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_with_only_default_still_draws_its_dot() {
+        // The selector row holds the `+` that adds a space, so a profile with
+        // one space must still draw it — otherwise the only way out of having
+        // one space is hidden behind having more than one.
+        let fit = fit_selector(1, 0, 9);
+        assert_eq!(fit.shown, [0]);
+        assert!(fit.overflow.is_empty());
+    }
+
+    #[test]
     fn a_spaces_spec_folders_keep_the_order_they_were_given() {
         let mut space = SpaceData::new("client-a", "Client A");
         space.specs.folders = vec![
