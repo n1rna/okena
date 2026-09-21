@@ -29,16 +29,18 @@ const MAX_DOC_BYTES: u64 = 2 * 1024 * 1024;
 ///
 /// None when project discovery is off, and never a worktree (a second checkout
 /// of a repo already listed) or an agent session (rooted above repos, not in
-/// one).
+/// one). Only the active space's: each space has its own roots, so a repo in
+/// another space must not put a store on this one's list.
 pub fn knowledge_project_sources(
     projects: &[ProjectData],
     settings: &AppSettings,
 ) -> Vec<ProjectSource> {
-    if !settings.harness.knowledge.projects {
+    if !settings.active_space().knowledge.projects {
         return Vec::new();
     }
     projects
         .iter()
+        .filter(|p| p.space_id == settings.active_space)
         .filter(|p| p.worktree_info.is_none() && !p.is_any_agent_session())
         .map(|p| ProjectSource {
             name: p.name.clone(),
@@ -47,20 +49,23 @@ pub fn knowledge_project_sources(
         .collect()
 }
 
-/// Everything discovery needs: the registry, the projects to look in, and the
-/// saved order the roots come back in.
+/// Everything discovery needs: the registry, the projects to look in, which
+/// stores the space follows, and the saved order the roots come back in.
 ///
 /// One function so no caller can accidentally discover without the order and
-/// hand back a list that disagrees with the one briefs resolve through.
+/// hand back a list that disagrees with the one briefs resolve through — or
+/// without the space, and hand back another space's roots.
 pub(super) fn knowledge_sources(
     registry: &Path,
     projects: &[ProjectSource],
     settings: &AppSettings,
 ) -> Sources {
+    let space = settings.active_space();
     Sources {
         registry_path: registry.to_path_buf(),
         projects: projects.to_vec(),
-        order: settings.harness.knowledge.order.clone(),
+        stores: space.knowledge.stores.clone(),
+        order: space.knowledge.order.clone(),
     }
 }
 
@@ -158,7 +163,7 @@ fn execute_at(
             registry,
             url,
             path.as_deref(),
-            &settings.harness.knowledge.clone_dir(),
+            &settings.active_space().knowledge.clone_dir(),
         ) {
             Ok(out) => registered(out),
             Err(e) => failed(e),
@@ -916,7 +921,7 @@ mod tests {
     /// Settings whose only content is the saved order of knowledge roots.
     fn ordered(order: &[&str]) -> AppSettings {
         let mut settings = AppSettings::default();
-        settings.harness.knowledge.order = order.iter().map(|k| (*k).to_string()).collect();
+        settings.active_space_mut().knowledge.order = order.iter().map(|k| (*k).to_string()).collect();
         settings
     }
 
@@ -967,7 +972,7 @@ mod tests {
             .collect();
         assert_eq!(names, ["app"]);
 
-        settings.harness.knowledge.projects = false;
+        settings.active_space_mut().knowledge.projects = false;
         assert!(knowledge_project_sources(&[plain], &settings).is_empty());
     }
 

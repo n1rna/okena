@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 /// OpenSpec's machine directories, with overrides from settings.
 pub(super) fn dirs(settings: &AppSettings) -> OpenSpecDirs {
-    let specs = &settings.harness.specs;
+    let specs = &settings.active_space().specs;
     OpenSpecDirs::detect(specs.data_dir.as_deref(), specs.config_dir.as_deref())
 }
 
@@ -36,10 +36,14 @@ pub(super) fn dirs(settings: &AppSettings) -> OpenSpecDirs {
 /// Copied out of the workspace, so the daemon can run discovery — and the git
 /// a listing runs in every store — without holding the workspace lock.
 pub fn spec_sources(projects: &[ProjectData], settings: &AppSettings) -> Sources {
-    let specs = &settings.harness.specs;
+    let space = settings.active_space();
+    let specs = &space.specs;
     let projects = if specs.projects {
         projects
             .iter()
+            // Each space has its own roots, so only its own projects can
+            // contribute one.
+            .filter(|p| p.space_id == settings.active_space)
             // A worktree is a second checkout of a repo already listed, and a
             // session is rooted at a spec root or above several repos — neither
             // is a root of its own. Any session, not only spec drafts: one
@@ -56,7 +60,7 @@ pub fn spec_sources(projects: &[ProjectData], settings: &AppSettings) -> Sources
     Sources {
         registry: specs.registry,
         projects,
-        folders: settings.harness.spec_folders(),
+        folders: space.spec_folders(),
     }
 }
 
@@ -391,7 +395,7 @@ pub(super) fn clone_store(
     let target = match dest.map(str::trim).filter(|d| !d.is_empty()) {
         Some(dest) => okena_core::fs::expand_home(dest),
         None => match git::clone_dir_name(url) {
-            Some(name) => settings.harness.specs.clone_dir().join(name),
+            Some(name) => settings.active_space().specs.clone_dir().join(name),
             None => {
                 return ActionResult::Err(format!(
                     "No folder name can be derived from {url} — choose a destination folder."
@@ -836,8 +840,8 @@ mod tests {
     /// reads — or writes — the developer's real store registry.
     fn sandboxed(sandbox: &Path) -> AppSettings {
         let mut settings = AppSettings::default();
-        settings.harness.specs.data_dir = Some(sandbox.join("data").to_string_lossy().into());
-        settings.harness.specs.config_dir = Some(sandbox.join("config").to_string_lossy().into());
+        settings.active_space_mut().specs.data_dir = Some(sandbox.join("data").to_string_lossy().into());
+        settings.active_space_mut().specs.config_dir = Some(sandbox.join("config").to_string_lossy().into());
         settings
     }
 
@@ -893,7 +897,7 @@ mod tests {
 
         let mut settings = sandboxed(&sandbox);
         let clone_dir = sandbox.join("openspec");
-        settings.harness.specs.clone_dir = Some(clone_dir.to_string_lossy().into_owned());
+        settings.active_space_mut().specs.clone_dir = Some(clone_dir.to_string_lossy().into_owned());
         let url = format!("file://{}", sandbox.join("remote.git").display());
 
         let ActionResult::Ok(Some(v)) = clone_store(&settings, &url, None) else {
@@ -928,8 +932,16 @@ mod tests {
         let sandbox = tmpdir("legacy");
         let repo = sandbox.join("specs");
         populated_root(&repo);
-        let mut settings = sandboxed(&sandbox);
-        settings.harness.spec_repo = Some(repo.to_string_lossy().into_owned());
+        // `spec_repo` is a legacy key now: the migration folds it into the
+        // Default space's folders, which is what this exercises end to end.
+        let mut settings = AppSettings::default();
+        settings.spaces.clear();
+        settings.harness.legacy_spec_repo = Some(repo.to_string_lossy().into_owned());
+        settings.ensure_spaces();
+        settings.active_space_mut().specs.data_dir =
+            Some(sandbox.join("data").to_string_lossy().into());
+        settings.active_space_mut().specs.config_dir =
+            Some(sandbox.join("config").to_string_lossy().into());
 
         let t = tree_of(&settings, None);
         assert!(t.initialized);
@@ -995,7 +1007,7 @@ mod tests {
         populated_root(&repo);
         write(&sandbox.join("outside.md"), "SECRET");
         let mut settings = sandboxed(&sandbox);
-        settings.harness.specs.folders = vec![repo.to_string_lossy().into_owned()];
+        settings.active_space_mut().specs.folders = vec![repo.to_string_lossy().into_owned()];
 
         let ActionResult::Ok(Some(v)) =
             read_for(&[], &settings, None, "openspec/specs/auth/spec.md".into())
@@ -1017,7 +1029,7 @@ mod tests {
         populated_root(&repo);
         write(&sandbox.join("outside.md"), "SECRET");
         let mut settings = sandboxed(&sandbox);
-        settings.harness.specs.folders = vec![repo.to_string_lossy().into_owned()];
+        settings.active_space_mut().specs.folders = vec![repo.to_string_lossy().into_owned()];
         let path = "openspec/changes/add-login/proposal.md";
 
         let ActionResult::Ok(Some(read)) = read_for(&[], &settings, None, path.into()) else {
@@ -1100,7 +1112,7 @@ mod tests {
         populated_root(&repo);
         write(&sandbox.join("outside.md"), "SECRET");
         let mut settings = sandboxed(&sandbox);
-        settings.harness.specs.folders = vec![repo.to_string_lossy().into_owned()];
+        settings.active_space_mut().specs.folders = vec![repo.to_string_lossy().into_owned()];
         let run =
             |op: &dyn Fn(&str, &Path) -> ActionResult| super::in_root(&[], &settings, None, op);
         let refused = |result: ActionResult| match result {
@@ -1251,7 +1263,7 @@ mod tests {
         let found = resolve_root(std::slice::from_ref(&project), &settings, None).unwrap();
         assert_eq!(found.kind, SpecRootKind::Project);
 
-        settings.harness.specs.projects = false;
+        settings.active_space_mut().specs.projects = false;
         assert!(resolve_root(std::slice::from_ref(&project), &settings, None).is_err());
         std::fs::remove_dir_all(&sandbox).ok();
     }
@@ -1262,7 +1274,7 @@ mod tests {
         let repo = sandbox.join("specs");
         populated_root(&repo);
         let mut settings = sandboxed(&sandbox);
-        settings.harness.specs.folders = vec![repo.to_string_lossy().into_owned()];
+        settings.active_space_mut().specs.folders = vec![repo.to_string_lossy().into_owned()];
         let root = resolve_root(&[], &settings, None).unwrap();
 
         let dir = scaffold_change(&root, "add-sso", "Add SSO").unwrap();

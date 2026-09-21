@@ -321,6 +321,13 @@ pub struct Workspace {
     sync_layout_preimage: Option<SyncLayoutPreimage>,
     /// The generation each window has already seen.
     window_sync_generation: HashMap<WindowId, u64>,
+    /// The space showing, mirrored from `AppSettings::active_space` — which is
+    /// where it is persisted and where every client reads it.
+    ///
+    /// Kept here because the action layer stamps new projects and folders with
+    /// it and must not reach into settings: `actions/` is reactor-agnostic by
+    /// rule. Whoever switches spaces writes both, in one action.
+    active_space: String,
 }
 
 /// A terminal that was soft-closed and is waiting out its grace period.
@@ -527,7 +534,95 @@ impl Workspace {
             sync_generation: 0,
             sync_layout_preimage: None,
             window_sync_generation: HashMap::new(),
+            active_space: okena_core::spaces::DEFAULT_SPACE_ID.to_string(),
         }
+    }
+
+    /// The space showing. New projects and folders are stamped with it, and
+    /// only its projects are visible.
+    pub fn active_space(&self) -> &str {
+        &self.active_space
+    }
+
+    /// Follow a space switch. The caller writes `AppSettings::active_space`
+    /// alongside this — that is where it is persisted and what every client
+    /// reads; this is the copy the action layer stamps rows with.
+    ///
+    /// Returns whether anything changed, so a caller can skip the repaint when
+    /// re-selecting the space already showing.
+    pub fn set_active_space(&mut self, space_id: impl Into<String>) -> bool {
+        let next = space_id.into();
+        if self.active_space == next {
+            return false;
+        }
+        self.active_space = next;
+        true
+    }
+
+    /// Drop every window's folder filter.
+    ///
+    /// Called when the space changes: a folder belongs to one space, so a
+    /// filter pointing at one would leave the new space's list empty with no
+    /// visible reason why.
+    pub fn clear_folder_filters(&mut self, cx: &mut impl WorkspaceCx) {
+        let any = self.data.main_window.folder_filter.is_some()
+            || self
+                .data
+                .extra_windows
+                .iter()
+                .any(|w| w.folder_filter.is_some());
+        if !any {
+            return;
+        }
+        self.mutate_data(cx, |data| {
+            data.main_window.folder_filter = None;
+            for window in &mut data.extra_windows {
+                window.folder_filter = None;
+            }
+        });
+    }
+
+    /// Put `project_id` in the same space as the first of `beside` that
+    /// exists.
+    ///
+    /// A session an agent starts belongs where the repos it was given are, not
+    /// where the person happens to be looking: a coordinator in Client A
+    /// spawning a sub-agent must not drop it into Default because that is the
+    /// space showing. No-op when none of `beside` is a project okena knows,
+    /// leaving the row in the space it was created in.
+    pub fn place_in_space_of(&mut self, project_id: &str, beside: &[String]) -> bool {
+        let Some(space) = beside
+            .iter()
+            .find_map(|id| self.project(id).map(|p| p.space_id.clone()))
+        else {
+            return false;
+        };
+        match self.data.projects.iter_mut().find(|p| p.id == project_id) {
+            Some(p) if p.space_id != space => {
+                p.space_id = space;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `project` belongs to the space showing.
+    ///
+    /// The one place "belongs to the space showing" is spelled out, so a list,
+    /// an overview and a count can never disagree. Every place that walks
+    /// `data().projects` to draw something must go through this or
+    /// [`Self::projects_in_active_space`] — a raw walk shows every space's
+    /// rows at once, which is exactly the bug spaces exist to prevent.
+    pub fn is_in_active_space(&self, project: &ProjectData) -> bool {
+        project.space_id == self.active_space
+    }
+
+    /// The active space's projects, in workspace order.
+    pub fn projects_in_active_space(&self) -> impl Iterator<Item = &ProjectData> {
+        self.data
+            .projects
+            .iter()
+            .filter(move |p| self.is_in_active_space(p))
     }
 
     /// Seed desktop-owned project presentation before the first daemon snapshot.
@@ -2286,6 +2381,7 @@ impl Workspace {
             focused_project_id,
             focus_individual,
             window_state,
+            &self.active_space,
         )
     }
 
@@ -2300,7 +2396,8 @@ impl Workspace {
         let mut ids = std::collections::HashSet::new();
         for window in std::iter::once(&self.data.main_window).chain(self.data.extra_windows.iter())
         {
-            for p in compute_visible_projects(&self.data, None, false, window) {
+            for p in compute_visible_projects(&self.data, None, false, window, &self.active_space)
+            {
                 ids.insert(p.id.clone());
             }
         }
@@ -2447,7 +2544,14 @@ impl Workspace {
             &mut self.remote_sync,
             snapshots,
             window_id,
+            &self.active_space,
         );
+        // The daemon owns which space is showing; a client follows it, so the
+        // selector and the list agree even when the switch came from another
+        // client or another window.
+        if let Some(space) = outcome.local_active_space.clone() {
+            self.set_active_space(space);
+        }
 
         if self.project_layouts_differ_from(&before) {
             self.sync_generation = self.sync_generation.wrapping_add(1);
@@ -2913,6 +3017,7 @@ mod workspace_tests {
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
@@ -3275,6 +3380,7 @@ mod workspace_tests {
         let mut data =
             make_workspace_data(vec![make_project("p1"), make_project("p2")], vec!["f1"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
@@ -3348,6 +3454,7 @@ mod workspace_tests {
             vec!["f1", "p2"],
         );
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string()],
@@ -3373,12 +3480,14 @@ mod workspace_tests {
         );
         data.folders = vec![
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string(), "p2".to_string()],
                 folder_color: FolderColor::default(),
             },
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p3".to_string(), "p4".to_string()],
@@ -3410,6 +3519,7 @@ mod workspace_tests {
             vec!["f1", "p3"],
         );
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
@@ -3501,6 +3611,7 @@ mod workspace_tests {
 
         let mut data = make_workspace_data(vec![p1, w1, w2, make_project("p2")], vec!["f1", "p2"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string()],
@@ -3536,6 +3647,7 @@ mod workspace_tests {
         let mut data =
             make_workspace_data(vec![p1, w1, make_project("p2")], vec!["f1", "w1", "p2"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string()],
@@ -3570,12 +3682,14 @@ mod workspace_tests {
         );
         data.folders = vec![
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
                 folder_color: FolderColor::default(),
             },
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
@@ -3612,12 +3726,14 @@ mod workspace_tests {
         data.main_window.hidden_project_ids.insert("p2".to_string());
         data.folders = vec![
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
                 folder_color: FolderColor::default(),
             },
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
@@ -3653,12 +3769,14 @@ mod workspace_tests {
         data.main_window.hidden_project_ids.insert("p1".to_string());
         data.folders = vec![
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string()],
                 folder_color: FolderColor::default(),
             },
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
@@ -3691,12 +3809,14 @@ mod workspace_tests {
         );
         data.folders = vec![
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder 1".to_string(),
                 project_ids: vec!["p1".to_string(), "w1".to_string()],
                 folder_color: FolderColor::default(),
             },
             FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f2".to_string(),
                 name: "Folder 2".to_string(),
                 project_ids: vec!["p2".to_string()],
@@ -3741,6 +3861,7 @@ mod workspace_tests {
             vec!["f1", "p3"],
         );
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
@@ -3807,6 +3928,7 @@ mod workspace_tests {
         let other = make_project("other");
         let mut data = make_workspace_data(vec![parent, wt1, other], vec!["f1", "other"]);
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["parent".to_string()],
@@ -3945,6 +4067,7 @@ mod workspace_tests {
             vec!["f1", "p3"],
         );
         data.folders = vec![FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
@@ -3977,6 +4100,7 @@ mod gpui_tests {
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
@@ -4176,8 +4300,11 @@ mod gpui_tests {
                 local_endpoint: None,
             },
             state: Some(StateResponse {
+                spaces: Vec::new(),
+                active_space: okena_core::spaces::default_space_id(),
                 state_version: 1,
                 projects: vec![ApiProject {
+                    space_id: okena_core::spaces::default_space_id(),
                     task_ref: None,
                     also_tasks: Vec::new(),
                     repo_ids: Vec::new(),

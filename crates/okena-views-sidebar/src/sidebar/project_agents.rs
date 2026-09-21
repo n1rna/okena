@@ -42,7 +42,11 @@ impl Sidebar {
         if !window.projects_show_agents {
             return SessionPlacement::default();
         }
-        place_sessions(&workspace.data().projects, window.agent_sort_mode)
+        // Only the space showing: a session nests under the project whose
+        // task it shares, and a project in another space is not on screen to
+        // nest under.
+        let in_space: Vec<_> = workspace.projects_in_active_space().cloned().collect();
+        place_sessions(&in_space, window.agent_sort_mode)
     }
 
     /// The placement plus a row for every session it places.
@@ -55,7 +59,7 @@ impl Sidebar {
         let focused_id = self.focus_manager.read(cx).focused_project_id().cloned();
         let now = okena_ui::ago::now_millis();
         let mut rows = HashMap::new();
-        for p in &workspace.data().projects {
+        for p in workspace.projects_in_active_space() {
             if !placement.contains(&p.id) {
                 continue;
             }

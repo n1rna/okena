@@ -948,6 +948,7 @@ infrastructure:
                 name: "api".into(),
                 path: repo.clone(),
             }],
+            stores: None,
             order: Vec::new(),
         });
         let keys: Vec<_> = found.roots.iter().map(|r| r.key.clone()).collect();

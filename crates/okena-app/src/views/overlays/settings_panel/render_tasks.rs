@@ -18,6 +18,14 @@ use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
 use okena_core::tasks::{TaskAuthState, TaskAuthStatusResponse, TaskProviderStatus};
 
+/// Default name for a new connection when none is typed: the backend's own.
+fn okena_tasks_kind_name(kind: &str) -> String {
+    match kind {
+        AZURE_DEVOPS => "Azure DevOps".to_string(),
+        _ => "Linear".to_string(),
+    }
+}
+
 impl SettingsPanel {
     /// Read every provider's auth state. Cheap and local — the daemon answers
     /// from the stored credential without calling out.
@@ -136,6 +144,111 @@ impl SettingsPanel {
         .detach();
     }
 
+    /// Add a connection to `kind`, named from the field beside the buttons.
+    ///
+    /// A connection exists before it is signed in: adding it makes the row,
+    /// and the key field on that row is where the login happens. That is what
+    /// lets someone add a second Linear account without disturbing the first.
+    fn add_connection(&mut self, kind: &'static str, cx: &mut Context<Self>) {
+        let Some(client) = self.action_client.clone() else {
+            return;
+        };
+        let typed = self.tasks_new_name_input.read(cx).value().trim().to_string();
+        let name = if typed.is_empty() {
+            okena_tasks_kind_name(kind)
+        } else {
+            typed
+        };
+        self.tasks_busy = true;
+        self.tasks_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client.post_action(ActionRequest::TaskConnectionAdd {
+                    kind: kind.to_string(),
+                    name,
+                })
+            })
+            .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.tasks_busy = false;
+                    match result {
+                        Err(e) => this.tasks_error = Some(e),
+                        Ok(_) => {
+                            this.tasks_new_name_input
+                                .update(cx, |i, cx| i.set_value("", cx));
+                            notify_task_auth_changed(cx);
+                        }
+                    }
+                    this.refresh_task_providers(cx);
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Forget a connection and its credential. The daemon refuses while a
+    /// space still reads it, and says which spaces are in the way.
+    fn remove_connection(&mut self, connection_id: String, cx: &mut Context<Self>) {
+        let Some(client) = self.action_client.clone() else {
+            return;
+        };
+        self.tasks_busy = true;
+        self.tasks_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client.post_action(ActionRequest::TaskConnectionRemove { connection_id })
+            })
+            .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.tasks_busy = false;
+                    match result {
+                        Err(e) => this.tasks_error = Some(e),
+                        Ok(_) => notify_task_auth_changed(cx),
+                    }
+                    this.refresh_task_providers(cx);
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Commit the name being edited.
+    fn commit_connection_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(connection_id) = self.tasks_renaming.take() else {
+            return;
+        };
+        let name = self.tasks_rename_input.read(cx).value().trim().to_string();
+        cx.notify();
+        if name.is_empty() {
+            return;
+        }
+        let Some(client) = self.action_client.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                client.post_action(ActionRequest::TaskConnectionRename { connection_id, name })
+            })
+            .await;
+            cx.update(|cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if let Err(e) = result {
+                        this.tasks_error = Some(e);
+                    }
+                    this.refresh_task_providers(cx);
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
     /// Chips choosing the one provider the harness reads.
     fn render_provider_choice(
         &self,
@@ -146,7 +259,7 @@ impl SettingsPanel {
         let t = theme(cx);
         // Before the daemon answers, offer the providers this build ships, so
         // the choice is not blank for the first frame.
-        let choices: Vec<(String, String)> = if providers.is_empty() {
+        let mut choices: Vec<(String, String)> = if providers.is_empty() {
             vec![
                 ("linear".into(), "Linear".into()),
                 (AZURE_DEVOPS.into(), "Azure DevOps".into()),
@@ -157,6 +270,12 @@ impl SettingsPanel {
                 .map(|p| (p.provider.clone(), p.display_name.clone()))
                 .collect()
         };
+        // A space may still name a connection the daemon has not answered for
+        // yet (first paint, or one just added). Show it rather than leaving the
+        // selection looking unset.
+        if !choices.iter().any(|(id, _)| id == active) {
+            choices.push((active.to_string(), active.to_string()));
+        }
 
         let chips: Vec<AnyElement> = choices
             .into_iter()
@@ -191,7 +310,7 @@ impl SettingsPanel {
                                 .update(cx, |i, cx| i.set_value("", cx));
                             this.tasks_error = None;
                             settings_entity(cx).update(cx, |state: &mut SettingsState, cx| {
-                                state.set_harness_task_provider(id, cx);
+                                state.set_space_connection(id, cx);
                             });
                         }),
                     )
@@ -210,14 +329,14 @@ impl SettingsPanel {
                         div()
                             .text_size(ui_text(13.0, cx))
                             .text_color(rgb(t.text_primary))
-                            .child("Active provider"),
+                            .child("This space's connection"),
                     )
                     .child(
                         div()
                             .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
                             .child(
-                                "The harness shows tasks from this one. Another provider \
+                                "The space showing reads this one. Another connection \
                                  stays connected, but its tasks are not shown.",
                             ),
                     ),
@@ -249,7 +368,9 @@ impl SettingsPanel {
         };
         let connected = matches!(p.auth, TaskAuthState::Connected { .. });
         let id = p.provider.clone();
+        let kind = p.kind();
         let busy = self.tasks_busy;
+        let renaming = self.tasks_renaming.as_deref() == Some(id.as_str());
 
         v_flex()
             .gap(px(8.0))
@@ -263,12 +384,38 @@ impl SettingsPanel {
                     .child(
                         v_flex()
                             .gap(px(2.0))
-                            .child(
+                            .child(if renaming {
+                                okena_ui::input::input_container(&t, None)
+                                    .w(px(180.0))
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .child(
+                                        SimpleInput::new(&self.tasks_rename_input)
+                                            .text_size(ui_text(13.0, cx)),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                let for_rename = id.clone();
+                                let current = p.display_name.clone();
                                 div()
+                                    .id(SharedString::from(format!("tasks-name-{id}")))
+                                    .cursor_pointer()
                                     .text_size(ui_text(13.0, cx))
                                     .text_color(rgb(t.text_primary))
-                                    .child(p.display_name.clone()),
-                            )
+                                    .child(p.display_name.clone())
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _window, cx| {
+                                            // Click the name to rename it.
+                                            this.tasks_rename_input.update(cx, |i, cx| {
+                                                i.set_value(&current, cx)
+                                            });
+                                            this.tasks_renaming = Some(for_rename.clone());
+                                            cx.notify();
+                                        }),
+                                    )
+                                    .into_any_element()
+                            })
                             .child(
                                 div()
                                     .px(px(6.0))
@@ -280,6 +427,47 @@ impl SettingsPanel {
                                     .child(status),
                             ),
                     )
+                    .when(renaming, |d| {
+                        d.child(
+                            div()
+                                .id(SharedString::from(format!("tasks-rename-save-{id}")))
+                                .cursor_pointer()
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(t.button_primary_bg))
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.button_primary_fg))
+                                .child("Save")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        this.commit_connection_rename(cx);
+                                    }),
+                                ),
+                        )
+                    })
+                    .when(!renaming, |d| {
+                        let id = id.clone();
+                        d.child(
+                            div()
+                                .id(SharedString::from(format!("tasks-remove-{id}")))
+                                .cursor_pointer()
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .hover(|s| s.bg(with_alpha(t.error, 0.1)))
+                                .text_size(ui_text_ms(cx))
+                                .text_color(rgb(t.text_muted))
+                                .child("Remove")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _window, cx| {
+                                        this.remove_connection(id.clone(), cx);
+                                    }),
+                                ),
+                        )
+                    })
                     .when(connected, |d| {
                         let id = id.clone();
                         d.child(
@@ -311,9 +499,12 @@ impl SettingsPanel {
                     div()
                         .text_size(ui_text_ms(cx))
                         .text_color(rgb(t.text_secondary))
-                        .child(provider_hint(&id)),
+                        // By backend, not by connection id: the second Linear
+                        // account's id is `linear-2`, and it needs Linear's
+                        // instructions all the same.
+                        .child(provider_hint(kind)),
                 )
-                .when(id == AZURE_DEVOPS, |d| {
+                .when(kind == AZURE_DEVOPS, |d| {
                     d.child(
                         okena_ui::input::input_container(&t, None)
                             .w_full()
@@ -365,6 +556,70 @@ impl SettingsPanel {
             .into_any_element()
     }
 
+    /// Name a new connection and pick which backend it talks to.
+    ///
+    /// okena holds any number of them, of either kind: a second Linear account
+    /// or a second Azure DevOps organization is a new connection with its own
+    /// login, and several spaces may share one.
+    fn render_add_connection(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let button = |kind: &'static str, label: &'static str, cx: &mut Context<Self>| {
+            div()
+                .id(SharedString::from(format!("tasks-add-{kind}")))
+                .cursor_pointer()
+                .flex_shrink_0()
+                .px(px(10.0))
+                .py(px(5.0))
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(rgb(t.border))
+                .hover(|s| s.bg(with_alpha(t.button_primary_bg, 0.1)))
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(t.text_secondary))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.add_connection(kind, cx);
+                    }),
+                )
+        };
+        v_flex()
+            .px(px(12.0))
+            .py(px(10.0))
+            .gap(px(6.0))
+            .border_t_1()
+            .border_color(rgb(t.border))
+            .child(
+                div()
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child(
+                        "Add another account or organization. Name it so you can tell \
+                         it apart, then sign it in on its own row.",
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(
+                        okena_ui::input::input_container(&t, None)
+                            .flex_1()
+                            .min_w_0()
+                            .px(px(8.0))
+                            .py(px(5.0))
+                            .child(
+                                SimpleInput::new(&self.tasks_new_name_input)
+                                    .text_size(ui_text(13.0, cx)),
+                            ),
+                    )
+                    .child(button("linear", "Add Linear", cx))
+                    .child(button(AZURE_DEVOPS, "Add Azure DevOps", cx)),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_tasks(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = theme(cx);
         // Read on first paint of the page rather than when the panel opens, so
@@ -383,10 +638,12 @@ impl SettingsPanel {
             .child(section_header("Task manager", &t, cx))
             .child(settings_input_row(
                 "tasks-intro",
-                "Provider",
-                "okena reads your assigned work from a task manager. The key is \
-                 verified once and then stored by the daemon — the app never \
-                 holds it, and never sends it anywhere else.",
+                "Connections",
+                "okena reads your assigned work from a task manager. Each login is \
+                 a connection, and the space showing reads exactly one of them — \
+                 tasks from two are never merged. A key is verified once and then \
+                 stored by the daemon: the app never holds it, and never sends it \
+                 anywhere else.",
                 &t,
                 cx,
                 false,
@@ -395,9 +652,9 @@ impl SettingsPanel {
         let active = settings_entity(cx)
             .read(cx)
             .settings
-            .harness
-            .task_provider
-            .clone();
+            .active_space()
+            .connection_id()
+            .to_string();
         body = body.child(
             section_container(&t).child(self.render_provider_choice(&providers, &active, cx)),
         );
@@ -420,6 +677,7 @@ impl SettingsPanel {
         for p in &providers {
             container = container.child(self.render_provider(p, p.provider == active, cx));
         }
+        container = container.child(self.render_add_connection(cx));
         body = body.child(container);
 
         if let Some(err) = self.tasks_error.clone() {

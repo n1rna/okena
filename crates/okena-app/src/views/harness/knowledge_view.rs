@@ -387,7 +387,7 @@ impl HarnessPane {
             return;
         }
         let settings = crate::settings::settings_entity(cx);
-        let saved = settings.read(cx).settings.harness.knowledge.order.clone();
+        let saved = settings.read(cx).settings.active_space().knowledge.order.clone();
         if saved.is_empty() {
             return;
         }

@@ -130,6 +130,52 @@ fn send_git_poll_trigger_after_success(
     }
 }
 
+
+// ── Spaces (QBL-430) ─────────────────────────────────────────────────────────
+
+/// Tell every client the shared state changed, so the sidebar's dots, its
+/// project list and both overviews repaint after a space edit.
+fn bump_state(state_version: &watch::Sender<u64>) {
+    state_version.send_modify(|version| *version = version.wrapping_add(1));
+}
+
+/// A `CommandResult` carrying `value` as JSON.
+fn json_ok<T: ?Sized + serde::Serialize>(value: &T) -> CommandResult {
+    match serde_json::to_value(value) {
+        Ok(v) => CommandResult::Ok(Some(v)),
+        Err(e) => CommandResult::Err(format!("failed to serialize: {e}")),
+    }
+}
+
+/// Switch to `space_id`: persist it, mirror it onto the workspace so new rows
+/// are stamped with it and only its projects are visible, and drop any folder
+/// filter — a folder belongs to one space, so the filter cannot survive the
+/// switch.
+#[allow(clippy::too_many_arguments)]
+fn activate_space(
+    space_id: &str,
+    daemon_config: &mut DaemonConfig,
+    workspace: &Arc<Mutex<Workspace>>,
+    state_version: &watch::Sender<u64>,
+    workspace_tick: &watch::Sender<u64>,
+    hook_runner: &Option<okena_hooks::HookRunner>,
+    hook_monitor: &Option<okena_hooks::HookMonitor>,
+) -> CommandResult {
+    match daemon_config.edit_settings(|s| okena_workspace::spaces::activate(s, space_id)) {
+        Ok(false) => CommandResult::Ok(None),
+        Ok(true) => {
+            let mut cx = DaemonWorkspaceCx::new(workspace_tick, hook_runner, hook_monitor);
+            let mut ws = workspace.lock();
+            ws.set_active_space(space_id);
+            ws.clear_folder_filters(&mut cx);
+            drop(ws);
+            bump_state(state_version);
+            CommandResult::Ok(None)
+        }
+        Err(e) => CommandResult::Err(e),
+    }
+}
+
 fn publish_config_change_after_success(result: &CommandResult, state_version: &watch::Sender<u64>) {
     if matches!(result, CommandResult::Ok(_)) {
         state_version.send_modify(|version| *version = version.wrapping_add(1));
@@ -3132,7 +3178,7 @@ pub async fn daemon_command_loop(
                 | ActionRequest::KnowledgeStorePush { .. }),
             ) => {
                 let app_settings = settings.lock().clone();
-                let projects =
+                let sources =
                     okena_app_core::workspace::actions::execute::knowledge_project_sources(
                         &workspace.lock().data.projects,
                         &app_settings,
@@ -3143,7 +3189,7 @@ pub async fn daemon_command_loop(
                         .spawn_blocking(move || {
                             okena_app_core::workspace::actions::execute::execute_knowledge_action(
                                 &action,
-                                &projects,
+                                &sources,
                                 &app_settings,
                             )
                             .map(|r| r.into_command_result())
@@ -3357,6 +3403,223 @@ pub async fn daemon_command_loop(
                             &runtime,
                         )
                         .await
+                    }
+
+                    // ── Spaces (QBL-430) ─────────────────────────────────────────
+                    // A space spans settings.json and workspace.json, and the
+                    // daemon is the only place that holds both. The rules live
+                    // in `okena_workspace::spaces`; these arms only carry the
+                    // two files and, on a delete, tear the projects down.
+                    ActionRequest::SpaceCreate {
+                        name,
+                        connection,
+                        tasks,
+                    } => match daemon_config.edit_settings(|s| {
+                        okena_workspace::spaces::create(s, &name, connection.clone(), tasks.clone())
+                    }) {
+                        Ok(space) => {
+                            bump_state(&state_version);
+                            json_ok(&space)
+                        }
+                        Err(e) => CommandResult::Err(e),
+                    },
+                    ActionRequest::SpaceRename { space_id, name } => {
+                        match daemon_config
+                            .edit_settings(|s| okena_workspace::spaces::rename(s, &space_id, &name))
+                        {
+                            Ok(()) => {
+                                bump_state(&state_version);
+                                CommandResult::Ok(None)
+                            }
+                            Err(e) => CommandResult::Err(e),
+                        }
+                    }
+                    ActionRequest::SpaceContents { space_id } => {
+                        let held = okena_workspace::spaces::contents(
+                            workspace.lock().data(),
+                            &space_id,
+                        );
+                        json_ok(&serde_json::json!({
+                            "projects": held.projects,
+                            "agents": held.agents,
+                            "project_ids": held.project_ids,
+                        }))
+                    }
+                    ActionRequest::SpaceDelete { space_id } => {
+                        // Every project in the space goes through the ordinary
+                        // delete, so hooks run and agents stop exactly as they
+                        // would one at a time. Files on disk are untouched —
+                        // `DeleteProject` removes the row, not the checkout.
+                        let held = okena_workspace::spaces::contents(
+                            workspace.lock().data(),
+                            &space_id,
+                        );
+                        let mut failures: Vec<String> = Vec::new();
+                        for project_id in &held.project_ids {
+                            let app_settings = settings.lock().clone();
+                            if let CommandResult::Err(e) = run_main_workspace_action(
+                                ActionRequest::DeleteProject {
+                                    project_id: project_id.clone(),
+                                },
+                                &workspace,
+                                &mut focus_manager,
+                                &backend,
+                                &terminals,
+                                &app_settings,
+                                &workspace_tick,
+                                &hook_runner,
+                                &hook_monitor,
+                            ) {
+                                failures.push(format!("{project_id}: {e}"));
+                            }
+                        }
+                        if failures.is_empty() {
+                            // The projects are gone; its folders would linger in
+                            // workspace.json, invisible and unreachable.
+                            {
+                                let mut cx = DaemonWorkspaceCx::new(
+                                    &workspace_tick,
+                                    &hook_runner,
+                                    &hook_monitor,
+                                );
+                                workspace
+                                    .lock()
+                                    .delete_folders_in_space(&space_id, &mut cx);
+                            }
+                            match daemon_config
+                                .edit_settings(|s| okena_workspace::spaces::remove(s, &space_id))
+                            {
+                                Ok(active) => {
+                                    workspace.lock().set_active_space(active.clone());
+                                    bump_state(&state_version);
+                                    json_ok(&serde_json::json!({ "active_space": active }))
+                                }
+                                Err(e) => CommandResult::Err(e),
+                            }
+                        } else {
+                            // The space stays, so nothing is half-deleted and
+                            // the user can see what refused to go.
+                            bump_state(&state_version);
+                            CommandResult::Err(format!(
+                                "could not remove everything in the space: {}",
+                                failures.join("; ")
+                            ))
+                        }
+                    }
+                    ActionRequest::SpaceActivate { space_id } => {
+                        activate_space(
+                            &space_id,
+                            &mut daemon_config,
+                            &workspace,
+                            &state_version,
+                            &workspace_tick,
+                            &hook_runner,
+                            &hook_monitor,
+                        )
+                    }
+                    ActionRequest::SpaceStep { by } => {
+                        let next = {
+                            let s = settings.lock();
+                            let step = if by >= 0 {
+                                okena_core::spaces::next_space(&s.spaces, &s.active_space)
+                            } else {
+                                okena_core::spaces::previous_space(&s.spaces, &s.active_space)
+                            };
+                            step.map(|s| s.id.clone())
+                        };
+                        match next {
+                            Some(id) => activate_space(
+                                &id,
+                                &mut daemon_config,
+                                &workspace,
+                                &state_version,
+                                &workspace_tick,
+                                &hook_runner,
+                                &hook_monitor,
+                            ),
+                            None => CommandResult::Ok(None),
+                        }
+                    }
+                    ActionRequest::SpaceActivateNth { n } => {
+                        let wanted = {
+                            let s = settings.lock();
+                            okena_core::spaces::nth_space(&s.spaces, n as usize)
+                                .map(|s| s.id.clone())
+                        };
+                        match wanted {
+                            Some(id) => activate_space(
+                                &id,
+                                &mut daemon_config,
+                                &workspace,
+                                &state_version,
+                                &workspace_tick,
+                                &hook_runner,
+                                &hook_monitor,
+                            ),
+                            // Cmd+5 with four spaces does nothing rather than
+                            // erroring at the user.
+                            None => CommandResult::Ok(None),
+                        }
+                    }
+                    ActionRequest::SpaceSetConnection {
+                        space_id,
+                        connection,
+                    } => match daemon_config.edit_settings(|s| {
+                        okena_workspace::spaces::set_connection(s, &space_id, connection.clone())
+                    }) {
+                        Ok(()) => {
+                            bump_state(&state_version);
+                            CommandResult::Ok(None)
+                        }
+                        Err(e) => CommandResult::Err(e),
+                    },
+                    ActionRequest::SpaceSetFilters { space_id, tasks } => {
+                        match daemon_config.edit_settings(|s| {
+                            okena_workspace::spaces::set_task_scope(s, &space_id, tasks.clone())
+                        }) {
+                            Ok(()) => {
+                                bump_state(&state_version);
+                                CommandResult::Ok(None)
+                            }
+                            Err(e) => CommandResult::Err(e),
+                        }
+                    }
+
+                    // ── Task backend connections ─────────────────────────────────
+                    ActionRequest::TaskConnections => {
+                        json_ok(&okena_tasks::store::connections())
+                    }
+                    ActionRequest::TaskConnectionAdd { kind, name } => {
+                        match okena_tasks::store::add_connection(&kind, &name) {
+                            Ok(c) => json_ok(&c),
+                            Err(e) => CommandResult::Err(e),
+                        }
+                    }
+                    ActionRequest::TaskConnectionRename {
+                        connection_id,
+                        name,
+                    } => match okena_tasks::store::rename_connection(&connection_id, &name) {
+                        Ok(()) => {
+                            bump_state(&state_version);
+                            CommandResult::Ok(None)
+                        }
+                        Err(e) => CommandResult::Err(e),
+                    },
+                    ActionRequest::TaskConnectionRemove { connection_id } => {
+                        // A connection a space still reads cannot be removed:
+                        // the space would be left pointing at nothing, and the
+                        // message has to say which spaces are in the way.
+                        let allowed = okena_workspace::spaces::refuse_removing_connection(
+                            &settings.lock(),
+                            &connection_id,
+                        );
+                        match allowed {
+                            Ok(()) => match okena_tasks::store::remove_connection(&connection_id) {
+                                Ok(()) => CommandResult::Ok(None),
+                                Err(e) => CommandResult::Err(e),
+                            },
+                            Err(e) => CommandResult::Err(e),
+                        }
                     }
 
                     // ── App-scoped: settings / theme ─────────────────────────────
@@ -4679,6 +4942,17 @@ pub async fn daemon_command_loop(
                 );
                 if let Some(host) = &extension_host {
                     resp.extensions = host.snapshot();
+                }
+                // The spaces and which one is showing, so every client can draw
+                // the selector and tell which of the projects it was sent
+                // belong to the space showing.
+                {
+                    let s = settings.lock();
+                    resp.spaces = okena_app_core::remote_snapshot::build_spaces(
+                        &s.spaces,
+                        &resp.projects,
+                    );
+                    resp.active_space = s.active_space.clone();
                 }
 
                 // `match` (not `.expect`) so the daemon-core crate stays clean
@@ -7030,6 +7304,7 @@ mod tests {
     fn workspace_with_uninitialized_terminal(path: &str) -> WorkspaceData {
         use okena_state::{LayoutNode, ProjectData};
         let project = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: "Project p1".to_string(),
             path: path.to_string(),
@@ -7761,6 +8036,7 @@ mod tests {
     fn workspace_restored_with_on_open(path: &str, on_open: &str) -> WorkspaceData {
         use okena_state::{HooksConfig, LayoutNode, ProjectData, ProjectHooks};
         let project = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: "Project p1".to_string(),
             path: path.to_string(),
@@ -8523,6 +8799,7 @@ mod tests {
     fn workspace_with_initialized_terminal(terminal_id: &str) -> WorkspaceData {
         use okena_state::{LayoutNode, ProjectData};
         let project = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: "Project p1".to_string(),
             path: "/tmp".to_string(),
@@ -8779,6 +9056,7 @@ mod tests {
         use okena_state::{LayoutNode, ProjectData, WorktreeMetadata};
         let mk = |id: &str, worktree_info: Option<WorktreeMetadata>, worktree_ids: Vec<String>| {
             ProjectData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: id.to_string(),
                 name: format!("Project {id}"),
                 path: "/tmp".to_string(),
@@ -10426,6 +10704,7 @@ mod tests {
         // Parent project: real layout with a materialized terminal (simulating an
         // actively-used project) + a per-project worktree.on_create hook.
         let parent = ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "p1".to_string(),
             name: "Parent".to_string(),
             path: repo_path.clone(),

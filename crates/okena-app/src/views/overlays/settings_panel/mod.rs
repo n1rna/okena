@@ -132,6 +132,14 @@ pub struct SettingsPanel {
     pub(super) tasks_status: Option<okena_core::tasks::TaskAuthStatusResponse>,
     pub(super) tasks_busy: bool,
     pub(super) tasks_error: Option<String>,
+    /// Name for a connection being added. okena can hold any number of them,
+    /// of either kind — a second Linear account is a new connection with its
+    /// own login — so each one is named to be told apart.
+    pub(super) tasks_new_name_input: Entity<SimpleInputState>,
+    /// The connection whose name is being edited, and the field holding it.
+    /// One shared input rather than one per row: only ever one is open.
+    pub(super) tasks_renaming: Option<String>,
+    pub(super) tasks_rename_input: Entity<SimpleInputState>,
     pub(super) paired_devices: PairedDevices,
     /// Cached extension settings views (lazily created on first access).
     extension_views: HashMap<String, AnyView>,
@@ -952,15 +960,18 @@ impl SettingsPanel {
         let tasks_org_url_input = cx.new(|cx| {
             SimpleInputState::new(cx).placeholder("https://dev.azure.com/your-organization")
         });
+        let tasks_new_name_input =
+            cx.new(|cx| SimpleInputState::new(cx).placeholder("Acme Linear"));
+        let tasks_rename_input = cx.new(SimpleInputState::new);
 
         let specs = render_specs::SpecsPage::new(
-            s.harness.specs.data_dir.clone(),
-            s.harness.specs.config_dir.clone(),
-            s.harness.specs.clone_dir.clone(),
+            s.active_space().specs.data_dir.clone(),
+            s.active_space().specs.config_dir.clone(),
+            s.active_space().specs.clone_dir.clone(),
             cx,
         );
         let knowledge =
-            render_knowledge::KnowledgePage::new(s.harness.knowledge.clone_dir.clone(), cx);
+            render_knowledge::KnowledgePage::new(s.active_space().knowledge.clone_dir.clone(), cx);
 
         // One per known agent, added to its launches alongside the brief.
         let extra_args_input =
@@ -1119,6 +1130,9 @@ impl SettingsPanel {
             tasks_status: None,
             tasks_busy: false,
             tasks_error: None,
+            tasks_new_name_input,
+            tasks_renaming: None,
+            tasks_rename_input,
             extension_views: HashMap::new(),
             git_extensions: None,
             git_extension_to_open: None,

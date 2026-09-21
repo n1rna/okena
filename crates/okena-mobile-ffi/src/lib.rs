@@ -39,7 +39,7 @@ use crate::client::manager::ConnectionManager;
 
 pub use types::{
     CellData, ConnectionStatus, CursorShape, CursorState, FolderInfo, FullscreenInfo, ProjectInfo,
-    ScrollInfo, SelectionBounds, ServiceInfo,
+    ScrollInfo, SelectionBounds, ServiceInfo, SpaceInfo,
 };
 
 uniffi::setup_scaffolding!();
@@ -371,6 +371,25 @@ pub fn get_project_order(conn_id: String) -> Vec<String> {
     crate::api::state::get_project_order(conn_id)
 }
 
+/// The spaces the connected daemon holds, in selector order, Default first.
+///
+/// Empty from a daemon that predates spaces — and from one with a single
+/// space, where there is nothing to choose between.
+#[uniffi::export]
+pub fn get_spaces(conn_id: String) -> Vec<SpaceInfo> {
+    crate::api::state::get_spaces(conn_id)
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
+/// Which space is showing. `get_projects` and `get_folders` are already
+/// limited to it; this is what the selector highlights.
+#[uniffi::export]
+pub fn get_active_space(conn_id: String) -> String {
+    crate::api::state::get_active_space(conn_id)
+}
+
 /// Get fullscreen terminal info.
 #[uniffi::export]
 pub fn get_fullscreen_terminal(conn_id: String) -> Option<FullscreenInfo> {
@@ -467,6 +486,16 @@ async fn send_mobile_action(conn_id: &str, action: ActionRequest) -> Result<(), 
 }
 
 // ── Terminal actions (async — await reqwest) ────────────────────────
+
+/// Switch to a space.
+///
+/// The daemon owns which one is showing — one per profile — so this asks and
+/// the next state poll brings the answer back. That is also how a switch made
+/// on the desktop reaches the phone.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn activate_space(conn_id: String, space_id: String) -> Result<(), MobileFfiError> {
+    send_mobile_action(&conn_id, ActionRequest::SpaceActivate { space_id }).await
+}
 
 /// Create a new terminal in the given project.
 #[uniffi::export(async_runtime = "tokio")]

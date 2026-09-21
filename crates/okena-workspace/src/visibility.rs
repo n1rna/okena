@@ -11,6 +11,9 @@ use crate::state::{ProjectData, WindowState, WorkspaceData};
 /// Compute the ordered list of visible projects given current workspace state.
 ///
 /// Rules:
+/// - Only the active space's projects are ever shown. This one comes first
+///   because it is not a filter you can widen from inside the window: a space
+///   is a separate set, and a project in another one does not exist here.
 /// - When a project is focused, only that project (and optionally its worktree
 ///   children) is shown.
 /// - When `focus_individual` is true, a focused parent project does NOT expand
@@ -24,7 +27,9 @@ pub fn compute_visible_projects<'a>(
     focused: Option<&String>,
     focus_individual: bool,
     window: &WindowState,
+    active_space: &str,
 ) -> Vec<&'a ProjectData> {
+    let in_space = |p: &ProjectData| p.space_id == active_space;
     // Agents overview: the main area shows every agent session and nothing
     // else. Checked before anything folder-related because it selects a kind of
     // project rather than a place — folders group repos, and a session belongs
@@ -34,6 +39,7 @@ pub fn compute_visible_projects<'a>(
         return data
             .projects
             .iter()
+            .filter(|p| in_space(p))
             .filter(|p| p.is_any_agent_session())
             // A closed session lives in the Agents history, not the overview.
             .filter(|p| !p.is_closed())
@@ -171,9 +177,15 @@ pub fn compute_visible_projects<'a>(
                 grouped.extend(children);
             }
         }
+        grouped.retain(|p| in_space(p));
         return grouped;
     }
 
+    // The space filter is applied once, at the end, rather than at each of the
+    // half-dozen places a project can enter `result`: everything above walks
+    // `project_order` and folders, and a row from another space simply must not
+    // survive any of those paths.
+    result.retain(|p| in_space(p));
     result
 }
 
@@ -225,6 +237,7 @@ fn push_project_with_worktrees<'a>(
 mod tests {
     use super::*;
     use crate::settings::HooksConfig;
+    use okena_core::spaces::DEFAULT_SPACE_ID;
     use crate::state::{FolderData, LayoutNode, WorktreeMetadata};
     use okena_core::theme::FolderColor;
     use okena_terminal::shell_config::ShellType;
@@ -232,6 +245,7 @@ mod tests {
 
     fn make_project(id: &str) -> ProjectData {
         ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: format!("Project {}", id),
             path: "/tmp/test".to_string(),
@@ -344,7 +358,7 @@ mod tests {
             &[],
         ));
         let window = data.main_window.clone();
-        let visible = compute_visible_projects(&data, None, false, &window);
+        let visible = compute_visible_projects(&data, None, false, &window, DEFAULT_SPACE_ID);
         assert_eq!(
             visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             ["a1", "s1"],
@@ -364,14 +378,14 @@ mod tests {
         ));
         data.projects[0].closed_at = Some(1);
         let window = data.main_window.clone();
-        let visible = compute_visible_projects(&data, None, false, &window);
+        let visible = compute_visible_projects(&data, None, false, &window, DEFAULT_SPACE_ID);
         assert_eq!(
             visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             ["a2"]
         );
         // Opened from the history, it shows like any focused session.
         let focused = "a1".to_string();
-        let visible = compute_visible_projects(&data, Some(&focused), true, &window);
+        let visible = compute_visible_projects(&data, Some(&focused), true, &window, DEFAULT_SPACE_ID);
         assert_eq!(
             visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             ["a1"]
@@ -389,7 +403,7 @@ mod tests {
             &[],
         ));
         let window = data.main_window.clone();
-        assert!(compute_visible_projects(&data, None, false, &window).is_empty());
+        assert!(compute_visible_projects(&data, None, false, &window, DEFAULT_SPACE_ID).is_empty());
     }
 
     #[test]
@@ -405,7 +419,7 @@ mod tests {
         ));
         let window = data.main_window.clone();
         let focused = "a2".to_string();
-        let visible = compute_visible_projects(&data, Some(&focused), true, &window);
+        let visible = compute_visible_projects(&data, Some(&focused), true, &window, DEFAULT_SPACE_ID);
         assert_eq!(
             visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             ["a2"]
@@ -425,7 +439,7 @@ mod tests {
             &["a1"],
         ));
         let window = data.main_window.clone();
-        let visible = compute_visible_projects(&data, None, false, &window);
+        let visible = compute_visible_projects(&data, None, false, &window, DEFAULT_SPACE_ID);
         assert_eq!(
             visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             ["a2"]
@@ -442,7 +456,7 @@ mod tests {
             &[],
         );
         let window = data.main_window.clone();
-        let visible = compute_visible_projects(&data, None, false, &window);
+        let visible = compute_visible_projects(&data, None, false, &window, DEFAULT_SPACE_ID);
         assert_eq!(
             visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             ["repo1", "a1"]
@@ -456,7 +470,7 @@ mod tests {
             vec!["p1", "p2", "p3"],
             &["p2"],
         );
-        let visible = compute_visible_projects(&data, None, false, &data.main_window);
+        let visible = compute_visible_projects(&data, None, false, &data.main_window, DEFAULT_SPACE_ID);
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "p1");
         assert_eq!(visible[1].id, "p3");
@@ -470,7 +484,7 @@ mod tests {
             &["p3"],
         );
         let focused = "p3".to_string();
-        let visible = compute_visible_projects(&data, Some(&focused), false, &data.main_window);
+        let visible = compute_visible_projects(&data, Some(&focused), false, &data.main_window, DEFAULT_SPACE_ID);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "p3");
     }
@@ -483,12 +497,13 @@ mod tests {
             &[],
         );
         data.folders.push(FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
             folder_color: FolderColor::default(),
         });
-        let visible = compute_visible_projects(&data, None, false, &WindowState::default());
+        let visible = compute_visible_projects(&data, None, false, &WindowState::default(), DEFAULT_SPACE_ID);
         assert_eq!(visible.len(), 2);
     }
 
@@ -500,6 +515,7 @@ mod tests {
             &[],
         );
         data.folders.push(FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
@@ -509,7 +525,7 @@ mod tests {
             folder_filter: Some("f1".to_string()),
             ..WindowState::default()
         };
-        let visible = compute_visible_projects(&data, None, false, &window);
+        let visible = compute_visible_projects(&data, None, false, &window, DEFAULT_SPACE_ID);
         assert_eq!(visible.len(), 2);
         assert!(visible.iter().all(|p| p.id != "p3"));
     }
@@ -520,7 +536,7 @@ mod tests {
         parent.worktree_ids = vec!["wt1".to_string()];
         let wt1 = make_wt("wt1", "parent");
         let data = make_data(vec![parent, wt1], vec!["parent"], &[]);
-        let visible = compute_visible_projects(&data, None, false, &WindowState::default());
+        let visible = compute_visible_projects(&data, None, false, &WindowState::default(), DEFAULT_SPACE_ID);
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].id, "parent");
         assert_eq!(visible[1].id, "wt1");
@@ -534,7 +550,7 @@ mod tests {
         let data = make_data(vec![parent, wt1], vec!["parent"], &[]);
         let focused = "wt1".to_string();
         let visible =
-            compute_visible_projects(&data, Some(&focused), false, &WindowState::default());
+            compute_visible_projects(&data, Some(&focused), false, &WindowState::default(), DEFAULT_SPACE_ID);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "wt1");
     }
@@ -547,7 +563,7 @@ mod tests {
         let data = make_data(vec![parent, wt1], vec!["parent"], &[]);
         let focused = "parent".to_string();
         let visible =
-            compute_visible_projects(&data, Some(&focused), true, &WindowState::default());
+            compute_visible_projects(&data, Some(&focused), true, &WindowState::default(), DEFAULT_SPACE_ID);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "parent");
     }
@@ -559,7 +575,7 @@ mod tests {
         let parent = make_project("p1");
         let w1 = make_wt("w1", "p1");
         let data = make_data(vec![parent, w1], vec!["p1", "w1"], &["p1"]);
-        let visible = compute_visible_projects(&data, None, false, &data.main_window);
+        let visible = compute_visible_projects(&data, None, false, &data.main_window, DEFAULT_SPACE_ID);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "w1");
     }
@@ -576,7 +592,7 @@ mod tests {
         );
         let mut window = WindowState::default();
         window.hidden_project_ids.insert("p2".to_string());
-        let visible = compute_visible_projects(&data, None, false, &window);
+        let visible = compute_visible_projects(&data, None, false, &window, DEFAULT_SPACE_ID);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p3"]);
     }
@@ -592,7 +608,7 @@ mod tests {
         let data = make_data(vec![parent, wt1], vec!["parent"], &[]);
         let mut window = WindowState::default();
         window.hidden_project_ids.insert("wt1".to_string());
-        let visible = compute_visible_projects(&data, None, false, &window);
+        let visible = compute_visible_projects(&data, None, false, &window, DEFAULT_SPACE_ID);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["parent"]);
     }
@@ -608,6 +624,7 @@ mod tests {
             &[],
         );
         data.folders.push(FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
@@ -617,7 +634,7 @@ mod tests {
             folder_filter: Some("f1".to_string()),
             ..Default::default()
         };
-        let visible = compute_visible_projects(&data, None, false, &window);
+        let visible = compute_visible_projects(&data, None, false, &window, DEFAULT_SPACE_ID);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["p1", "p2"]);
     }
@@ -635,6 +652,7 @@ mod tests {
             &[],
         );
         data.folders.push(FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "Folder".to_string(),
             project_ids: vec!["p1".to_string(), "p2".to_string()],
@@ -645,7 +663,7 @@ mod tests {
             ..WindowState::default()
         };
         let focused = "p3".to_string();
-        let visible = compute_visible_projects(&data, Some(&focused), false, &window);
+        let visible = compute_visible_projects(&data, Some(&focused), false, &window, DEFAULT_SPACE_ID);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["p3"]);
     }
@@ -662,12 +680,14 @@ mod tests {
             &[],
         );
         data.folders.push(FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f1".to_string(),
             name: "F1".to_string(),
             project_ids: vec!["a1".to_string()],
             folder_color: FolderColor::default(),
         });
         data.folders.push(FolderData {
+            space_id: okena_core::spaces::default_space_id(),
             id: "f2".to_string(),
             name: "F2".to_string(),
             project_ids: vec!["b1".to_string()],
@@ -678,8 +698,141 @@ mod tests {
             ..WindowState::default()
         };
         let focused = "b1".to_string();
-        let visible = compute_visible_projects(&data, Some(&focused), false, &window);
+        let visible = compute_visible_projects(&data, Some(&focused), false, &window, DEFAULT_SPACE_ID);
         let ids: Vec<&str> = visible.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["b1"]);
+    }
+
+    // ---- spaces (QBL-430) ----
+
+    fn in_space(id: &str, space: &str) -> ProjectData {
+        let mut p = make_project(id);
+        p.space_id = space.to_string();
+        p
+    }
+
+    #[test]
+    fn only_the_active_spaces_projects_are_shown() {
+        let mut data = WorkspaceData::empty();
+        data.projects.push(in_space("p1", DEFAULT_SPACE_ID));
+        data.projects.push(in_space("p2", "client-a"));
+        data.project_order = vec!["p1".into(), "p2".into()];
+
+        let here = compute_visible_projects(&data, None, false, &WindowState::default(), DEFAULT_SPACE_ID);
+        assert_eq!(here.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["p1"]);
+
+        let there = compute_visible_projects(&data, None, false, &WindowState::default(), "client-a");
+        assert_eq!(there.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["p2"]);
+    }
+
+    #[test]
+    fn a_space_with_nothing_in_it_shows_nothing() {
+        let mut data = WorkspaceData::empty();
+        data.projects.push(in_space("p1", DEFAULT_SPACE_ID));
+        data.project_order = vec!["p1".into()];
+        let visible =
+            compute_visible_projects(&data, None, false, &WindowState::default(), "client-a");
+        assert!(visible.is_empty());
+    }
+
+    #[test]
+    fn the_agents_overview_is_the_active_spaces_agents_only() {
+        let mut data = WorkspaceData::empty();
+        let mut mine = in_space("a1", "client-a");
+        mine.task_ref = Some(okena_core::tasks::TaskRef {
+            id: okena_core::tasks::TaskId {
+                provider: "linear".into(),
+                external_id: "t1".into(),
+            },
+            display_key: "QBL-1".into(),
+            title: "t".into(),
+            url: String::new(),
+            parent_id: None,
+            parent_key: None,
+        });
+        let mut theirs = mine.clone();
+        theirs.id = "a2".into();
+        theirs.space_id = DEFAULT_SPACE_ID.to_string();
+        data.projects.push(mine);
+        data.projects.push(theirs);
+        data.project_order = vec!["a1".into(), "a2".into()];
+
+        let window = WindowState {
+            agents_overview: true,
+            ..Default::default()
+        };
+        let visible = compute_visible_projects(&data, None, false, &window, "client-a");
+        assert_eq!(visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["a1"]);
+    }
+
+    #[test]
+    fn a_folder_from_another_space_contributes_nothing() {
+        let mut data = WorkspaceData::empty();
+        data.projects.push(in_space("p1", "client-a"));
+        data.folders.push(FolderData {
+            id: "f1".into(),
+            name: "Theirs".into(),
+            project_ids: vec!["p1".into()],
+            folder_color: FolderColor::default(),
+            space_id: "client-a".into(),
+        });
+        data.project_order = vec!["f1".into()];
+        let visible = compute_visible_projects(
+            &data,
+            None,
+            false,
+            &WindowState::default(),
+            DEFAULT_SPACE_ID,
+        );
+        assert!(visible.is_empty());
+    }
+
+    #[test]
+    fn a_focused_project_in_another_space_does_not_leak_through() {
+        // Focus is a window-level override; a space is not something a window
+        // can reach past.
+        let mut data = WorkspaceData::empty();
+        data.projects.push(in_space("p1", "client-a"));
+        data.project_order = vec!["p1".into()];
+        let focused = "p1".to_string();
+        let visible = compute_visible_projects(
+            &data,
+            Some(&focused),
+            false,
+            &WindowState::default(),
+            DEFAULT_SPACE_ID,
+        );
+        assert!(visible.is_empty());
+    }
+
+    #[test]
+    fn a_worktree_is_shown_beside_its_parent_within_the_space() {
+        let mut data = WorkspaceData::empty();
+        let mut parent = in_space("p1", "client-a");
+        parent.worktree_ids = vec!["w1".into()];
+        let mut wt = in_space("w1", "client-a");
+        wt.worktree_info = Some(WorktreeMetadata {
+            parent_project_id: "p1".into(),
+            color_override: None,
+            main_repo_path: String::new(),
+            worktree_path: "/tmp/w1".into(),
+            branch_name: String::new(),
+        });
+        data.projects.push(parent);
+        data.projects.push(wt);
+        // The parent alone goes in `project_order`; the worktree reaches the
+        // list through `worktree_ids`, as it does everywhere else.
+        data.project_order = vec!["p1".into()];
+
+        let visible =
+            compute_visible_projects(&data, None, false, &WindowState::default(), "client-a");
+        assert_eq!(
+            visible.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["p1", "w1"]
+        );
+        assert!(
+            compute_visible_projects(&data, None, false, &WindowState::default(), DEFAULT_SPACE_ID)
+                .is_empty()
+        );
     }
 }

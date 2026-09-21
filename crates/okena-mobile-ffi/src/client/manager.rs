@@ -817,6 +817,7 @@ mod tests {
 
     fn project(id: &str, layout: ApiLayoutNode) -> ApiProject {
         ApiProject {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: id.to_string(),
             path: "/tmp".to_string(),
@@ -856,6 +857,8 @@ mod tests {
 
     fn state(projects: Vec<ApiProject>) -> StateResponse {
         StateResponse {
+            spaces: Vec::new(),
+            active_space: okena_core::spaces::default_space_id(),
             state_version: 1,
             projects,
             focused_project_id: None,

@@ -52,12 +52,39 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
+            // Moved off `cmd-1` when spaces took the number row (QBL-430):
+            // Cmd/Ctrl+1..9 jump to the Nth space, and a number that meant two
+            // things would mean neither.
             "FocusSidebar".to_string(),
             vec![
-                KeybindingEntry::new("cmd-1", None),
-                KeybindingEntry::new("ctrl-1", None),
+                KeybindingEntry::new("cmd-shift-1", None),
+                KeybindingEntry::new("ctrl-shift-1", None),
             ],
         );
+        // Spaces: cycle with the bracket keys, jump with the number row.
+        bindings.insert(
+            "NextSpace".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-]", None),
+                KeybindingEntry::new("ctrl-shift-]", None),
+            ],
+        );
+        bindings.insert(
+            "PreviousSpace".to_string(),
+            vec![
+                KeybindingEntry::new("cmd-shift-[", None),
+                KeybindingEntry::new("ctrl-shift-[", None),
+            ],
+        );
+        for (action, n) in crate::keybindings::SPACE_SWITCH_ACTIONS {
+            bindings.insert(
+                action.to_string(),
+                vec![
+                    KeybindingEntry::new(format!("cmd-{n}"), None),
+                    KeybindingEntry::new(format!("ctrl-{n}"), None),
+                ],
+            );
+        }
         bindings.insert(
             "ClearFocus".to_string(),
             vec![
@@ -593,6 +620,68 @@ mod tests {
     /// error — `create_keybinding` logs a warning and the shortcut is simply
     /// dead, while a missing description hides it from the command palette and
     /// the keybindings overlay. Both are silent at runtime, so pin them here.
+    // ---- spaces (QBL-430) ----
+
+    #[test]
+    fn the_number_row_jumps_to_the_nth_space() {
+        let config = KeybindingConfig::defaults();
+        for (action, n) in crate::keybindings::SPACE_SWITCH_ACTIONS {
+            let keys: Vec<&str> = config
+                .bindings
+                .get(action)
+                .expect("bound by default")
+                .iter()
+                .map(|e| e.keystroke.as_str())
+                .collect();
+            assert_eq!(keys, [format!("cmd-{n}"), format!("ctrl-{n}")]);
+        }
+    }
+
+    #[test]
+    fn next_and_previous_space_are_bound_on_both_platforms() {
+        let config = KeybindingConfig::defaults();
+        for (action, key) in [("NextSpace", "]"), ("PreviousSpace", "[")] {
+            let keys: Vec<&str> = config
+                .bindings
+                .get(action)
+                .expect("bound by default")
+                .iter()
+                .map(|e| e.keystroke.as_str())
+                .collect();
+            assert_eq!(keys, [format!("cmd-shift-{key}"), format!("ctrl-shift-{key}")]);
+        }
+    }
+
+    #[test]
+    fn focusing_the_sidebar_moved_off_the_number_row() {
+        // Cmd+1 is the first space now; the two cannot share it.
+        let config = KeybindingConfig::defaults();
+        let keys: Vec<&str> = config
+            .bindings
+            .get("FocusSidebar")
+            .expect("still bound")
+            .iter()
+            .map(|e| e.keystroke.as_str())
+            .collect();
+        assert_eq!(keys, ["cmd-shift-1", "ctrl-shift-1"]);
+        assert!(config.detect_conflicts().is_empty());
+    }
+
+    #[test]
+    fn every_space_shortcut_is_described_under_its_own_heading() {
+        // So they are all listed with the other actions and can be rebound.
+        let descriptions = crate::keybindings::get_action_descriptions();
+        let mut expected: Vec<&str> = vec!["NextSpace", "PreviousSpace"];
+        expected.extend(crate::keybindings::SPACE_SWITCH_ACTIONS.iter().map(|(a, _)| *a));
+        for action in expected {
+            let described = descriptions
+                .get(action)
+                .unwrap_or_else(|| panic!("{action} has no description"));
+            assert_eq!(described.category, "Spaces", "{action}");
+            assert!(!described.name.is_empty(), "{action}");
+        }
+    }
+
     #[test]
     fn every_default_action_is_bindable_and_described() {
         let config = KeybindingConfig::defaults();

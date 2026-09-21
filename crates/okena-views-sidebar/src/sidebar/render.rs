@@ -12,7 +12,7 @@ use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_ms;
 use okena_workspace::requests::SidebarRequest;
 use okena_workspace::state::{ProjectData, Workspace};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 impl Sidebar {
     /// Build the `project_id -> services` map from the local `ServiceManager`
@@ -110,6 +110,11 @@ impl Sidebar {
             .on_action(cx.listener(Self::handle_sidebar_confirm))
             .on_action(cx.listener(Self::handle_sidebar_toggle_expand))
             .on_action(cx.listener(Self::handle_sidebar_escape))
+            // The space selector sits above everything: it decides which
+            // projects, agents and roots the rest of the sidebar is about.
+            .child(self.render_space_selector(cx))
+            .child(self.render_space_overflow_menu(cx))
+            .child(self.render_space_menu(cx))
             .child(self.render_harness_nav(cx))
             // One header for the list: selector, overview, view options, add.
             .child(self.render_list_header(cx))
@@ -220,6 +225,12 @@ impl Sidebar {
             let mut m = HashMap::new();
             let mut idx_map = HashMap::new();
             for (idx, project) in workspace.data().projects.iter().enumerate() {
+                // Only the space showing. Enumerated before the filter on
+                // purpose: `idx_map` holds the position in `data().projects`,
+                // which is what drag-and-drop targets by.
+                if !workspace.is_in_active_space(project) {
+                    continue;
+                }
                 // Agent sessions render in the Agents list and under their
                 // worktrees, so they never appear among the repos.
                 if project.agent_role().is_some() {
@@ -470,7 +481,7 @@ impl Sidebar {
         // few projects that actually qualify. Hook terminals are excluded to
         // match the activity view's `terminal_ids` (which filters them out).
         let mut hits: Vec<(Option<u64>, &ProjectData)> = Vec::new();
-        for project in &workspace.data().projects {
+        for project in workspace.projects_in_active_space() {
             // A closed session is history: nothing in it waits on you.
             if project.is_closed() {
                 continue;
@@ -822,24 +833,16 @@ impl Render for Sidebar {
             Vec::new()
         };
 
-        // Collect all projects for lookup
-        let all_projects: HashMap<&str, &ProjectData> = workspace
-            .data()
-            .projects
-            .iter()
-            .map(|p| (p.id.as_str(), p))
-            .collect();
+        // Everything below resolves through this: the space showing, and
+        // nothing else. Shared with the cursor walk so the two passes cannot
+        // disagree about what is on screen.
+        let (all_projects, all_project_ids) = super::visible_projects_by_id(workspace);
 
         // Build worktree children map using parent's worktree_ids for deterministic ordering
-        // Build worktree children map using parent's worktree_ids for deterministic ordering
         let mut worktree_children_map: HashMap<String, Vec<SidebarProjectInfo>> = HashMap::new();
-        let all_project_ids: HashSet<&str> = workspace
-            .data()
-            .projects
-            .iter()
-            .map(|p| p.id.as_str())
-            .collect();
-        for parent in &workspace.data().projects {
+        // A worktree is in its parent's space, so filtering the parents is
+        // enough to keep another space's checkouts out of the list.
+        for parent in workspace.projects_in_active_space() {
             if !parent.worktree_ids.is_empty() {
                 let mut children = Vec::new();
                 for wt_id in &parent.worktree_ids {
@@ -865,7 +868,7 @@ impl Render for Sidebar {
         let mut items: Vec<SidebarItem> = Vec::new();
         for (top_index, id) in workspace.data().project_order.iter().enumerate() {
             // Check if this is a folder
-            if let Some(folder) = workspace.data().folders.iter().find(|f| &f.id == id) {
+            if let Some(folder) = super::visible_folder(workspace, id) {
                 let mut folder_projects: Vec<SidebarProjectInfo> = folder
                     .project_ids
                     .iter()

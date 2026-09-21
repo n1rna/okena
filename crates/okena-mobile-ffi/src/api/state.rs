@@ -55,17 +55,72 @@ pub struct FullscreenInfo {
     pub terminal_id: String,
 }
 
+/// One space: a separate set of projects, agents, tasks and roots (QBL-430).
+#[derive(Debug, Clone)]
+pub struct SpaceInfo {
+    pub id: String,
+    pub name: String,
+    /// One of this space's agents is waiting on the user. Marks its dot even
+    /// while another space is showing.
+    pub agent_waiting: bool,
+}
+
+/// Which space the snapshot says is showing.
+///
+/// A daemon from before spaces sends none, which reads as Default — and every
+/// project it sends has no `space_id`, which also reads as Default, so its
+/// whole workspace stays visible.
+fn active_space(state: &okena_core::api::StateResponse) -> String {
+    if state.active_space.is_empty() {
+        okena_core::spaces::default_space_id()
+    } else {
+        state.active_space.clone()
+    }
+}
+
+/// The spaces the connected daemon holds, in selector order.
+pub fn get_spaces(conn_id: String) -> Vec<SpaceInfo> {
+    let mgr = ConnectionManager::get();
+    let Some(state) = mgr.get_state(&conn_id) else {
+        return Vec::new();
+    };
+    state
+        .spaces
+        .iter()
+        .map(|s| SpaceInfo {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            agent_waiting: s.agent_waiting,
+        })
+        .collect()
+}
+
+/// Which space is showing. One per profile: switching it anywhere switches it
+/// everywhere, so this follows the desktop too.
+pub fn get_active_space(conn_id: String) -> String {
+    let mgr = ConnectionManager::get();
+    mgr.get_state(&conn_id)
+        .map(|s| active_space(&s))
+        .unwrap_or_else(okena_core::spaces::default_space_id)
+}
+
 /// Get all projects from the cached remote state.
+///
+/// Only the active space's. The snapshot carries every space's projects, so
+/// the filter is here rather than in the RN layer: a project in another space
+/// must not be reachable at all, not merely hidden from one list.
 pub fn get_projects(conn_id: String) -> Vec<ProjectInfo> {
     let mgr = ConnectionManager::get();
     let state = match mgr.get_state(&conn_id) {
         Some(s) => s,
         None => return Vec::new(),
     };
+    let space = active_space(&state);
 
     state
         .projects
         .iter()
+        .filter(|p| p.space_id == space)
         .map(|p| {
             let terminal_ids = if let Some(ref layout) = p.layout {
                 collect_layout_terminal_ids(layout)
@@ -119,16 +174,18 @@ pub fn get_focused_project_id(conn_id: String) -> Option<String> {
         .and_then(|s| s.focused_project_id.clone())
 }
 
-/// Get folders from the cached remote state.
+/// Get the active space's folders from the cached remote state.
 pub fn get_folders(conn_id: String) -> Vec<FolderInfo> {
     let mgr = ConnectionManager::get();
     let state = match mgr.get_state(&conn_id) {
         Some(s) => s,
         None => return Vec::new(),
     };
+    let space = active_space(&state);
     state
         .folders
         .iter()
+        .filter(|f| f.space_id == space)
         .map(|f| FolderInfo {
             id: f.id.clone(),
             name: f.name.clone(),

@@ -15,7 +15,79 @@ use okena_views_terminal::ActionDispatch;
 
 use super::WindowView;
 
+/// Which space form a workbench request asked for. Separate from
+/// `SpaceDialogMode` because the request carries an id and the dialog wants
+/// the space itself, which is looked up here.
+#[derive(Clone, Copy)]
+pub(super) enum SpaceForm {
+    Add,
+    Rename,
+    EditTasks,
+    Delete,
+}
+
 impl WindowView {
+    /// Open one of the space forms, resolving the space from the shared list
+    /// the selector reads. A request naming a space that is gone is dropped:
+    /// it was deleted between the click and the drain.
+    pub(super) fn show_space_form(
+        &mut self,
+        space_id: Option<String>,
+        form: SpaceForm,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::views::overlays::space_dialog::SpaceDialogMode;
+        let Ok(client) = self.local_daemon_action_client(cx) else {
+            return;
+        };
+        let space = space_id.and_then(|id| {
+            okena_workspace::spaces_state::spaces(cx)
+                .into_iter()
+                .find(|s| s.id == id)
+        });
+        let mode = match (form, space) {
+            (SpaceForm::Add, _) => SpaceDialogMode::Add,
+            (SpaceForm::Rename, Some(space)) => SpaceDialogMode::Rename { space },
+            (SpaceForm::EditTasks, Some(space)) => SpaceDialogMode::EditTasks { space },
+            (SpaceForm::Delete, Some(space)) => SpaceDialogMode::Delete { space },
+            (_, None) => return,
+        };
+        self.overlay_manager
+            .update(cx, |overlays, cx| overlays.show_space_dialog(client, mode, cx));
+    }
+
+    /// Switch to the next (`+1`) or previous (`-1`) space, wrapping.
+    pub(super) fn step_space(&mut self, by: i32, cx: &mut Context<Self>) {
+        self.dispatch_space_action(okena_core::api::ActionRequest::SpaceStep { by }, cx);
+    }
+
+    /// Jump to the `n`th space, counting from 1. Past the end does nothing —
+    /// Cmd+5 with four spaces should not land somewhere arbitrary.
+    pub(super) fn switch_to_nth_space(&mut self, n: u32, cx: &mut Context<Self>) {
+        self.dispatch_space_action(okena_core::api::ActionRequest::SpaceActivateNth { n }, cx);
+    }
+
+    /// Send a space action to the local daemon, which owns which space is
+    /// showing. Silent when the daemon is unreachable: a shortcut that raised
+    /// a toast on every press while reconnecting would be worse than one that
+    /// did nothing.
+    fn dispatch_space_action(
+        &mut self,
+        action: okena_core::api::ActionRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(manager) = self.remote_manager.clone() else {
+            return;
+        };
+        manager.update(cx, |manager, cx| {
+            manager.send_action(
+                okena_transport::client::LOCAL_DAEMON_CONNECTION_ID,
+                action,
+                cx,
+            );
+        });
+    }
+
     pub(super) fn local_daemon_action_client(
         &self,
         cx: &Context<Self>,
@@ -1261,6 +1333,18 @@ impl WindowView {
             match request {
                 crate::workspace::requests::WorkbenchRequest::OpenHarnessView(section) => {
                     self.show_harness_view(section, cx);
+                }
+                crate::workspace::requests::WorkbenchRequest::AddSpace => {
+                    self.show_space_form(None, SpaceForm::Add, cx);
+                }
+                crate::workspace::requests::WorkbenchRequest::RenameSpace { space_id } => {
+                    self.show_space_form(Some(space_id), SpaceForm::Rename, cx);
+                }
+                crate::workspace::requests::WorkbenchRequest::DeleteSpace { space_id } => {
+                    self.show_space_form(Some(space_id), SpaceForm::Delete, cx);
+                }
+                crate::workspace::requests::WorkbenchRequest::EditSpaceTasks { space_id } => {
+                    self.show_space_form(Some(space_id), SpaceForm::EditTasks, cx);
                 }
                 crate::workspace::requests::WorkbenchRequest::OpenExtensionView { key } => {
                     self.show_extension_view(key, cx);

@@ -66,6 +66,37 @@ pub struct StateResponse {
     /// one last drew.
     #[serde(default)]
     pub extensions: Vec<crate::extension::ApiExtension>,
+    /// The profile's spaces, in selector order, Default first.
+    ///
+    /// Sent to every client because the selector is part of every client's
+    /// sidebar and because `projects` carries rows from all of them — without
+    /// this a client could not tell which of its projects belong to the space
+    /// showing. Empty only from a daemon that predates spaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spaces: Vec<ApiSpace>,
+    /// Which space is showing. One per profile: switching it in any client
+    /// switches it in all of them.
+    #[serde(default = "crate::spaces::default_space_id")]
+    pub active_space: String,
+}
+
+/// One space on the wire.
+///
+/// Only what a client draws or needs to route by. A space's Specs and
+/// Knowledge roots and its task filters are settings, and clients read those
+/// through `GetSettings` like every other setting — repeating them in every
+/// state snapshot would put a kilobyte of config on the PTY hot path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiSpace {
+    pub id: String,
+    pub name: String,
+    /// The task backend connection it reads, by connection id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
+    /// Whether one of this space's agents is waiting on the user. What puts a
+    /// mark on its dot while you are somewhere else.
+    #[serde(default)]
+    pub agent_waiting: bool,
 }
 
 /// OS window bounds in screen pixels.
@@ -422,6 +453,10 @@ pub struct ApiProject {
     pub id: String,
     pub name: String,
     pub path: String,
+    /// The space this project — and, when it is an agent session, its agent —
+    /// belongs to. Crosses unchanged, like [`ApiFolder::space_id`].
+    #[serde(default = "crate::spaces::default_space_id")]
+    pub space_id: String,
     #[serde(alias = "is_visible")]
     pub show_in_overview: bool,
     pub layout: Option<ApiLayoutNode>,
@@ -733,6 +768,11 @@ pub struct ApiFolder {
     pub project_ids: Vec<String>,
     #[serde(default)]
     pub folder_color: FolderColor,
+    /// The space this folder belongs to. Crosses unchanged: a space id means
+    /// the same thing on the daemon and in every client, and an older daemon
+    /// that sends none reads as Default.
+    #[serde(default = "crate::spaces::default_space_id")]
+    pub space_id: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1454,12 +1494,27 @@ pub enum ActionRequest {
         provider: String,
     },
     /// Tasks assigned to the authenticated user. Hits the provider's API.
+    ///
+    /// `provider` names a *connection*, not a provider kind — see
+    /// `okena_tasks::provider_for`.
     TasksList {
         provider: String,
+        /// The space's hard scope. Applied here, before the tasks reach any
+        /// client, so "the filter bar cannot show anything outside the scope"
+        /// holds for the Tasks view, the CLI and an agent over MCP alike —
+        /// they are all looking at a list that never contained the rest.
+        #[serde(default)]
+        scope: crate::tasks::TaskScope,
     },
     /// Teams or projects the user can file a new task in.
     TaskContainers {
         provider: String,
+        /// Narrow the offered containers to the ones the space's scope names,
+        /// so a new task defaults to somewhere the space can actually see. Not
+        /// a hard block: a create naming a container outside the scope still
+        /// goes through, it just will not be listed.
+        #[serde(default)]
+        scope: crate::tasks::TaskScope,
     },
     /// Create a task, optionally as a child of another.
     ///
@@ -2585,6 +2640,82 @@ pub enum ActionRequest {
         path: String,
     },
 
+    // ── Spaces (QBL-430) ──────────────────────────────────────────────
+    //
+    // A space spans `settings.json` (its identity, connection, filters and
+    // roots) and `workspace.json` (which projects are in it), so these are
+    // their own actions rather than a `SetSettings` patch: only the daemon can
+    // change both together, and a delete has to tear the projects down on the
+    // way.
+    /// Add a space and return it. Does not switch to it.
+    SpaceCreate {
+        name: String,
+        /// Connection id to read tasks from. `None` is a space with no task
+        /// backend yet.
+        #[serde(default)]
+        connection: Option<String>,
+        /// The hard scope on that connection.
+        #[serde(default)]
+        tasks: crate::tasks::TaskScope,
+    },
+    /// Rename a space. Refused for Default.
+    SpaceRename {
+        space_id: String,
+        name: String,
+    },
+    /// What a space holds, for the confirmation shown before deleting it:
+    /// its projects and agents, by name.
+    SpaceContents {
+        space_id: String,
+    },
+    /// Delete a space, removing its projects and agents from okena and
+    /// stopping their agents. Files on disk are not touched, and the
+    /// connection it used is left alone. Refused for Default.
+    SpaceDelete {
+        space_id: String,
+    },
+    /// Switch to a space.
+    SpaceActivate {
+        space_id: String,
+    },
+    /// Switch to the next (`+1`) or previous (`-1`) space, wrapping.
+    SpaceStep {
+        by: i32,
+    },
+    /// Switch to the `n`th space, counting from 1. Past the end does nothing.
+    SpaceActivateNth {
+        n: u32,
+    },
+    /// Point a space at another task backend connection, or at none.
+    SpaceSetConnection {
+        space_id: String,
+        #[serde(default)]
+        connection: Option<String>,
+    },
+    /// Replace a space's hard task scope.
+    SpaceSetFilters {
+        space_id: String,
+        tasks: crate::tasks::TaskScope,
+    },
+    /// Every task backend connection this profile holds.
+    TaskConnections,
+    /// Add a connection to `kind`, named `name`, and return it. Signing it in
+    /// is a separate `TasksConnectApiKey` against the returned id.
+    TaskConnectionAdd {
+        kind: String,
+        name: String,
+    },
+    /// Rename a connection.
+    TaskConnectionRename {
+        connection_id: String,
+        name: String,
+    },
+    /// Forget a connection and its credential. Refused, naming them, while a
+    /// space still reads it.
+    TaskConnectionRemove {
+        connection_id: String,
+    },
+
     // ── Settings (app-scoped; handled at the remote bridge) ───────────
     /// Return the full current settings as JSON.
     GetSettings,
@@ -2765,6 +2896,7 @@ mod tests {
         let resp = StateResponse {
             state_version: 42,
             projects: vec![ApiProject {
+                space_id: crate::spaces::default_space_id(),
                 id: "p1".into(),
                 name: "Test".into(),
                 path: "/tmp".into(),
@@ -2848,6 +2980,7 @@ mod tests {
             fullscreen_terminal: None,
             project_order: vec!["folder1".into(), "p1".into()],
             folders: vec![ApiFolder {
+                space_id: crate::spaces::default_space_id(),
                 id: "folder1".into(),
                 name: "My Folder".into(),
                 project_ids: vec!["p2".into()],
@@ -2875,12 +3008,22 @@ mod tests {
             }],
             hooks: Vec::new(),
             extensions: Vec::new(),
+            spaces: vec![ApiSpace {
+                id: "client-a".into(),
+                name: "Client A".into(),
+                connection: Some("linear-2".into()),
+                agent_waiting: true,
+            }],
+            active_space: "client-a".into(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StateResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.state_version, 42);
         assert_eq!(parsed.projects.len(), 1);
         assert_eq!(parsed.projects[0].id, "p1");
+        assert_eq!(parsed.projects[0].space_id, "default");
+        assert_eq!(parsed.active_space, "client-a");
+        assert_eq!(parsed.spaces, resp.spaces);
         assert!(matches!(parsed.projects[0].folder_color, FolderColor::Blue));
         assert!(parsed.projects[0].pinned);
         assert_eq!(parsed.projects[0].last_activity_at, Some(1_700_000_000_000));

@@ -963,6 +963,7 @@ mod tests {
         let mut data = empty_workspace_data();
         data.project_order.push(project_id.to_string());
         data.projects.push(ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: project_id.to_string(),
             name: "Project".into(),
             path: project_path.to_string(),

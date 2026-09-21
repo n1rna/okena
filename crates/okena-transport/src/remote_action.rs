@@ -924,6 +924,7 @@ mod action_timeout_tests {
         // first, or a slow API reads as a broken connection.
         for action in [
             ActionRequest::TasksList {
+                scope: Default::default(),
                 provider: "linear".into(),
             },
             ActionRequest::TasksConnectApiKey {

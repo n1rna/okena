@@ -505,7 +505,7 @@ impl Sidebar {
         let focused_id = self.focus_manager.read(cx).focused_project_id().cloned();
 
         let mut sessions: Vec<SessionRow> = Vec::new();
-        for p in workspace.data().projects.iter() {
+        for p in workspace.projects_in_active_space() {
             let Some(role) = p.agent_role() else {
                 continue;
             };
@@ -583,7 +583,9 @@ impl Sidebar {
         let focused_id = self.focus_manager.read(cx).focused_project_id().cloned();
         let now = okena_ui::ago::now_millis();
 
-        let closed: Vec<ClosedRow> = closed_sessions(&workspace.data().projects)
+        // A space's closed-agent history is its own, like its live agents'.
+        let in_space: Vec<_> = workspace.projects_in_active_space().cloned().collect();
+        let closed: Vec<ClosedRow> = closed_sessions(&in_space)
             .into_iter()
             .filter_map(|p| {
                 let role = p.agent_role()?;

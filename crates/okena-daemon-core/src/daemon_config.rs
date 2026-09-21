@@ -104,6 +104,29 @@ impl DaemonConfig {
         remote_config::set_settings(self, patch)
     }
 
+    /// Apply `edit` to the held settings and persist the result.
+    ///
+    /// The write path for changes that are not a JSON patch — spaces, whose
+    /// rules live in `okena_workspace::spaces` and span more than one key. On
+    /// a save failure the held value is rolled back, so the daemon's settings
+    /// and `settings.json` never disagree.
+    pub fn edit_settings<T>(
+        &mut self,
+        edit: impl FnOnce(&mut AppSettings) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let before = self.settings.lock().clone();
+        let (value, next) = {
+            let mut held = self.settings.lock();
+            let value = edit(&mut held)?;
+            (value, held.clone())
+        };
+        if let Err(e) = (self.persist_settings)(&next) {
+            *self.settings.lock() = before;
+            return Err(e);
+        }
+        Ok(value)
+    }
+
     /// Validate a patch without persisting it or changing the shared settings.
     pub fn preview_settings(&self, patch: Value) -> Result<AppSettings, String> {
         remote_config::preview_settings_patch(&self.settings.lock(), patch)
@@ -222,6 +245,70 @@ mod tests {
     fn config_with(settings: AppSettings) -> DaemonConfig {
         DaemonConfig::new(Arc::new(Mutex::new(settings)))
     }
+
+    fn config_with_persistence(
+        settings: AppSettings,
+        persist: SettingsPersister,
+    ) -> DaemonConfig {
+        DaemonConfig::with_persistence(Arc::new(Mutex::new(settings)), persist)
+    }
+
+    #[test]
+    fn editing_settings_persists_the_result() {
+        let saved: Arc<Mutex<Option<AppSettings>>> = Arc::new(Mutex::new(None));
+        let sink = saved.clone();
+        let mut config = config_with_persistence(
+            default_settings(),
+            Arc::new(move |s: &AppSettings| {
+                *sink.lock() = Some(s.clone());
+                Ok(())
+            }),
+        );
+
+        let space = config
+            .edit_settings(|s| {
+                okena_workspace::spaces::create(s, "Client A", None, Default::default())
+            })
+            .expect("created");
+        assert_eq!(space.id, "client-a");
+        let written = saved.lock().clone().expect("persisted");
+        assert!(written.space("client-a").is_some());
+        assert!(config.settings.lock().space("client-a").is_some());
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_held_settings_untouched() {
+        // Otherwise the daemon would show a space that settings.json does not
+        // have, and the next restart would lose it under the user.
+        let mut config = config_with_persistence(
+            default_settings(),
+            Arc::new(|_: &AppSettings| Err("disk full".to_string())),
+        );
+        let before = config.settings.lock().spaces.len();
+        let result = config.edit_settings(|s| {
+            okena_workspace::spaces::create(s, "Client A", None, Default::default())
+        });
+        assert_eq!(result.err().as_deref(), Some("disk full"));
+        assert_eq!(config.settings.lock().spaces.len(), before);
+        assert!(config.settings.lock().space("client-a").is_none());
+    }
+
+    #[test]
+    fn a_refused_edit_writes_nothing() {
+        let saved: Arc<Mutex<Option<AppSettings>>> = Arc::new(Mutex::new(None));
+        let sink = saved.clone();
+        let mut config = config_with_persistence(
+            default_settings(),
+            Arc::new(move |s: &AppSettings| {
+                *sink.lock() = Some(s.clone());
+                Ok(())
+            }),
+        );
+        let result = config.edit_settings(|s| okena_workspace::spaces::remove(s, "default"));
+        assert!(result.is_err(), "Default cannot be deleted");
+        assert!(saved.lock().is_none(), "a refused edit must not save");
+    }
+
 
     #[test]
     fn a_github_host_added_in_settings_is_polled_until_it_is_removed() {

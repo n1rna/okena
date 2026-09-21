@@ -41,6 +41,7 @@ import {
 import type { FolderInfo, OkenaNative, ProjectInfo } from '../native/okena';
 import { getOkenaNative } from '../native/okena';
 import { OkenaColors } from '../theme';
+import { SpaceSelector } from './SpaceSelector';
 
 // ── Folder colors (mirror _folderColorToColor in project_drawer.dart) ────────
 
@@ -197,6 +198,9 @@ export const ProjectDrawer: React.FC<ProjectDrawerProps> = ({
             <Text style={styles.statusText}>{status.kind}</Text>
           </View>
         </View>
+
+        {/* Which space the list below is about */}
+        <SpaceSelector />
 
         {/* Project / folder list */}
         <ScrollView style={styles.flex}>

@@ -232,7 +232,7 @@ fn reference(r: &SpecReference, t: &ThemeColors, cx: &App) -> AnyElement {
 impl SettingsPanel {
     fn discovery_fingerprint(cx: &App) -> String {
         let s = &settings_entity(cx).read(cx).settings;
-        format!("{:?}|{:?}", s.harness.specs, s.harness.spec_repo)
+        format!("{:?}|{}", s.active_space().specs, s.active_space)
     }
 
     /// Read what the daemon discovers. Cheap and local — no network.
@@ -361,7 +361,7 @@ impl SettingsPanel {
         if value.is_empty() {
             return;
         }
-        let mut folders = settings_entity(cx).read(cx).settings.harness.spec_folders();
+        let mut folders = settings_entity(cx).read(cx).settings.active_space().spec_folders();
         folders.push(value);
         settings_entity(cx).update(cx, |state, cx| state.set_spec_folders(folders, cx));
         self.specs
@@ -370,7 +370,7 @@ impl SettingsPanel {
     }
 
     fn remove_spec_folder(&mut self, index: usize, cx: &mut Context<Self>) {
-        let mut folders = settings_entity(cx).read(cx).settings.harness.spec_folders();
+        let mut folders = settings_entity(cx).read(cx).settings.active_space().spec_folders();
         if index < folders.len() {
             folders.remove(index);
         }
@@ -689,8 +689,8 @@ impl SettingsPanel {
         }
 
         let settings = settings_entity(cx).read(cx).settings.clone();
-        let discovery = settings.harness.specs.clone();
-        let folders = settings.harness.spec_folders();
+        let discovery = settings.active_space().specs.clone();
+        let folders = settings.active_space().spec_folders();
         let stores = self.specs.stores.clone();
         let roots: Vec<SpecRoot> = stores.as_ref().map(|s| s.roots.clone()).unwrap_or_default();
         let daemon = self.action_client.is_some();

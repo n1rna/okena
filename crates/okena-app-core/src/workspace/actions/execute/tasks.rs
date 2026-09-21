@@ -36,26 +36,46 @@ fn resolve(provider: &str) -> Result<Box<dyn TaskProvider>, String> {
 }
 
 /// Map a provider's live auth state onto the shared wire type.
-fn provider_status(p: &dyn TaskProvider) -> TaskProviderStatus {
+fn provider_status(
+    id: &str,
+    name: &str,
+    kind: &str,
+    p: &dyn TaskProvider,
+) -> TaskProviderStatus {
     let auth = match p.auth_status() {
         AuthStatus::Disconnected => TaskAuthState::Disconnected,
         AuthStatus::Connected { account } => TaskAuthState::Connected { account },
         AuthStatus::Expired => TaskAuthState::Expired,
     };
     TaskProviderStatus {
-        provider: p.id().to_string(),
-        display_name: p.display_name().to_string(),
+        provider: id.to_string(),
+        display_name: name.to_string(),
+        kind: kind.to_string(),
         auth,
     }
 }
 
-/// Auth state for every provider this build knows about. Local only.
+/// Auth state for every connection this profile holds. Local only.
+///
+/// A profile with no connections yet still gets one row per backend this build
+/// knows, so the settings page has something to sign in to — and signing in
+/// there files the credential under the kind's own id, which is the first
+/// connection to it.
 pub(super) fn auth_status() -> ActionResult {
-    let providers: Vec<TaskProviderStatus> = okena_tasks::KNOWN_PROVIDERS
-        .iter()
-        .filter_map(|id| okena_tasks::provider_for(id))
-        .map(|p| provider_status(p.as_ref()))
-        .collect();
+    let connections = okena_tasks::store::connections();
+    let providers: Vec<TaskProviderStatus> = if connections.is_empty() {
+        okena_tasks::KNOWN_PROVIDERS
+            .iter()
+            .filter_map(|id| okena_tasks::provider_for(id).map(|p| (*id, p)))
+            .map(|(id, p)| provider_status(id, &okena_tasks::kind_display_name(id), id, p.as_ref()))
+            .collect()
+    } else {
+        connections
+            .iter()
+            .filter_map(|c| okena_tasks::provider_for(&c.id).map(|p| (c, p)))
+            .map(|(c, p)| provider_status(&c.id, &c.name, &c.kind, p.as_ref()))
+            .collect()
+    };
     let response = TaskAuthStatusResponse { providers };
     match serde_json::to_value(&response) {
         Ok(v) => ActionResult::Ok(Some(v)),
@@ -132,8 +152,19 @@ pub(super) fn connect_api_key(
             }
             // Re-read through the stored path so the reported status is what a
             // later call will actually see, not what we just held in hand.
+            // `provider` names a connection. Its own name and kind come from
+            // the registry; a profile that has never listed one falls back to
+            // the backend's name, which is what the id is then.
+            let connection = okena_tasks::store::connection(&provider);
+            let (name, kind) = match &connection {
+                Some(c) => (c.name.clone(), c.kind.clone()),
+                None => (
+                    okena_tasks::kind_display_name(&provider),
+                    provider.clone(),
+                ),
+            };
             let stored = match resolve(&provider) {
-                Ok(p) => provider_status(p.as_ref()),
+                Ok(p) => provider_status(&provider, &name, &kind, p.as_ref()),
                 Err(e) => return ActionResult::Err(e),
             };
             match serde_json::to_value(&stored) {
@@ -156,13 +187,47 @@ pub(super) fn disconnect(provider: String) -> ActionResult {
 }
 
 /// Teams or projects the user can file a new task in.
-pub(super) fn containers(provider: String) -> ActionResult {
+/// The containers a space can file into: the ones its scope names on the axes
+/// a container *is* — a team or a project.
+///
+/// A scope that names neither leaves the list alone. This is a default, not a
+/// gate: a create naming a container outside the scope still goes through (the
+/// task simply will not show in that space), because refusing it would make a
+/// filtered space unable to file the very work that moves a task into it.
+fn containers_in_scope(
+    list: Vec<okena_tasks::provider::TaskContainer>,
+    scope: &okena_core::tasks::TaskScope,
+) -> Vec<okena_tasks::provider::TaskContainer> {
+    use okena_core::tasks::GroupAxis;
+    let wanted: std::collections::BTreeSet<&String> = [GroupAxis::Team, GroupAxis::Project]
+        .iter()
+        .filter_map(|axis| scope.groups.get(axis))
+        .flatten()
+        .collect();
+    if wanted.is_empty() {
+        return list;
+    }
+    let narrowed: Vec<_> = list
+        .iter()
+        .filter(|c| wanted.contains(&c.id))
+        .cloned()
+        .collect();
+    // A scope that narrows on an axis containers do not carry (an iteration,
+    // say) would empty the picker and leave nowhere to file. Fall back to the
+    // whole list rather than to nothing.
+    if narrowed.is_empty() { list } else { narrowed }
+}
+
+pub(super) fn containers(
+    provider: String,
+    scope: &okena_core::tasks::TaskScope,
+) -> ActionResult {
     let p = match resolve(&provider) {
         Ok(p) => p,
         Err(e) => return ActionResult::Err(e),
     };
     match p.list_containers() {
-        Ok(list) => match serde_json::to_value(&list) {
+        Ok(list) => match serde_json::to_value(containers_in_scope(list, scope)) {
             Ok(v) => ActionResult::Ok(Some(serde_json::json!({ "containers": v }))),
             Err(e) => ActionResult::Err(format!("could not serialize teams: {e}")),
         },
@@ -406,13 +471,16 @@ pub(super) fn parse_kind(raw: &str) -> okena_core::tasks::TaskKind {
 }
 
 /// Tasks assigned to the authenticated user.
-pub(super) fn list(provider: String) -> ActionResult {
+pub(super) fn list(provider: String, scope: &okena_core::tasks::TaskScope) -> ActionResult {
     let p = match resolve(&provider) {
         Ok(p) => p,
         Err(e) => return ActionResult::Err(e),
     };
     match p.list_assigned() {
-        Ok(tasks) => match serde_json::to_value(&tasks) {
+        // The space's scope is applied here, once, so nothing downstream has
+        // to remember it: the Tasks view, the CLI and an agent over MCP all
+        // receive a list that never held anything outside it.
+        Ok(tasks) => match serde_json::to_value(scope.apply(tasks)) {
             Ok(v) => ActionResult::Ok(Some(serde_json::json!({
                 "provider": provider,
                 "tasks": v,
@@ -974,6 +1042,9 @@ pub(super) fn start_work(
             cx,
         ) {
             Ok(session_id) => {
+                // The session belongs where its repos do — an agent that
+                // started it may be in a different space than the one showing.
+                ws.place_in_space_of(&session_id, &project_ids);
                 link_task(ws, &session_id, &task_ref, &also_refs);
                 if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id) {
                     p.agent_purpose = Some(okena_core::harness::AgentPurpose::Work);
@@ -1305,6 +1376,66 @@ mod tests {
         }
     }
 
+    // ---- a space's hard scope (QBL-430) ----
+
+    fn container(id: &str) -> okena_tasks::provider::TaskContainer {
+        okena_tasks::provider::TaskContainer {
+            id: id.into(),
+            name: id.to_uppercase(),
+            key: id.to_uppercase(),
+        }
+    }
+
+    #[test]
+    fn an_unfiltered_space_is_offered_every_container() {
+        let list = vec![container("core"), container("platform")];
+        let kept = containers_in_scope(list.clone(), &okena_core::tasks::TaskScope::default());
+        assert_eq!(kept, list);
+    }
+
+    #[test]
+    fn a_space_scoped_to_one_team_is_offered_that_team() {
+        let mut scope = okena_core::tasks::TaskScope::default();
+        scope.toggle_group(okena_core::tasks::GroupAxis::Team, "core");
+        let kept = containers_in_scope(vec![container("core"), container("platform")], &scope);
+        assert_eq!(
+            kept.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["core"]
+        );
+    }
+
+    #[test]
+    fn a_project_scope_narrows_containers_too() {
+        // Linear's containers are teams; Azure DevOps' are team projects. Both
+        // axes name something you can file into.
+        let mut scope = okena_core::tasks::TaskScope::default();
+        scope.toggle_group(okena_core::tasks::GroupAxis::Project, "alpha");
+        let kept = containers_in_scope(vec![container("alpha"), container("beta")], &scope);
+        assert_eq!(
+            kept.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["alpha"]
+        );
+    }
+
+    #[test]
+    fn a_scope_on_an_axis_containers_do_not_carry_leaves_the_picker_alone() {
+        // Filtering to an iteration must not leave a space with nowhere to
+        // file a task.
+        let mut scope = okena_core::tasks::TaskScope::default();
+        scope.toggle_group(okena_core::tasks::GroupAxis::Iteration, "s7");
+        let list = vec![container("core")];
+        assert_eq!(containers_in_scope(list.clone(), &scope), list);
+    }
+
+    #[test]
+    fn a_scope_naming_a_container_that_is_gone_leaves_the_picker_alone() {
+        let mut scope = okena_core::tasks::TaskScope::default();
+        scope.toggle_group(okena_core::tasks::GroupAxis::Team, "retired");
+        let list = vec![container("core")];
+        assert_eq!(containers_in_scope(list.clone(), &scope), list);
+    }
+
+
     #[test]
     fn one_agent_on_picked_tasks_is_told_every_other_one() {
         // The session is named after the first task; the brief is where the
@@ -1442,12 +1573,15 @@ mod tests {
             err_of(connect_api_key("jira".into(), "k".into(), None))
                 .contains("unknown task provider")
         );
-        assert!(err_of(list("jira".into())).contains("unknown task provider"));
+        assert!(
+            err_of(list("jira".into(), &Default::default()))
+                .contains("unknown task provider")
+        );
     }
 
     #[test]
     fn listing_without_a_credential_reports_not_authenticated() {
-        let e = err_of(list("linear".into()));
+        let e = err_of(list("linear".into(), &Default::default()));
         assert!(
             e.contains("not authenticated"),
             "expected a not-authenticated message, got: {e}"
@@ -2914,6 +3048,9 @@ pub(super) fn start_custom_session(
         Err(e) => return ActionResult::Err(format!("could not create the session: {e}")),
     };
 
+    // The session belongs where the projects it was given are — whoever asked
+    // for it may be in a different space than the one showing.
+    ws.place_in_space_of(&session_id, &project_ids);
     // Mark it before spawning, so it is recognizable as a session from the
     // first snapshot the client sees.
     if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == session_id) {

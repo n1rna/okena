@@ -41,6 +41,8 @@ export type TerminalId = string;
 export type ProjectId = string;
 /** Opaque folder id. */
 export type FolderId = string;
+/** Opaque space id. `"default"` is the space every profile has. */
+export type SpaceId = string;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Enums  (uniffi enums → TS string-union; ubrn emits string-tagged values)
@@ -193,6 +195,20 @@ export interface FullscreenInfo {
   terminalId: TerminalId;
 }
 
+/**
+ * One space — mirrors FFI `SpaceInfo` (`api/state.rs`).
+ *
+ * A space is a separate set of projects, agents, tasks and roots inside one
+ * profile. Not a "workspace": okena already uses that word for the one set of
+ * projects and layouts saved per profile.
+ */
+export interface SpaceInfo {
+  id: SpaceId;
+  name: string;
+  /** One of this space's agents is waiting on you. Marks its dot from anywhere. */
+  agentWaiting: boolean;
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // The binding contract
 // ─────────────────────────────────────────────────────────────────────────
@@ -319,14 +335,35 @@ export interface OkenaNative {
 
   // ── state.rs ───────────────────────────────────────────────────────────
 
-  /** All projects from the cached remote state. */
+  /**
+   * The active space's projects from the cached remote state.
+   *
+   * The daemon's snapshot carries every space's; the Rust side filters, so a
+   * project in another space never reaches this layer.
+   */
   getProjects(connId: ConnId): ProjectInfo[];
 
   /** The server's focused project id, if any. */
   getFocusedProjectId(connId: ConnId): ProjectId | undefined;
 
-  /** All folders from the cached remote state. */
+  /** The active space's folders from the cached remote state. */
   getFolders(connId: ConnId): FolderInfo[];
+
+  /**
+   * The spaces the connected daemon holds, in selector order, Default first.
+   * Empty from a daemon that predates spaces.
+   */
+  getSpaces(connId: ConnId): SpaceInfo[];
+
+  /** Which space is showing — what the selector highlights. */
+  getActiveSpace(connId: ConnId): SpaceId;
+
+  /**
+   * Switch to a space. The daemon owns which one is showing (one per profile),
+   * so this asks and the next poll brings the answer back — which is also how
+   * a switch made on the desktop reaches the phone.
+   */
+  activateSpace(connId: ConnId, spaceId: SpaceId): Promise<void>;
 
   /** The server's project ordering. */
   getProjectOrder(connId: ConnId): ProjectId[];

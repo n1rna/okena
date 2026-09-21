@@ -751,9 +751,20 @@ fn fit_line(line: &str, cols: u16) -> String {
     line.chars().take(usize::from(cols)).collect()
 }
 
+/// The terminals of the active space's projects.
+///
+/// The snapshot carries every space's projects (QBL-430), so the space filter
+/// is applied here rather than left to the caller. A daemon from before spaces
+/// sends no `active_space` and no `space_id`, and both read as Default — so its
+/// whole workspace still lists.
 fn collect_terminal_entries(state: &StateResponse) -> Vec<TerminalEntry> {
+    let space = if state.active_space.is_empty() {
+        okena_core::spaces::default_space_id()
+    } else {
+        state.active_space.clone()
+    };
     let mut entries = Vec::new();
-    for project in &state.projects {
+    for project in state.projects.iter().filter(|p| p.space_id == space) {
         if let Some(layout) = &project.layout {
             collect_layout_entries(project, layout, &mut entries);
         }
@@ -993,6 +1004,61 @@ mod tests {
 
     const FINGERPRINT: &str = "aa:bb:cc:dd ee:ff:00:11 22:33:44:55 66:77:88:99 \
                                aa:bb:cc:dd ee:ff:00:11 22:33:44:55 66:77:88:99";
+
+    // ---- spaces (QBL-430) ----
+
+    /// A snapshot with two projects in two spaces, each holding one terminal.
+    fn two_spaces(active: &str) -> StateResponse {
+        let project = |id: &str, space: &str| ApiProject {
+            layout: Some(ApiLayoutNode::Terminal {
+                terminal_id: Some(format!("t-{id}")),
+                minimized: false,
+                detached: false,
+                shell_type: Default::default(),
+                cols: None,
+                rows: None,
+                agent: false,
+            }),
+            ..serde_json::from_value(serde_json::json!({
+                "id": id, "name": id, "path": format!("/tmp/{id}"),
+                "show_in_overview": true, "layout": null, "terminal_names": {},
+                "space_id": space,
+            }))
+            .expect("a project row")
+        };
+        StateResponse {
+            active_space: active.to_string(),
+            projects: vec![project("here", "default"), project("there", "client-a")],
+            ..serde_json::from_value(serde_json::json!({
+                "state_version": 1, "projects": [], "focused_project_id": null,
+                "fullscreen_terminal": null,
+            }))
+            .expect("a state response")
+        }
+    }
+
+    #[test]
+    fn only_the_active_spaces_terminals_are_listed() {
+        let labels = |state: &StateResponse| -> Vec<String> {
+            collect_terminal_entries(state)
+                .into_iter()
+                .map(|e| e.label)
+                .collect()
+        };
+        assert_eq!(labels(&two_spaces("default")), ["here:t-here"]);
+        assert_eq!(labels(&two_spaces("client-a")), ["there:t-there"]);
+    }
+
+    #[test]
+    fn a_daemon_from_before_spaces_still_lists_everything_it_sends() {
+        // No active_space and no space_id both read as Default, so an older
+        // daemon's whole workspace stays visible.
+        let mut state = two_spaces("");
+        for project in &mut state.projects {
+            project.space_id = okena_core::spaces::default_space_id();
+        }
+        assert_eq!(collect_terminal_entries(&state).len(), 2);
+    }
 
     #[test]
     fn cert_fingerprint_accepts_the_printed_format() {

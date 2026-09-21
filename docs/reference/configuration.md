@@ -247,6 +247,28 @@ Controls default behavior when creating and closing git worktrees:
 | `worktree.default_push` | bool | `false` | Push branch on close |
 | `worktree.default_delete_branch` | bool | `false` | Delete branch after close |
 
+#### Spaces
+
+A **space** is a separate set of projects, agents, tasks and roots inside one
+profile; [`spaces.md`](spaces.md) covers what one is and how it behaves. The
+list lives here, and the keys below are the ones that belong to a space rather
+than to the profile.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `spaces` | object[] | one Default space | The spaces, in selector order. Default is always present and always first; it cannot be renamed or deleted |
+| `spaces[].id` | string | — | Stable id. Projects and folders point at it, so it does not follow a rename. `default` is reserved |
+| `spaces[].name` | string | — | What the dot is called on hover and in the **+N** menu |
+| `spaces[].connection` | string | — | The task backend connection this space reads, by connection id. Exactly one; unset falls back to `linear`, which is what every profile had before spaces |
+| `spaces[].tasks` | object | `{}` | The hard filter scope on that connection: `{ "groups": { "<axis>": ["<group id>"] }, "labels": [...], "statuses": [...] }`, where an axis is `team`, `project`, `iteration` or whatever else the backend reports. Any of the values within one facet, all of the facets together. Empty means every task on the connection. Unknown keys are refused rather than read as "no filters" |
+| `active_space` | string | `"default"` | Which space is showing. Belongs to the profile: switching it in any window or client switches it everywhere |
+
+A `settings.json` with no `spaces` is migrated on load: one Default space is
+built from `harness.task_provider`, `harness.specs`, `harness.knowledge` and the
+legacy `harness.spec_repo`, and those four keys are dropped on the next save.
+Connections themselves are not here — they hold credentials, so they live in
+`<profile>/tasks_credentials.json`.
+
 #### Specs (OpenSpec)
 
 The harness Specs view follows OpenSpec's store model
@@ -267,13 +289,20 @@ the same stores. The CLI does not need to be installed.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `harness.specs.registry` | bool | `true` | List every registered store. When off, a store is still shown if a project points at it |
-| `harness.specs.projects` | bool | `true` | Find roots and `store:` pointers in okena projects (worktrees and agent sessions are skipped) |
-| `harness.specs.folders` | string[] | `[]` | Extra folders to show as roots without registering them |
-| `harness.specs.data_dir` | string | — | OpenSpec data directory. Unset resolves like the CLI: `$XDG_DATA_HOME/openspec`, else `~/.local/share/openspec` (`%LOCALAPPDATA%\openspec` on Windows) |
-| `harness.specs.config_dir` | string | — | OpenSpec config directory holding `config.json`. Unset resolves `$XDG_CONFIG_HOME/openspec`, else `~/.config/openspec` (`%APPDATA%\openspec` on Windows) |
-| `harness.specs.clone_dir` | string | `~/openspec` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
-| `harness.spec_repo` | string | — | Legacy single spec repository. Still shown as a folder; cleared once the folder list is edited |
+These keys live on a **space** (`spaces[].specs`), not on `harness`: each space
+has its own Specs roots and their order ([spaces.md](spaces.md)). A
+`harness.specs` block in an older `settings.json` is read once into the Default
+space and dropped on the next save.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `spaces[].specs.registry` | bool | `true` | List every registered store. When off, a store is still shown if a project points at it. A newly added space starts with this off, so it begins with no roots |
+| `spaces[].specs.projects` | bool | `true` | Find roots and `store:` pointers in **that space's** projects (worktrees and agent sessions are skipped) |
+| `spaces[].specs.folders` | string[] | `[]` | Extra folders to show as roots without registering them. The order is the order they are shown in |
+| `spaces[].specs.data_dir` | string | — | OpenSpec data directory. Unset resolves like the CLI: `$XDG_DATA_HOME/openspec`, else `~/.local/share/openspec` (`%LOCALAPPDATA%\openspec` on Windows) |
+| `spaces[].specs.config_dir` | string | — | OpenSpec config directory holding `config.json`. Unset resolves `$XDG_CONFIG_HOME/openspec`, else `~/.config/openspec` (`%APPDATA%\openspec` on Windows) |
+| `spaces[].specs.clone_dir` | string | `~/openspec` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
+| `harness.spec_repo` | string | — | Legacy single spec repository. Folded into the Default space's folders on load and dropped on the next save |
 
 The Specs view opens OpenSpec's `defaultStore` when it is set and healthy, else
 the first healthy store, else the first healthy root. "New change" writes the
@@ -298,9 +327,14 @@ order the roots layer in.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `harness.knowledge.projects` | bool | `true` | Find knowledge in okena projects: the stores a repository follows in `.okena/knowledge.yaml`, and its own `.okena/knowledge/` (or `root:`) folders. Worktrees and agent sessions are skipped |
-| `harness.knowledge.clone_dir` | string | `~/knowledge` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
-| `harness.knowledge.order` | list of strings | `[]` | The one order knowledge roots layer in, as root keys (`store:<id>`, `path:<absolute path>`), top first. A root not listed goes to the bottom; `okena-defaults` is always last and never listed; keys for roots that are gone drop out ([the order](knowledge.md#the-order)) |
+| `spaces[].knowledge.projects` | bool | `true` | Find knowledge in **that space's** projects: the stores a repository follows in `.okena/knowledge.yaml`, and its own `.okena/knowledge/` (or `root:`) folders. Worktrees and agent sessions are skipped |
+| `spaces[].knowledge.stores` | string[] | — | The registered stores this space follows, by id. Unset is every registered store, which is what Default keeps; a newly added space starts with an empty list, so it follows none. An id naming a store that is no longer registered is skipped |
+| `spaces[].knowledge.order` | list of strings | `[]` | The order this space's knowledge roots layer in, as root keys (`store:<id>`, `path:<absolute path>`), top first. A root not listed goes to the bottom; `okena-defaults` is always last and never listed; keys for roots that are gone drop out ([the order](knowledge.md#the-order)). Per space, so two spaces may follow the same store and layer it differently |
+| `spaces[].knowledge.clone_dir` | string | `~/knowledge` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
+
+Like the Specs keys, these live on a **space**. A `harness.knowledge` block in an
+older `settings.json` is read once into the Default space and dropped on the next
+save.
 
 There is no key naming one root as the *source* of launch briefs. Templates,
 partials and skills resolve across every root okena can see, in the order above

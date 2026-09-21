@@ -14,15 +14,37 @@ export type SidebarFolderNode = {
 
 export type SidebarItem = SidebarProjectNode | SidebarFolderNode;
 
+/** The space an item with none recorded belongs to. */
+export const DEFAULT_SPACE_ID = "default";
+
+/** Which space is showing, with the pre-spaces fallback applied. */
+export function activeSpaceId(workspace: StateResponse | null): string {
+  return workspace?.active_space || DEFAULT_SPACE_ID;
+}
+
+/** Whether `id` names `space`, treating a missing space as Default. */
+function inSpace(space: string, id: string | undefined): boolean {
+  return (id || DEFAULT_SPACE_ID) === space;
+}
+
 export function buildSidebarItems(workspace: StateResponse | null): SidebarItem[] {
   if (!workspace) return [];
 
-  const projectsById = new Map(workspace.projects.map((project) => [project.id, project]));
-  const foldersById = new Map((workspace.folders ?? []).map((folder) => [folder.id, folder]));
-  const folderProjectIds = new Set((workspace.folders ?? []).flatMap((folder) => folder.project_ids));
+  // Only the active space's rows. `projects` carries every space's, so this is
+  // not a filter the user applied — a project in another space does not exist
+  // here at all.
+  const space = activeSpaceId(workspace);
+  const visibleProjects = workspace.projects.filter((project) => inSpace(space, project.space_id));
+  const visibleFolders = (workspace.folders ?? []).filter((folder) =>
+    inSpace(space, folder.space_id),
+  );
+
+  const projectsById = new Map(visibleProjects.map((project) => [project.id, project]));
+  const foldersById = new Map(visibleFolders.map((folder) => [folder.id, folder]));
+  const folderProjectIds = new Set(visibleFolders.flatMap((folder) => folder.project_ids));
   const worktreeIds = new Set<string>();
 
-  for (const project of workspace.projects) {
+  for (const project of visibleProjects) {
     for (const id of project.worktree_ids ?? []) {
       worktreeIds.add(id);
     }
@@ -50,8 +72,8 @@ export function buildSidebarItems(workspace: StateResponse | null): SidebarItem[
   const order = workspace.project_order?.length
     ? workspace.project_order
     : [
-        ...(workspace.folders ?? []).map((folder) => folder.id),
-        ...workspace.projects.map((project) => project.id),
+        ...visibleFolders.map((folder) => folder.id),
+        ...visibleProjects.map((project) => project.id),
       ];
 
   for (const id of order) {
@@ -75,7 +97,7 @@ export function buildSidebarItems(workspace: StateResponse | null): SidebarItem[
     }
   }
 
-  const unorderedProjects = workspace.projects
+  const unorderedProjects = visibleProjects
     .filter((project) => !consumed.has(project.id))
     .filter((project) => !folderProjectIds.has(project.id))
     .filter((project) => !worktreeIds.has(project.id))

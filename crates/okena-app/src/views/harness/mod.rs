@@ -19,7 +19,7 @@ mod roots_page;
 mod sections;
 mod specs_view;
 mod store_git;
-mod task_filter;
+pub(crate) mod task_filter;
 mod task_tree;
 mod tasks_view;
 mod testing_view;
@@ -46,8 +46,13 @@ pub(crate) use tasks_view::{notify_task_auth_changed, provider_label};
 /// Tasks-view state. Grouped so the pane struct stays readable as more views
 /// grow their own state.
 pub(crate) struct TasksState {
+    /// The connection id this view reads — the active space's.
     pub(crate) provider: String,
     pub(crate) provider_display_name: String,
+    /// The active space's hard scope, as this view last saw it. Kept so the
+    /// settings observer can tell a scope edit from any other settings change
+    /// and reload only then.
+    pub(crate) scope: okena_core::tasks::TaskScope,
     pub(crate) connection: TaskAuthState,
     pub(crate) tasks: Vec<Task>,
     pub(crate) loading: bool,
@@ -377,23 +382,34 @@ pub struct PaneContext {
 
 impl HarnessPane {
     pub fn new(section: HarnessSection, ctx: PaneContext, cx: &mut Context<Self>) -> Self {
-        let provider = crate::settings::settings_entity(cx)
-            .read(cx)
-            .settings
-            .harness
-            .task_provider
-            .clone();
-        // Follow the setting: choosing another provider swaps the whole queue.
+        let (provider, scope) = {
+            let settings = crate::settings::settings_entity(cx).read(cx);
+            let space = settings.settings.active_space();
+            (space.connection_id().to_string(), space.tasks.clone())
+        };
+        // Follow the active space: switching spaces, repointing this one at
+        // another connection, or editing its filters all change what the queue
+        // is — and must take effect without a restart.
         cx.observe(
             &crate::settings::settings_entity(cx),
             |this: &mut Self, settings, cx| {
-                let settings = settings.read(cx).settings.clone();
                 // Specs and Knowledge are separate panes over one sidebar
                 // setting: whichever is not on screen must still come back
                 // the way the other one was left.
-                this.sync_file_sidebar(&settings);
-                if settings.harness.task_provider != this.tasks.provider {
-                    this.switch_provider(settings.harness.task_provider, cx);
+                this.sync_file_sidebar(&settings.read(cx).settings.clone());
+                let (wanted, scope) = {
+                    let settings = settings.read(cx);
+                    let space = settings.settings.active_space();
+                    (space.connection_id().to_string(), space.tasks.clone())
+                };
+                if wanted != this.tasks.provider {
+                    this.tasks.scope = scope;
+                    this.switch_provider(wanted, cx);
+                } else if scope != this.tasks.scope {
+                    // Same connection, different scope: the list is stale but
+                    // the login is not, so re-read rather than reconnect.
+                    this.tasks.scope = scope;
+                    this.refresh_tasks(cx);
                 }
                 cx.notify();
             },
@@ -449,6 +465,7 @@ impl HarnessPane {
             tasks: TasksState {
                 provider_display_name: tasks_view::provider_label(&provider).to_string(),
                 provider,
+                scope,
                 connection: TaskAuthState::Unknown,
                 tasks: Vec::new(),
                 loading: false,

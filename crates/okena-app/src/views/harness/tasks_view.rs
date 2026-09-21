@@ -718,11 +718,20 @@ impl HarnessPane {
 
         let client = self.client.clone();
         let provider = self.tasks.provider.clone();
+        // The space's hard scope. Sent with the request so the daemon returns
+        // only what the space may see — the filter bar below then narrows
+        // inside a list that never held the rest.
+        let scope = crate::settings::settings_entity(cx)
+            .read(cx)
+            .settings
+            .active_space()
+            .tasks
+            .clone();
 
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 client
-                    .post_action(ActionRequest::TasksList { provider })
+                    .post_action(ActionRequest::TasksList { provider, scope })
                     .and_then(|v| v.ok_or_else(|| "Missing task list".to_string()))
                     .and_then(|v| {
                         serde_json::from_value::<Vec<Task>>(v["tasks"].clone())

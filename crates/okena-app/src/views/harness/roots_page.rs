@@ -345,7 +345,7 @@ impl HarnessPane {
                 let folders: Vec<String> = settings
                     .read(cx)
                     .settings
-                    .harness
+                    .active_space()
                     .spec_folders()
                     .into_iter()
                     .filter(|f| okena_core::fs::expand_home(f) != okena_core::fs::expand_home(&path))
@@ -366,7 +366,7 @@ impl HarnessPane {
             return;
         };
         let settings = crate::settings::settings_entity(cx);
-        let saved = settings.read(cx).settings.harness.knowledge.order.clone();
+        let saved = settings.read(cx).settings.active_space().knowledge.order.clone();
         let shown = okena_core::knowledge_order::normalize(&stores.roots, &saved);
         let next = okena_core::knowledge_order::moved(&shown, key, onto);
         if next == shown {

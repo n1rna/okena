@@ -301,6 +301,7 @@ mod tests {
         terminal_names.insert("t2".to_string(), "logs".to_string());
         terminal_names.insert("t3".to_string(), "editor".to_string());
         ApiProject {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.into(),
             name: name.into(),
             path: path.into(),
@@ -369,6 +370,8 @@ mod tests {
 
     fn state_with(projects: Vec<ApiProject>, windows: Vec<ApiWindow>) -> StateResponse {
         StateResponse {
+            spaces: Vec::new(),
+            active_space: okena_core::spaces::default_space_id(),
             state_version: 1,
             projects,
             focused_project_id: None,

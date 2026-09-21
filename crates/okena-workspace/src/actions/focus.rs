@@ -272,6 +272,7 @@ mod gpui_tests {
             service_panel_heights: HashMap::new(),
             hook_panel_heights: HashMap::new(),
             folders: vec![FolderData {
+                space_id: okena_core::spaces::default_space_id(),
                 id: "f1".to_string(),
                 name: "Folder".to_string(),
                 project_ids: vec![],
@@ -286,6 +287,7 @@ mod gpui_tests {
     /// what it becomes again when its last terminal closes.
     fn make_bookmark(id: &str) -> crate::state::ProjectData {
         crate::state::ProjectData {
+            space_id: okena_core::spaces::default_space_id(),
             id: id.to_string(),
             name: id.to_string(),
             path: format!("/tmp/{id}"),

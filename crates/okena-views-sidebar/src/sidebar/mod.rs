@@ -14,6 +14,7 @@ mod list_header;
 mod project_agents;
 mod renames;
 mod render;
+mod space_selector;
 mod worktree;
 
 #[cfg(test)]
@@ -34,6 +35,37 @@ use okena_ui::rename_state::RenameState;
 use okena_workspace::request_broker::RequestBroker;
 use okena_workspace::state::{FolderData, ProjectData, WindowId, Workspace};
 use std::collections::{HashMap, HashSet};
+
+/// The projects the sidebar may draw, by id — the active space's, and nothing
+/// else — plus the same ids as a set for the worktree-parent lookups.
+///
+/// The render walk and the cursor walk are two separate passes over
+/// `project_order` that must agree about what is on screen, so they resolve
+/// through this one map. An id `project_order` holds that is not in it belongs
+/// to another space and is simply skipped.
+pub(super) fn visible_projects_by_id(
+    workspace: &Workspace,
+) -> (HashMap<&str, &ProjectData>, HashSet<&str>) {
+    let by_id: HashMap<&str, &ProjectData> = workspace
+        .projects_in_active_space()
+        .map(|p| (p.id.as_str(), p))
+        .collect();
+    let ids: HashSet<&str> = by_id.keys().copied().collect();
+    (by_id, ids)
+}
+
+/// The folder `id` names, when it belongs to the space showing.
+///
+/// A folder from another space must not render at all — resolved through
+/// `visible_projects_by_id` its projects would all be missing, leaving an
+/// empty folder row with no way to tell why.
+pub(super) fn visible_folder<'a>(workspace: &'a Workspace, id: &str) -> Option<&'a FolderData> {
+    workspace
+        .data()
+        .folders
+        .iter()
+        .find(|f| f.id == id && f.space_id == workspace.active_space())
+}
 
 /// Callback for dispatching actions for a given project.
 /// Arguments: (project_id, action, cx)
@@ -243,6 +275,19 @@ pub struct Sidebar {
     pub(crate) cursor_scroll_indices: Vec<usize>,
     header_menu: Option<SidebarHeaderMenu>,
     pub(super) create_button_bounds: Bounds<Pixels>,
+    /// The space-selector row's own bounds, measured as it paints, so the
+    /// overflow arithmetic knows how many dots the sidebar's width allows.
+    /// Zero on the first frame, which reads as "one dot" and self-corrects.
+    pub(super) space_row_bounds: Bounds<Pixels>,
+    /// The spaces behind the **+N** chip while its menu is open: id, name, and
+    /// whether one of its agents is waiting.
+    pub(super) space_overflow_menu: Option<Vec<(String, String, bool)>>,
+    /// Draw the selector even with one space. Set while the add-a-space form
+    /// is open, so the row it came from does not vanish under it.
+    pub(super) space_selector_forced: bool,
+    /// The space whose menu is open (rename / tasks / delete), and where its
+    /// dot was, so the menu appears under it.
+    pub(super) space_menu: Option<(String, Point<Pixels>)>,
     pub(super) overflow_button_bounds: Bounds<Pixels>,
 }
 
@@ -340,6 +385,10 @@ impl Sidebar {
             cursor_scroll_indices: Vec::new(),
             header_menu: None,
             create_button_bounds: Bounds::default(),
+            space_row_bounds: Bounds::default(),
+            space_overflow_menu: None,
+            space_selector_forced: false,
+            space_menu: None,
             overflow_button_bounds: Bounds::default(),
         }
     }

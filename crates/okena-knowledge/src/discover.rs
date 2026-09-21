@@ -36,9 +36,34 @@ pub struct Sources {
     pub registry_path: PathBuf,
     /// Empty when project discovery is turned off.
     pub projects: Vec<ProjectSource>,
+    /// The registered stores to show, by id, in display order.
+    ///
+    /// `None` is every registered store — what a profile had before spaces.
+    /// `Some` is exactly those, in that order, which is how a space keeps its
+    /// own set of roots and their order (QBL-430). An id naming a store that
+    /// is no longer registered is skipped, not an error: unregistering one
+    /// must not break every space that listed it.
+    pub stores: Option<Vec<String>>,
     /// The saved order of root keys, top first. Empty means nobody has
     /// arranged the roots, which leaves discovery order (see [`crate::order`]).
+    ///
+    /// Which roots a space follows and how it layers them are two questions:
+    /// `stores` answers the first, this the second.
     pub order: Vec<String>,
+}
+
+/// The registered stores a space follows, in its own order.
+fn select_stores(
+    stores: Vec<registry::RegisteredStore>,
+    wanted: Option<&[String]>,
+) -> Vec<registry::RegisteredStore> {
+    let Some(wanted) = wanted else {
+        return stores;
+    };
+    wanted
+        .iter()
+        .filter_map(|id| stores.iter().find(|s| &s.id == id).cloned())
+        .collect()
 }
 
 pub fn discover(sources: &Sources) -> KnowledgeStores {
@@ -49,7 +74,8 @@ pub fn discover(sources: &Sources) -> KnowledgeStores {
     // Canonical checkout paths already claimed by a root.
     let mut seen: Vec<PathBuf> = Vec::new();
 
-    match registry::list(&sources.registry_path) {
+    match registry::list(&sources.registry_path).map(|s| select_stores(s, sources.stores.as_deref()))
+    {
         Ok(stores) => {
             for store in stores {
                 let real = canonical(&store.root);
@@ -309,6 +335,9 @@ mod tests {
             discover(&Sources {
                 registry_path: self.registry(),
                 projects,
+                // `None`: every registered store, the way a profile with one
+                // space sees them.
+                stores: None,
                 order,
             })
         }

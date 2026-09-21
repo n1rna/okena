@@ -868,26 +868,94 @@ fn action(body: &Value) -> Result<Value, String> {
     Ok(serde_json::from_str(&response).unwrap_or(Value::String(response)))
 }
 
-/// The task provider the harness is set to, from the daemon's settings.
-fn active_provider() -> Result<String, String> {
+/// The daemon's settings, as JSON.
+fn daemon_settings() -> Result<Value, String> {
     let token = super::ensure_token()?;
     let response = super::api_action(&token, &json!({ "action": "get_settings" }).to_string())?;
-    let settings: Value =
-        serde_json::from_str(&response).map_err(|e| format!("could not read settings: {e}"))?;
-    Ok(provider_from_settings(&settings))
+    serde_json::from_str(&response).map_err(|e| format!("could not read settings: {e}"))
 }
 
-/// `harness.task_provider`, or Linear for a daemon that predates the setting —
-/// Linear was the only provider such a daemon had.
-fn provider_from_settings(settings: &Value) -> String {
-    settings
-        .get("harness")
-        .and_then(|h| h.get("task_provider"))
+/// The task backend connection this agent's work belongs to.
+///
+/// The session's *own* space, not the one showing: an agent started in Client A
+/// keeps filing into Client A's backend while you look at Default. Outside a
+/// session (an `okena mcp` run with no terminal) it falls back to the space
+/// showing, which is what a person at the keyboard means.
+fn active_provider() -> Result<String, String> {
+    let settings = daemon_settings()?;
+    let space = current_session()
+        .ok()
+        .map(|s| s.project.space_id)
+        .filter(|s| !s.trim().is_empty());
+    Ok(connection_from_settings(&settings, space.as_deref()))
+}
+
+/// The hard task scope of the space an agent's work belongs to, as JSON.
+///
+/// Sent with the calls that read a list, so an agent sees exactly the tasks its
+/// space sees — the same scope the Tasks view is held to.
+fn active_scope() -> Value {
+    let Ok(settings) = daemon_settings() else {
+        return json!({});
+    };
+    let space = current_session()
+        .ok()
+        .map(|s| s.project.space_id)
+        .filter(|s| !s.trim().is_empty());
+    scope_from_settings(&settings, space.as_deref())
+}
+
+/// The space `space_id` names, or the one showing when it names none.
+fn space_from_settings<'a>(settings: &'a Value, space_id: Option<&str>) -> Option<&'a Value> {
+    let spaces = settings.get("spaces")?.as_array()?;
+    let wanted = space_id
+        .map(str::to_string)
+        .or_else(|| {
+            settings
+                .get("active_space")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "default".to_string());
+    spaces
+        .iter()
+        .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(wanted.as_str()))
+        // A space id the settings no longer hold (it was deleted under a
+        // running agent) reads as the first space, which is always Default.
+        .or_else(|| spaces.first())
+}
+
+/// The connection a space reads.
+///
+/// Falls back through: the space's own, the legacy `harness.task_provider` a
+/// daemon from before spaces still sends, then Linear — the only provider such
+/// a daemon ever had.
+fn connection_from_settings(settings: &Value, space_id: Option<&str>) -> String {
+    space_from_settings(settings, space_id)
+        .and_then(|s| s.get("connection"))
         .and_then(|p| p.as_str())
         .map(str::trim)
         .filter(|p| !p.is_empty())
-        .unwrap_or("linear")
-        .to_string()
+        .map(str::to_string)
+        .or_else(|| {
+            settings
+                .get("harness")
+                .and_then(|h| h.get("task_provider"))
+                .and_then(|p| p.as_str())
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "linear".to_string())
+}
+
+/// A space's saved filters, as the `scope` a task action takes. `{}` — the
+/// unscoped scope — for a space that filters nothing or a daemon that has none.
+fn scope_from_settings(settings: &Value, space_id: Option<&str>) -> Value {
+    space_from_settings(settings, space_id)
+        .and_then(|s| s.get("tasks"))
+        .cloned()
+        .unwrap_or_else(|| json!({}))
 }
 
 fn list_subtasks(args: &Value) -> Result<Value, String> {
@@ -1101,7 +1169,12 @@ fn list_containers() -> Result<Value, String> {
 }
 
 fn fetch_containers(provider: &str) -> Result<Vec<Value>, String> {
-    let response = action(&json!({ "action": "task_containers", "provider": provider }))?;
+    // Scoped, so a filtered space offers the teams it can actually see.
+    let response = action(&json!({
+        "action": "task_containers",
+        "provider": provider,
+        "scope": active_scope(),
+    }))?;
     Ok(response
         .get("containers")
         .and_then(|c| c.as_array())
@@ -1634,15 +1707,77 @@ mod tests {
     }
 
     #[test]
-    fn the_active_provider_comes_from_harness_settings() {
-        use super::provider_from_settings;
+    fn a_daemon_from_before_spaces_still_names_its_one_provider() {
+        use super::connection_from_settings;
         assert_eq!(
-            provider_from_settings(&json!({ "harness": { "task_provider": "azure_devops" } })),
+            connection_from_settings(
+                &json!({ "harness": { "task_provider": "azure_devops" } }),
+                None
+            ),
             "azure_devops"
         );
         // A daemon from before the setting only ever had Linear.
-        assert_eq!(provider_from_settings(&json!({ "harness": {} })), "linear");
-        assert_eq!(provider_from_settings(&json!({})), "linear");
+        assert_eq!(connection_from_settings(&json!({ "harness": {} }), None), "linear");
+        assert_eq!(connection_from_settings(&json!({}), None), "linear");
+    }
+
+    fn two_spaces() -> serde_json::Value {
+        json!({
+            "active_space": "default",
+            "spaces": [
+                { "id": "default", "name": "Default", "connection": "linear" },
+                { "id": "client-a", "name": "Client A", "connection": "linear-2",
+                  "tasks": { "groups": { "project": ["alpha"] } } }
+            ]
+        })
+    }
+
+    #[test]
+    fn an_agent_reads_its_own_spaces_connection_not_the_one_showing() {
+        // The whole point of a per-session connection: Client A's agent keeps
+        // filing into Client A's Linear account while you look at Default.
+        use super::connection_from_settings;
+        let settings = two_spaces();
+        assert_eq!(
+            connection_from_settings(&settings, Some("client-a")),
+            "linear-2"
+        );
+        assert_eq!(connection_from_settings(&settings, Some("default")), "linear");
+        // No session: the space showing is what a person at the keyboard means.
+        assert_eq!(connection_from_settings(&settings, None), "linear");
+    }
+
+    #[test]
+    fn an_agent_in_a_space_that_was_deleted_falls_back_to_default() {
+        use super::connection_from_settings;
+        assert_eq!(
+            connection_from_settings(&two_spaces(), Some("gone")),
+            "linear"
+        );
+    }
+
+    #[test]
+    fn a_space_naming_no_connection_falls_through_to_the_legacy_setting() {
+        use super::connection_from_settings;
+        let settings = json!({
+            "harness": { "task_provider": "azure_devops" },
+            "active_space": "default",
+            "spaces": [{ "id": "default", "name": "Default" }]
+        });
+        assert_eq!(connection_from_settings(&settings, None), "azure_devops");
+    }
+
+    #[test]
+    fn an_agents_list_calls_carry_its_spaces_filters() {
+        use super::scope_from_settings;
+        let settings = two_spaces();
+        assert_eq!(
+            scope_from_settings(&settings, Some("client-a")),
+            json!({ "groups": { "project": ["alpha"] } })
+        );
+        // Default filters nothing, so its scope is the unscoped one.
+        assert_eq!(scope_from_settings(&settings, Some("default")), json!({}));
+        assert_eq!(scope_from_settings(&json!({}), None), json!({}));
     }
 
     #[test]
