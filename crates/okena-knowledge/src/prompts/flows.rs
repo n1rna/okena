@@ -11,6 +11,13 @@
 
 use std::fmt;
 
+/// The folder a root keeps its launch briefs in, relative to the root.
+///
+/// Named here because it is the one place that decides it: the built-ins are
+/// materialized into it, resolution reads from it, and the Knowledge view
+/// shows it as a directory of its own.
+pub const BRIEFS_DIR: &str = "templates/briefs";
+
 /// A point at which okena briefs an agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Flow {
@@ -51,6 +58,12 @@ pub enum Flow {
     DocumentRefine,
     /// A free-form session against a goal the user typed.
     AgentSession,
+    /// Building an okena extension from a summary the user typed, started
+    /// from the Extensions page. Apart from [`Flow::AgentSession`] because
+    /// the brief is the point: the docs, the template and the target an
+    /// extension is built against are the same every time, and only the
+    /// summary changes.
+    ExtensionBuild,
     /// Writing or updating a repository's project map (ADR-0005).
     ProjectScan,
     /// Finding the links between several repositories and writing each into
@@ -77,6 +90,7 @@ impl Flow {
             Flow::KnowledgeDraft => "knowledge-draft",
             Flow::DocumentRefine => "doc-refine",
             Flow::AgentSession => "agent-session",
+            Flow::ExtensionBuild => "extension-build",
             Flow::ProjectScan => "project-scan",
             Flow::ProjectsScan => "projects-scan",
         }
@@ -97,19 +111,22 @@ impl Flow {
             Flow::KnowledgeDraft => "Write knowledge",
             Flow::DocumentRefine => "Change a document",
             Flow::AgentSession => "Free-form session",
+            Flow::ExtensionBuild => "Build an extension",
             Flow::ProjectScan => "Map a project",
             Flow::ProjectsScan => "Link projects",
         }
     }
 
-    /// Where a store keeps this flow's template, relative to the root.
+    /// Where a store keeps this flow's brief, relative to the root.
     ///
-    /// A flat file per flow under `templates/`, so the mapping from "which
-    /// brief is this" to "which file do I edit" needs no index to look up. A
-    /// store that wants to organise its own templates in folders still can —
-    /// those are simply not the ones okena launches with.
+    /// A flat file per flow under `templates/briefs/`, so the mapping from
+    /// "which brief is this" to "which file do I edit" needs no index to look
+    /// up. The `briefs/` folder is what tells them apart from the partials
+    /// beside them (QBL-427); a store that wants to organise templates of its
+    /// own in other folders still can — those are simply not the ones okena
+    /// launches with.
     pub fn template_path(self) -> String {
-        format!("templates/{}.md", self.id())
+        format!("{BRIEFS_DIR}/{}.md", self.id())
     }
 
     /// The variables okena fills for this flow.
@@ -208,6 +225,9 @@ impl Flow {
             ],
             Flow::KnowledgeDraft => &["request", "path", "what", "commit_note", "context"],
             Flow::AgentSession => &["goal", "projects", "context"],
+            // `summary` rather than `goal`: it is optional, and what it
+            // describes is the extension, not the session.
+            Flow::ExtensionBuild => &["summary", "projects", "context"],
             Flow::ProjectScan => &[
                 "project", "path",     // The knowledge root the map goes into.
                 "map_root", // Absolute path of the `project-map` SKILL.md to follow.
@@ -237,6 +257,7 @@ impl Flow {
             Flow::KnowledgeDraft,
             Flow::DocumentRefine,
             Flow::AgentSession,
+            Flow::ExtensionBuild,
             Flow::ProjectScan,
             Flow::ProjectsScan,
         ]
@@ -302,8 +323,11 @@ mod tests {
     }
 
     #[test]
-    fn a_template_lives_under_templates_named_for_its_flow() {
-        assert_eq!(Flow::SpecDraft.template_path(), "templates/spec-draft.md");
+    fn a_brief_lives_under_templates_briefs_named_for_its_flow() {
+        assert_eq!(
+            Flow::SpecDraft.template_path(),
+            "templates/briefs/spec-draft.md"
+        );
     }
 
     #[test]

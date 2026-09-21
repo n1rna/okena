@@ -20,12 +20,50 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
+use okena_core::harness::SessionBrief;
 use okena_ui::agent_launcher::{AgentLauncher, Launch, LauncherStyle};
 use okena_ui::modal::{modal_backdrop, modal_content};
 use okena_workspace::requests::NewAgentPrefill;
 
 pub enum NewAgentDialogEvent {
     Close,
+}
+
+/// The first field of the dialog, which is the only part of it the standing
+/// brief changes: a free-form session is nothing without its goal, while a
+/// brief already says the standing part and only asks what varies.
+struct GoalField {
+    label: &'static str,
+    placeholder: &'static str,
+    hint: &'static str,
+    required: bool,
+}
+
+fn goal_field(brief: Option<SessionBrief>) -> GoalField {
+    match brief {
+        None => GoalField {
+            label: "Goal",
+            placeholder: "e.g. audit every crate for unwraps on user input and open a PR per crate",
+            hint: "What the agent is asked to do. This is its opening prompt, so context \
+                   beats brevity.",
+            required: true,
+        },
+        Some(SessionBrief::ExtensionBuild) => GoalField {
+            label: "Summary",
+            placeholder: "e.g. a table of the Docker images this machine has, with a prune action",
+            hint: "What the extension should do, in your words. Optional — without it the \
+                   agent asks. The brief already tells it how an okena extension is built.",
+            required: false,
+        },
+    }
+}
+
+/// The launch flow the chip names, and the daemon briefs with.
+fn flow_id(brief: Option<SessionBrief>) -> &'static str {
+    match brief {
+        None => "agent-session",
+        Some(brief) => brief.flow_id(),
+    }
 }
 
 pub struct NewAgentDialog {
@@ -44,6 +82,10 @@ pub struct NewAgentDialog {
     /// The configured agent, drawn as the launcher's default.
     default_agent: Option<String>,
     heading: Option<String>,
+    /// The standing job this session is for, when the dialog was opened for
+    /// one. It decides the flow the brief comes from, and with it what the
+    /// first field is called and whether it has to be filled in.
+    brief: Option<SessionBrief>,
     /// Task the session is about, when a task's launcher sent us here.
     task: Option<okena_core::tasks::TaskRef>,
     /// Which card started it, when one filled the dialog in.
@@ -63,10 +105,8 @@ impl NewAgentDialog {
         cx: &mut Context<Self>,
     ) -> Self {
         // An editor: a goal is a paragraph, and a breakdown's brief is several.
-        let goal_input = BriefInput::new(
-            "e.g. audit every crate for unwraps on user input and open a PR per crate",
-        )
-        .with_value(prefill.goal);
+        let field = goal_field(prefill.brief);
+        let goal_input = BriefInput::new(field.placeholder).with_value(prefill.goal);
         let name_input = cx.new(|cx| {
             SimpleInputState::new(cx)
                 .placeholder("Optional — derived from the goal")
@@ -124,6 +164,7 @@ impl NewAgentDialog {
             pickers,
             default_agent,
             heading: prefill.heading,
+            brief: prefill.brief,
             task: prefill.task,
             purpose: prefill.purpose,
             starting: false,
@@ -140,8 +181,9 @@ impl NewAgentDialog {
         if self.starting {
             return;
         }
+        let field = goal_field(self.brief);
         let goal = self.goal_input.value(cx).trim().to_string();
-        if goal.is_empty() {
+        if goal.is_empty() && field.required {
             self.error = Some("Describe what the agent should do first.".into());
             cx.notify();
             return;
@@ -156,6 +198,7 @@ impl NewAgentDialog {
         };
         let task = self.task.clone();
         let purpose = self.purpose.clone();
+        let brief = self.brief;
         // A session about a task is started from where you were reading the
         // task; jumping into its terminal would lose that place. Its launcher
         // shows it once it appears.
@@ -174,6 +217,9 @@ impl NewAgentDialog {
                 client
                     .post_action(ActionRequest::AgentStartSession {
                         goal,
+                        // The daemon wraps the goal in this brief's flow;
+                        // `None` is the free-form `agent-session`.
+                        brief,
                         name,
                         root,
                         project_ids,
@@ -264,6 +310,7 @@ impl Render for NewAgentDialog {
             window.focus(&focus_handle, cx);
         }
 
+        let field = goal_field(self.brief);
         let project_count = self.pickers.read(cx).project_ids(cx).len();
         let launcher = AgentLauncher::new(
             "new-agent-launcher",
@@ -289,7 +336,7 @@ impl Render for NewAgentDialog {
         .busy(self.starting.then_some("Starting…"))
         .brief(crate::views::launch_briefs::brief_for(
             &self.client,
-            "agent-session",
+            flow_id(self.brief),
             cx,
         ))
         .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
@@ -384,18 +431,14 @@ impl Render for NewAgentDialog {
                             .child(
                                 v_flex()
                                     .gap(px(5.0))
-                                    .child(self.field_label("Goal", cx))
+                                    .child(self.field_label(field.label, cx))
                                     // A fixed box that scrolls rather than
                                     // grows: a goal handed over by a launcher
                                     // is a whole brief, and an input sized to
                                     // it would push the rest of the form out
                                     // of the dialog.
                                     .child(self.goal_input.render(180.0, cx))
-                                    .child(self.field_hint(
-                                        "What the agent is asked to do. This is its opening \
-                                         prompt, so context beats brevity.",
-                                        cx,
-                                    )),
+                                    .child(self.field_hint(field.hint, cx)),
                             )
                             // Projects, then the context they rank first.
                             .child(self.pickers.clone())
@@ -450,5 +493,34 @@ impl Render for NewAgentDialog {
                             .child(launcher),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{flow_id, goal_field};
+    use okena_core::harness::SessionBrief;
+
+    #[test]
+    fn a_free_form_session_asks_for_a_goal_and_insists_on_it() {
+        let field = goal_field(None);
+        assert_eq!(field.label, "Goal");
+        assert!(field.required);
+        assert_eq!(flow_id(None), "agent-session");
+    }
+
+    #[test]
+    fn building_an_extension_asks_for_an_optional_summary() {
+        // The scope's rule: the summary is what the `extension-build` brief
+        // wraps, and a launch with none still starts.
+        let field = goal_field(Some(SessionBrief::ExtensionBuild));
+        assert_eq!(field.label, "Summary");
+        assert!(!field.required);
+        assert!(field.hint.contains("Optional"), "{}", field.hint);
+        // What the launcher's chip reads: `extension-build · <model>`.
+        assert_eq!(
+            flow_id(Some(SessionBrief::ExtensionBuild)),
+            "extension-build"
+        );
     }
 }

@@ -25,9 +25,6 @@ use super::editor::{DocumentBuffer, Documents};
 use super::store_git::{StoreGitPanel, StoreSection, sync_badge};
 use super::{HarnessPane, HarnessSection};
 
-/// Width of the root and entry list, matching the Specs view.
-const TREE_WIDTH: f32 = 280.0;
-
 /// Knowledge-view state.
 pub(crate) struct KnowledgeState {
     /// Every root the daemon discovered. `None` until the first load lands.
@@ -140,9 +137,18 @@ pub(crate) fn entry_matches(entry: &KnowledgeEntry, filter: &str) -> bool {
         .any(|field| field.to_lowercase().contains(&needle))
 }
 
-/// The list: kinds in their fixed order, empty kinds left out, docs nested
-/// under folder rows. Folding is ignored while filtering, so a match is never
-/// hidden inside a closed folder.
+/// Kinds listed with their entries nested under folder rows.
+///
+/// Docs and templates are the kinds whose names carry a path: `ci/pipeline`,
+/// and — since QBL-427 — `partials/context` and `briefs/task-start`. Showing
+/// those flat made the partials look like a pile of oddly named templates and
+/// left the briefs with nothing to tell them apart. Skills and agents are one
+/// name each, so a folder row would only add a level to click through.
+const NESTED_KINDS: &[KnowledgeKind] = &[KnowledgeKind::Doc, KnowledgeKind::Template];
+
+/// The list: kinds in their fixed order, empty kinds left out, docs and
+/// templates nested under folder rows. Folding is ignored while filtering, so
+/// a match is never hidden inside a closed folder.
 pub(crate) fn group_entries<'a>(
     entries: &'a [KnowledgeEntry],
     filter: &str,
@@ -162,13 +168,14 @@ pub(crate) fn group_entries<'a>(
         let count = matching.len();
         let mut rows = Vec::new();
         if filtering || !collapsed.contains(kind.folder()) {
-            match kind {
-                KnowledgeKind::Doc => nest_docs(&matching, filtering, collapsed, &mut rows),
-                _ => rows.extend(
+            if NESTED_KINDS.contains(&kind) {
+                nest(kind.folder(), &matching, filtering, collapsed, &mut rows);
+            } else {
+                rows.extend(
                     matching
                         .into_iter()
                         .map(|entry| Row::Entry { entry, depth: 0 }),
-                ),
+                );
             }
         }
         groups.push(Group { kind, count, rows });
@@ -176,14 +183,19 @@ pub(crate) fn group_entries<'a>(
     groups
 }
 
-fn nest_docs<'a>(
-    docs: &[&'a KnowledgeEntry],
+/// Nest `entries` under one folder row per directory of their names.
+///
+/// `kind_folder` is the kind's folder on disk (`docs`, `templates`), which
+/// prefixes every fold key so two kinds cannot collapse each other's folders.
+fn nest<'a>(
+    kind_folder: &str,
+    entries: &[&'a KnowledgeEntry],
     filtering: bool,
     collapsed: &HashSet<String>,
     rows: &mut Vec<Row<'a>>,
 ) {
     let mut open: Vec<&str> = Vec::new();
-    for entry in docs {
+    for entry in entries {
         let folders: Vec<&str> = entry
             .name
             .rsplit_once('/')
@@ -196,7 +208,7 @@ fn nest_docs<'a>(
         open.truncate(shared);
         let mut hidden = false;
         for (depth, folder) in folders.iter().enumerate() {
-            let key = format!("docs/{}", folders[..=depth].join("/"));
+            let key = format!("{kind_folder}/{}", folders[..=depth].join("/"));
             if depth >= shared && !hidden {
                 rows.push(Row::Folder {
                     key: key.clone(),
@@ -272,6 +284,10 @@ impl HarnessPane {
         let generation = self.knowledge.load_generation;
         self.knowledge.loading = true;
         self.knowledge.error = None;
+        // Which roots hold a copy of each layered file, for the marks in the
+        // list and the list under an open one. Refreshed with the tree, so a
+        // copy deleted or a root reordered shows without reopening the view.
+        self.load_knowledge_layering(cx);
         cx.notify();
 
         let client = self.client.clone();
@@ -321,6 +337,7 @@ impl HarnessPane {
                             }
                             this.knowledge.root_key = key;
                             this.knowledge.stores = Some(stores);
+                            this.prune_knowledge_order(cx);
                             match tree {
                                 Some(Ok(tree)) => {
                                     this.knowledge.tree = Some(tree);
@@ -350,6 +367,34 @@ impl HarnessPane {
             });
         })
         .detach();
+    }
+
+    /// Drop keys for roots that are no longer discovered from the saved order.
+    ///
+    /// A listing is the only moment okena learns that a root has gone — it was
+    /// unregistered, or its project left the workspace — so it is the moment
+    /// to forget where it used to sit. A root whose checkout is merely missing
+    /// is still discovered, so it keeps its place.
+    ///
+    /// Nothing is written unless something actually dropped, and an empty or
+    /// failed listing is left alone: "no roots came back" must not be read as
+    /// "arrange nothing".
+    fn prune_knowledge_order(&mut self, cx: &mut Context<Self>) {
+        let Some(stores) = self.knowledge.stores.as_ref() else {
+            return;
+        };
+        if stores.roots.is_empty() {
+            return;
+        }
+        let settings = crate::settings::settings_entity(cx);
+        let saved = settings.read(cx).settings.active_space().knowledge.order.clone();
+        if saved.is_empty() {
+            return;
+        }
+        let kept = okena_core::knowledge_order::normalize(&stores.roots, &saved);
+        if kept != saved {
+            settings.update(cx, |state, cx| state.set_knowledge_root_order(kept, cx));
+        }
     }
 
     fn select_knowledge_root(&mut self, key: String, cx: &mut Context<Self>) {
@@ -720,6 +765,10 @@ impl HarnessPane {
                         entry.title
                     )),
             )
+            // A template one of your roots overrides is marked here, so the
+            // list says which briefs you have taken over without opening one
+            // (QBL-426).
+            .children(self.render_layering_badge(&entry.path, cx))
             .when(warned, |d| {
                 d.child(
                     div()
@@ -746,18 +795,17 @@ impl HarnessPane {
     ) -> AnyElement {
         let t = theme(cx);
         let builtin_root = self.knowledge_open_root().is_some_and(|r| r.builtin);
-        let mut col = v_flex()
-            .id("knowledge-tree")
-            .w(px(TREE_WIDTH))
-            .flex_shrink_0()
-            .h_full()
-            .overflow_y_scroll()
-            .px(px(6.0))
-            .pb(px(10.0))
-            .border_r_1()
-            .border_color(rgb(t.border));
+        let mut col = self.file_sidebar_column("knowledge-tree");
 
-        col = col.child(self.kn_section_label("Roots".into(), cx));
+        // The roots are listed here, so this is where you add and arrange
+        // them (QBL-429).
+        col = col.child(self.tree_heading_with_add(
+            "Roots",
+            "knowledge-roots-page",
+            "Add or arrange roots",
+            |this, _window, cx| this.open_roots_page(cx),
+            cx,
+        ));
         for root in &stores.roots {
             col = col.child(self.render_knowledge_root_row(root, cx));
         }
@@ -1026,6 +1074,9 @@ impl HarnessPane {
                     .child(files),
             );
         }
+        // Every root holding a copy of this file, in layering order, with the
+        // one a launch reads marked (QBL-426).
+        col = col.children(self.render_layering_list(&entry.path, cx));
         for d in &entry.status {
             col = col.child(self.kn_diagnostic(d, cx));
         }
@@ -1081,9 +1132,6 @@ impl HarnessPane {
                     .w_full()
                     .max_w(okena_markdown::DOC_MAX_WIDTH)
                     .min_w_0();
-                if read_only {
-                    page = page.children(self.render_default_notice(&path, cx));
-                }
                 if let Some(entry) = &entry {
                     page = page.child(self.render_entry_meta(entry, cx));
                 }
@@ -1209,12 +1257,25 @@ impl HarnessPane {
                     .map(|d| self.kn_diagnostic(d, cx)),
             )
             .child(self.field_hint_text(&format!("Store registry: {}", stores.registry_path), cx))
-            .child(h_flex().pt(px(6.0)).child(self.small_button(
-                "knowledge-open-settings",
-                "Open knowledge settings",
-                cx.listener(|this, _, _window, cx| this.open_settings("knowledge", cx)),
-                cx,
-            )))
+            // The sidebar's `+` opens the Roots page, but with no roots there
+            // is no sidebar — and this is exactly when you came to add one.
+            .child(
+                h_flex()
+                    .pt(px(6.0))
+                    .gap(px(6.0))
+                    .child(self.primary_button(
+                        "knowledge-add-root",
+                        "Add a root",
+                        cx.listener(|this, _, _window, cx| this.open_roots_page(cx)),
+                        cx,
+                    ))
+                    .child(self.small_button(
+                        "knowledge-open-settings",
+                        "Open knowledge settings",
+                        cx.listener(|this, _, _window, cx| this.open_settings("knowledge", cx)),
+                        cx,
+                    )),
+            )
             .into_any_element()
     }
 
@@ -1283,7 +1344,8 @@ impl HarnessPane {
                 cx,
             ));
         }
-        let mut view = view.child(self.render_toolbar(actions, cx));
+        let toggle = self.file_sidebar_toggle(!stores.roots.is_empty(), cx);
+        let mut view = view.child(self.render_toolbar_with_leading(Some(toggle), actions, cx));
         if let Some(notice) = self.knowledge_draft.notice.clone() {
             view = view.child(self.info_banner(notice, cx));
         }
@@ -1291,8 +1353,14 @@ impl HarnessPane {
             view = view.child(self.error_banner(err, cx));
         }
         if stores.roots.is_empty() {
+            // The page is the way out of this state, so it takes the column
+            // when it is open; there is no sidebar to put it beside.
             return view
-                .child(self.render_no_knowledge(&stores, cx))
+                .child(if self.roots.open {
+                    self.render_roots_page(cx)
+                } else {
+                    self.render_no_knowledge(&stores, cx)
+                })
                 .into_any_element();
         }
 
@@ -1302,17 +1370,25 @@ impl HarnessPane {
             .as_deref()
             .and_then(|k| stores.root(k))
             .cloned();
+        let sidebar = self.files.open.then(|| {
+            let tree = self.render_knowledge_tree(&stores, cx);
+            self.render_file_sidebar(tree, cx)
+        });
         view.child(
             h_flex()
                 .flex_1()
                 .min_h_0()
                 .w_full()
                 .bg(rgb(t.bg_primary))
-                .child(self.render_knowledge_tree(&stores, cx))
+                // Closed, the entry takes the whole width: there is nothing
+                // left of it to leave a gap for.
+                .children(sidebar)
                 // The form stands where an entry's text stands. It used to
                 // take the whole view, which hid the entries you are meant to
                 // read before adding to them.
-                .child(if self.knowledge_draft.open {
+                .child(if self.roots.open {
+                    self.render_roots_page(cx)
+                } else if self.knowledge_draft.open {
                     self.render_knowledge_draft_form(&stores, cx)
                 } else {
                     self.render_knowledge_document(open_root.as_ref(), cx)
@@ -1418,6 +1494,58 @@ mod tests {
                 "[Templates] 1",
                 "task-start",
             ]
+        );
+    }
+
+    #[test]
+    fn partials_and_briefs_nest_under_their_own_folders() {
+        // QBL-427: a partial is `partials/<name>` and a brief
+        // `briefs/<flow>`, so the templates group nests exactly as docs do
+        // instead of listing every partial flat beside the briefs.
+        let entries = vec![
+            entry(KnowledgeKind::Template, "briefs/task-create"),
+            entry(KnowledgeKind::Template, "briefs/doc-refine"),
+            entry(KnowledgeKind::Template, "partials/context"),
+            entry(KnowledgeKind::Template, "partials/coordinate-child"),
+            entry(KnowledgeKind::Template, "house-style"),
+        ];
+        assert_eq!(
+            outline(&group_entries(&entries, "", &HashSet::new())),
+            [
+                "[Templates] 5",
+                "+briefs",
+                "  doc-refine",
+                "  task-create",
+                "house-style",
+                "+partials",
+                "  context",
+                "  coordinate-child",
+            ]
+        );
+
+        // Folded by the same key the docs folders use, prefixed with the
+        // kind's folder so `docs/briefs` and `templates/briefs` are distinct.
+        let collapsed: HashSet<String> = ["templates/partials".to_string()].into();
+        assert_eq!(
+            outline(&group_entries(&entries, "", &collapsed)),
+            [
+                "[Templates] 5",
+                "+briefs",
+                "  doc-refine",
+                "  task-create",
+                "house-style",
+                "+partials",
+            ]
+        );
+
+        // Skills and agents stay flat: their names carry no path.
+        let flat = vec![
+            entry(KnowledgeKind::Skill, "release"),
+            entry(KnowledgeKind::Agent, "reviewer"),
+        ];
+        assert_eq!(
+            outline(&group_entries(&flat, "", &HashSet::new())),
+            ["[Skills] 1", "release", "[Agents] 1", "reviewer"]
         );
     }
 

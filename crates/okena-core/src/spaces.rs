@@ -104,6 +104,8 @@ impl SpaceData {
                 // No roots: a new space follows no store until one is added
                 // to it. Default keeps `None`, which is every store.
                 stores: Some(Vec::new()),
+                // …and so nothing to order yet.
+                order: Vec::new(),
                 clone_dir: None,
             },
         }
@@ -359,6 +361,21 @@ pub struct KnowledgeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stores: Option<Vec<String>>,
 
+    /// The order this space's knowledge roots layer in, as root keys, top
+    /// first (QBL-425). Empty until somebody arranges them, which leaves
+    /// discovery order.
+    ///
+    /// Keys, not paths: a key is `store:<id>` or `path:<absolute path>`, so
+    /// this stays a preference while the checkout paths stay machine state in
+    /// the registry (ADR-0003). `okena-defaults` is never in it — it is always
+    /// last. The rules, and the pruning of roots that have gone, are
+    /// `okena_knowledge::order`.
+    ///
+    /// Per space, like the rest of this: two spaces may follow the same store
+    /// and want it layered differently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+
     /// Folder a store is cloned into when no destination is given. Unset is
     /// `~/knowledge`, beside OpenSpec's `~/openspec` convention.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -374,9 +391,10 @@ pub struct KnowledgeConfig {
 impl Default for KnowledgeConfig {
     fn default() -> Self {
         Self {
-            // Must match the serde default above.
+            // Must match the serde defaults above.
             projects: true,
             stores: None,
+            order: Vec::new(),
             clone_dir: None,
         }
     }

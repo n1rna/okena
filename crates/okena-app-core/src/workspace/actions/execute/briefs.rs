@@ -13,7 +13,7 @@
 //! here on purpose, where they are testable.
 
 use crate::workspace::persistence::{AppSettings, get_config_dir};
-use okena_knowledge::discover::{self, Sources};
+use okena_knowledge::discover;
 use okena_knowledge::prompts::{self, Brief, Flow, Vars};
 use std::path::PathBuf;
 
@@ -27,9 +27,9 @@ pub(super) type PromptRoots = Vec<(String, PathBuf)>;
 /// Every root a brief may be read from, in resolution order.
 ///
 /// Resolved through discovery rather than from settings: nobody picks a root
-/// for this any more (QBL-415). Discovery already orders them the way
-/// resolution wants — registered stores, then project folders — so the order
-/// here is simply the order it found them in.
+/// for this any more (QBL-415). Discovery already hands them back in the one
+/// saved order (QBL-425) — the roots the user arranged, then any they have not
+/// arranged yet — so the order here is simply the order it found them in.
 ///
 /// Two are left out. An unhealthy root is one discovery has already said it
 /// cannot read, and launching from it would fail per-template anyway, less
@@ -41,18 +41,18 @@ pub(super) fn prompt_roots(
     projects: &[okena_workspace::state::ProjectData],
     settings: &AppSettings,
 ) -> PromptRoots {
-    layers_of(&discover::discover(&Sources {
-        registry_path: okena_knowledge::registry::registry_path(&get_config_dir()),
-        projects: super::knowledge::knowledge_project_sources(projects, settings),
-        stores: settings.active_space().knowledge.stores.clone(),
-    }))
+    layers_of(&discover::discover(&super::knowledge::knowledge_sources(
+        &okena_knowledge::registry::registry_path(&get_config_dir()),
+        &super::knowledge::knowledge_project_sources(projects, settings),
+        settings,
+    )))
 }
 
-/// The roots of `stores` a brief resolves through, in discovery order.
+/// The roots of `stores` a brief resolves through, in the saved order.
 ///
 /// Split from [`prompt_roots`] so the choice can be tested without a profile
 /// on disk; the rule it encodes is the one the doc above describes.
-fn layers_of(stores: &okena_core::knowledge::KnowledgeStores) -> PromptRoots {
+pub(super) fn layers_of(stores: &okena_core::knowledge::KnowledgeStores) -> PromptRoots {
     stores
         .roots
         .iter()

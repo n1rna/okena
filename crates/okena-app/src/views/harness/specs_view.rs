@@ -26,11 +26,6 @@ use super::editor::DocumentBuffer;
 use super::store_git::{StoreSection, sync_badge};
 use super::{HarnessPane, HarnessSection};
 
-/// Width of the root and document list. Fixed rather than draggable: the list
-/// holds short names, and a second resizable divider in the harness would be
-/// more chrome than it earns.
-const TREE_WIDTH: f32 = 280.0;
-
 fn kind_label(kind: SpecRootKind) -> &'static str {
     match kind {
         SpecRootKind::Store => "store",
@@ -592,19 +587,18 @@ impl HarnessPane {
 
     /// Left column: the roots, then the open root's changes, specs and archive.
     fn render_spec_tree(&self, stores: &SpecStores, cx: &mut Context<Self>) -> AnyElement {
-        let t = theme(cx);
-        let mut col = v_flex()
-            .id("spec-tree")
-            .w(px(TREE_WIDTH))
-            .flex_shrink_0()
-            .h_full()
-            .overflow_y_scroll()
-            .px(px(6.0))
-            .pb(px(10.0))
-            .border_r_1()
-            .border_color(rgb(t.border));
+        let mut col = self.file_sidebar_column("spec-tree");
 
-        col = col.child(self.section_label("Roots", cx));
+        // The roots are listed here, so this is where you add and manage
+        // them (QBL-429). Specs roots are not layered, so the page shows them
+        // without an order.
+        col = col.child(self.tree_heading_with_add(
+            "Roots",
+            "specs-roots-page",
+            "Add or manage roots",
+            |this, _window, cx| this.open_roots_page(cx),
+            cx,
+        ));
         for root in &stores.roots {
             col = col.child(self.render_root_row(root, cx));
         }
@@ -1133,7 +1127,6 @@ impl HarnessPane {
                 None => "Draft the change".to_string(),
             },
         )
-        .subtitle("okena scaffolds it, then briefs the agent")
         .options(options)
         .preferred(self.tasks.default_agent.clone())
         // The drafts already going into this root, so a second idea is not
@@ -1159,6 +1152,7 @@ impl HarnessPane {
             "spec-draft",
             cx,
         ))
+        .on_open_brief(self.open_brief())
         .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
             this.draft_spec_change(launch.command.to_string(), launch.model.clone(), cx);
         }))
@@ -1220,12 +1214,25 @@ impl HarnessPane {
             ))
             .children(stores.status.iter().map(|d| self.diagnostic_row(d, cx)))
             .child(self.field_hint(&format!("Store registry: {}", stores.registry_path), cx))
-            .child(h_flex().pt(px(6.0)).child(self.small_button(
-                "spec-open-settings",
-                "Open spec settings",
-                cx.listener(|this, _, _window, cx| this.open_settings("specs", cx)),
-                cx,
-            )))
+            // The sidebar's `+` opens the Roots page, but with no roots there
+            // is no sidebar — and this is exactly when you came to add one.
+            .child(
+                h_flex()
+                    .pt(px(6.0))
+                    .gap(px(6.0))
+                    .child(self.primary_button(
+                        "spec-add-root",
+                        "Add a root",
+                        cx.listener(|this, _, _window, cx| this.open_roots_page(cx)),
+                        cx,
+                    ))
+                    .child(self.small_button(
+                        "spec-open-settings",
+                        "Open spec settings",
+                        cx.listener(|this, _, _window, cx| this.open_settings("specs", cx)),
+                        cx,
+                    )),
+            )
             .into_any_element()
     }
 
@@ -1258,13 +1265,20 @@ impl HarnessPane {
         };
 
         let actions = self.spec_actions(&stores, cx);
-        let mut root = root.child(self.render_toolbar(actions, cx));
+        let toggle = self.file_sidebar_toggle(!stores.roots.is_empty(), cx);
+        let mut root = root.child(self.render_toolbar_with_leading(Some(toggle), actions, cx));
         if let Some(err) = self.specs.error.clone() {
             root = root.child(self.error_banner(err, cx));
         }
         if stores.roots.is_empty() {
+            // The page is the way out of this state, so it takes the column
+            // when it is open; there is no sidebar to put it beside.
             return root
-                .child(self.render_no_roots(&stores, cx))
+                .child(if self.roots.open {
+                    self.render_roots_page(cx)
+                } else {
+                    self.render_no_roots(&stores, cx)
+                })
                 .into_any_element();
         }
 
@@ -1274,17 +1288,25 @@ impl HarnessPane {
             .as_deref()
             .and_then(|k| stores.root(k))
             .cloned();
+        let sidebar = self.files.open.then(|| {
+            let tree = self.render_spec_tree(&stores, cx);
+            self.render_file_sidebar(tree, cx)
+        });
         root.child(
             h_flex()
                 .flex_1()
                 .min_h_0()
                 .w_full()
                 .bg(rgb(t.bg_primary))
-                .child(self.render_spec_tree(&stores, cx))
+                // Closed, the document takes the whole width: there is nothing
+                // left of it to leave a gap for.
+                .children(sidebar)
                 // The form stands where a document's text stands. It used to
                 // take the whole view, which hid the tree you were adding to
                 // and the specs you were meant to be reading before proposing.
-                .child(if self.specs.composing {
+                .child(if self.roots.open {
+                    self.render_roots_page(cx)
+                } else if self.specs.composing {
                     self.render_new_change_form(&stores, cx)
                 } else {
                     self.render_spec_document(open_root.as_ref(), cx)

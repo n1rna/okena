@@ -21,11 +21,11 @@ const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
 /// and the knowledge and OpenSpec roots discovery finds — the same ones the
 /// Knowledge and Specs sections list.
 pub fn context_catalog(projects: &[ProjectData], settings: &AppSettings) -> Catalog {
-    let knowledge = okena_knowledge::discover::discover(&okena_knowledge::discover::Sources {
-        registry_path: okena_knowledge::registry::registry_path(&get_config_dir()),
-        projects: super::knowledge::knowledge_project_sources(projects, settings),
-        stores: settings.active_space().knowledge.stores.clone(),
-    });
+    let knowledge = okena_knowledge::discover::discover(&super::knowledge::knowledge_sources(
+        &okena_knowledge::registry::registry_path(&get_config_dir()),
+        &super::knowledge::knowledge_project_sources(projects, settings),
+        settings,
+    ));
     let specs = okena_openspec::discover::discover(
         &super::specs::dirs(settings),
         &super::specs::spec_sources(projects, settings),

@@ -8,9 +8,11 @@
 
 use super::SettingsPanel;
 use super::components::{hook_input_row, section_container, section_header};
-use super::components::{AddMode, init_git_toggle, mode_chip};
 use super::render_specs::{
-    badge, banner, diagnostic, labeled_input, muted, muted_row, path_line, text_input,
+    badge, banner, diagnostic, muted, muted_row, path_line, text_input,
+};
+use crate::views::components::add_root_form::{
+    AddMode, AddRootChrome, AddRootForm, RootKind, describe, render_add_root,
 };
 use crate::settings::settings_entity;
 use crate::theme::{ThemeColors, theme};
@@ -41,15 +43,8 @@ pub(super) struct KnowledgePage {
     busy: bool,
     error: Option<String>,
     notice: Option<String>,
-    mode: AddMode,
-    init_git: bool,
-    clone_url_input: Entity<SimpleInputState>,
-    clone_path_input: Entity<SimpleInputState>,
-    register_path_input: Entity<SimpleInputState>,
-    setup_id_input: Entity<SimpleInputState>,
-    setup_name_input: Entity<SimpleInputState>,
-    setup_path_input: Entity<SimpleInputState>,
-    setup_remote_input: Entity<SimpleInputState>,
+    /// The add-a-root form, shared with the Roots page (QBL-429).
+    add: AddRootForm,
     clone_dir_input: Entity<SimpleInputState>,
 }
 
@@ -74,15 +69,7 @@ impl KnowledgePage {
             busy: false,
             error: None,
             notice: None,
-            mode: AddMode::Clone,
-            init_git: true,
-            clone_url_input: text_input(cx, "e.g. git@github.com:acme/eng-knowledge.git", None),
-            clone_path_input: text_input(cx, "Leave blank to use the clone folder below", None),
-            register_path_input: text_input(cx, "e.g. ~/knowledge/eng-knowledge", None),
-            setup_id_input: text_input(cx, "e.g. acme-eng", None),
-            setup_name_input: text_input(cx, "e.g. Acme Engineering", None),
-            setup_path_input: text_input(cx, "e.g. ~/knowledge/acme-eng", None),
-            setup_remote_input: text_input(cx, "e.g. git@github.com:acme/eng-knowledge.git", None),
+            add: AddRootForm::new(RootKind::Knowledge, cx),
             clone_dir_input,
         }
     }
@@ -179,7 +166,7 @@ impl SettingsPanel {
     fn run_knowledge_action(
         &mut self,
         action: ActionRequest,
-        describe: fn(&serde_json::Value) -> String,
+        describe: impl Fn(&serde_json::Value) -> String + 'static,
         cx: &mut Context<Self>,
     ) {
         if self.knowledge.busy {
@@ -204,17 +191,7 @@ impl SettingsPanel {
                         Ok(v) => {
                             this.knowledge.notice =
                                 Some(describe(&v.unwrap_or(serde_json::Value::Null)));
-                            for input in [
-                                &this.knowledge.clone_url_input,
-                                &this.knowledge.clone_path_input,
-                                &this.knowledge.register_path_input,
-                                &this.knowledge.setup_id_input,
-                                &this.knowledge.setup_name_input,
-                                &this.knowledge.setup_path_input,
-                                &this.knowledge.setup_remote_input,
-                            ] {
-                                input.update(cx, |i, cx| i.set_value("", cx));
-                            }
+                            this.knowledge.add.clear(cx);
                             this.refresh_knowledge_stores(cx);
                         }
                         Err(e) => this.knowledge.error = Some(e),
@@ -226,96 +203,20 @@ impl SettingsPanel {
         .detach();
     }
 
-    fn knowledge_input(&self, input: &Entity<SimpleInputState>, cx: &App) -> String {
-        input.read(cx).value().trim().to_string()
-    }
-
-    fn clone_knowledge_store(&mut self, cx: &mut Context<Self>) {
-        let url = self.knowledge_input(&self.knowledge.clone_url_input, cx);
-        let path = self.knowledge_input(&self.knowledge.clone_path_input, cx);
-        if url.is_empty() {
-            self.knowledge.error = Some("Enter the repository URL to clone.".into());
-            cx.notify();
-            return;
+    /// Send whatever the shared form is asking for, or say what is missing.
+    fn submit_add_knowledge_root(&mut self, cx: &mut Context<Self>) {
+        let mode = self.knowledge.add.mode;
+        match self.knowledge.add.request(cx) {
+            Ok(action) => self.run_knowledge_action(
+                action,
+                move |v| describe(RootKind::Knowledge, mode, v),
+                cx,
+            ),
+            Err(missing) => {
+                self.knowledge.error = Some(missing);
+                cx.notify();
+            }
         }
-        self.run_knowledge_action(
-            ActionRequest::KnowledgeStoreClone {
-                url,
-                path: (!path.is_empty()).then_some(path),
-            },
-            |v| {
-                let id = v["id"].as_str().unwrap_or("store");
-                let root = v["root"].as_str().unwrap_or("");
-                if v["identity_missing"].as_bool() == Some(true) {
-                    format!(
-                        "Cloned '{id}' into {root}. It has no .okena-knowledge/store.yaml yet — commit one so every clone agrees on its id."
-                    )
-                } else {
-                    format!("Cloned '{id}' into {root}.")
-                }
-            },
-            cx,
-        );
-    }
-
-    fn register_knowledge_store(&mut self, cx: &mut Context<Self>) {
-        let path = self.knowledge_input(&self.knowledge.register_path_input, cx);
-        if path.is_empty() {
-            self.knowledge.error = Some("Choose the store checkout's folder.".into());
-            cx.notify();
-            return;
-        }
-        self.run_knowledge_action(
-            ActionRequest::KnowledgeStoreRegister { path },
-            |v| {
-                let id = v["id"].as_str().unwrap_or("store");
-                if v["already_registered"].as_bool() == Some(true) {
-                    format!("'{id}' was already added from that folder.")
-                } else if v["identity_missing"].as_bool() == Some(true) {
-                    format!(
-                        "Added '{id}', named after its folder. Commit a .okena-knowledge/store.yaml so every clone agrees on the id."
-                    )
-                } else {
-                    format!("Added store '{id}'.")
-                }
-            },
-            cx,
-        );
-    }
-
-    fn create_knowledge_store(&mut self, cx: &mut Context<Self>) {
-        let id = self.knowledge_input(&self.knowledge.setup_id_input, cx);
-        let name = self.knowledge_input(&self.knowledge.setup_name_input, cx);
-        let path = self.knowledge_input(&self.knowledge.setup_path_input, cx);
-        let remote = self.knowledge_input(&self.knowledge.setup_remote_input, cx);
-        if id.is_empty() || path.is_empty() {
-            self.knowledge.error = Some("A new store needs an id and a folder.".into());
-            cx.notify();
-            return;
-        }
-        self.run_knowledge_action(
-            ActionRequest::KnowledgeStoreSetup {
-                id,
-                path,
-                name: (!name.is_empty()).then_some(name),
-                description: None,
-                remote: (!remote.is_empty()).then_some(remote),
-                init_git: self.knowledge.init_git,
-            },
-            |v| {
-                let committed = if v["committed"].as_bool() == Some(true) {
-                    " with an initial commit"
-                } else {
-                    ""
-                };
-                format!(
-                    "Created store '{}' at {}{committed}. Push it where your team can clone it.",
-                    v["id"].as_str().unwrap_or("store"),
-                    v["root"].as_str().unwrap_or("")
-                )
-            },
-            cx,
-        );
     }
 
     fn knowledge_button(
@@ -486,131 +387,27 @@ impl SettingsPanel {
             .into_any_element()
     }
 
-    fn render_knowledge_mode_chip(&self, mode: AddMode, cx: &mut Context<Self>) -> AnyElement {
-        let t = theme(cx);
-        mode_chip(
-            format!("knowledge-mode-{mode:?}"),
-            mode.label(),
-            self.knowledge.mode == mode,
-            &t,
-            cx,
-            cx.listener(move |this, _, _window, cx| {
-                this.knowledge.mode = mode;
-                this.knowledge.error = None;
-                cx.notify();
-            }),
-        )
-    }
-
     fn render_add_knowledge_store(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let busy = self.knowledge.busy;
-        let tabs = h_flex()
-            .gap(px(6.0))
-            .flex_wrap()
-            .children(AddMode::ALL.map(|m| self.render_knowledge_mode_chip(m, cx)));
-
-        let form = match self.knowledge.mode {
-            AddMode::Clone => v_flex()
-                .gap(px(10.0))
-                .child(labeled_input(
-                    "Repository URL",
-                    "Git runs without prompts, so credentials come from an SSH agent or credential helper.",
-                    &self.knowledge.clone_url_input,
-                    &t,
-                    cx,
-                ))
-                .child(labeled_input(
-                    "Destination (optional)",
-                    "",
-                    &self.knowledge.clone_path_input,
-                    &t,
-                    cx,
-                ))
-                .child(h_flex().child(self.knowledge_button(
-                    "knowledge-clone-submit".into(),
-                    if busy { "Cloning…" } else { "Clone" },
-                    true,
-                    |this, cx| this.clone_knowledge_store(cx),
-                    cx,
-                ))),
-            AddMode::Register => v_flex()
-                .gap(px(10.0))
-                .child(labeled_input(
-                    "Folder",
-                    "The top of the checkout, with docs/, skills/, agents/ or templates/ in it.",
-                    &self.knowledge.register_path_input,
-                    &t,
-                    cx,
-                ))
-                .child(h_flex().child(self.knowledge_button(
-                    "knowledge-register-submit".into(),
-                    if busy { "Adding…" } else { "Add" },
-                    true,
-                    |this, cx| this.register_knowledge_store(cx),
-                    cx,
-                ))),
-            AddMode::Create => {
-                let init_git = self.knowledge.init_git;
-                v_flex()
-                    .gap(px(10.0))
-                    .child(labeled_input(
-                        "Store id",
-                        "Kebab-case. Projects follow it with `stores: [acme-eng]` in .okena/knowledge.yaml.",
-                        &self.knowledge.setup_id_input,
-                        &t,
-                        cx,
-                    ))
-                    .child(labeled_input(
-                        "Name (optional)",
-                        "",
-                        &self.knowledge.setup_name_input,
-                        &t,
-                        cx,
-                    ))
-                    .child(labeled_input(
-                        "Folder",
-                        "An empty folder outside any other git repository.",
-                        &self.knowledge.setup_path_input,
-                        &t,
-                        cx,
-                    ))
-                    .child(labeled_input(
-                        "Remote (optional)",
-                        "",
-                        &self.knowledge.setup_remote_input,
-                        &t,
-                        cx,
-                    ))
-                    .child(h_flex().child(init_git_toggle(
-                        "knowledge-init-git",
-                        init_git,
-                        &t,
-                        cx,
-                        cx.listener(|this, _, _window, cx| {
-                            this.knowledge.init_git = !this.knowledge.init_git;
-                            cx.notify();
-                        }),
-                    )))
-                    .child(h_flex().child(self.knowledge_button(
-                        "knowledge-create-submit".into(),
-                        if busy { "Creating…" } else { "Create store" },
-                        true,
-                        |this, cx| this.create_knowledge_store(cx),
-                        cx,
-                    )))
-            }
-        };
-
         section_container(&t)
-            .child(
-                v_flex()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .gap(px(12.0))
-                    .child(tabs)
-                    .child(form),
-            )
+            .child(render_add_root(
+                &self.knowledge.add,
+                AddRootChrome {
+                    id_prefix: "knowledge",
+                    busy: self.knowledge.busy,
+                },
+                cx,
+                cx.listener(|this, mode: &AddMode, _window, cx| {
+                    this.knowledge.add.mode = *mode;
+                    this.knowledge.error = None;
+                    cx.notify();
+                }),
+                cx.listener(|this, _, _window, cx| {
+                    this.knowledge.add.init_git = !this.knowledge.add.init_git;
+                    cx.notify();
+                }),
+                cx.listener(|this, _, _window, cx| this.submit_add_knowledge_root(cx)),
+            ))
             .into_any_element()
     }
 

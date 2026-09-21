@@ -9,11 +9,13 @@ mod context_dialog;
 mod doc_agents;
 mod editor;
 mod file_ops;
+mod file_sidebar;
 mod knowledge_draft;
 mod knowledge_override;
 mod knowledge_view;
 mod markdown;
 mod new_task_form;
+mod roots_page;
 mod sections;
 mod specs_view;
 mod store_git;
@@ -339,6 +341,9 @@ pub struct HarnessPane {
     /// Board width from the last frame, used to turn a drag into a fraction.
     pub(crate) board_width: Rc<RefCell<f32>>,
     pub(crate) section: HarnessSection,
+    /// The Knowledge and Specs file sidebar: open state and width. One
+    /// setting behind both views, mirrored here per pane.
+    pub(crate) files: file_sidebar::FileSidebar,
     pub(crate) tasks: TasksState,
     pub(crate) specs: SpecsState,
     pub(crate) knowledge: knowledge_view::KnowledgeState,
@@ -356,6 +361,8 @@ pub struct HarnessPane {
     pub(crate) knowledge_files: file_ops::FileOps,
     /// The projects-and-context dialog a Specs or Knowledge launcher opened.
     pub(crate) context_dialog: Option<context_dialog::ContextTarget>,
+    /// The Roots page the sidebar's `+` opens, for this pane's section.
+    pub(crate) roots: roots_page::RootsPage,
 }
 
 /// Everything a harness pane needs from its window.
@@ -386,6 +393,10 @@ impl HarnessPane {
         cx.observe(
             &crate::settings::settings_entity(cx),
             |this: &mut Self, settings, cx| {
+                // Specs and Knowledge are separate panes over one sidebar
+                // setting: whichever is not on screen must still come back
+                // the way the other one was left.
+                this.sync_file_sidebar(&settings.read(cx).settings.clone());
                 let (wanted, scope) = {
                     let settings = settings.read(cx);
                     let space = settings.settings.active_space();
@@ -400,6 +411,7 @@ impl HarnessPane {
                     this.tasks.scope = scope;
                     this.refresh_tasks(cx);
                 }
+                cx.notify();
             },
         )
         .detach();
@@ -438,6 +450,7 @@ impl HarnessPane {
         let knowledge_refine = doc_agents::DocRefine::new();
         let spec_files = file_ops::FileOps::new(cx);
         let knowledge_files = file_ops::FileOps::new(cx);
+        let roots = roots_page::RootsPage::new(section, cx);
         let mut pane = Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -448,6 +461,7 @@ impl HarnessPane {
             active_drag: ctx.active_drag,
             board_width: Rc::new(RefCell::new(0.0)),
             section,
+            files: file_sidebar::FileSidebar::from_settings(cx),
             tasks: TasksState {
                 provider_display_name: tasks_view::provider_label(&provider).to_string(),
                 provider,
@@ -513,6 +527,7 @@ impl HarnessPane {
             spec_files,
             knowledge_files,
             context_dialog: None,
+            roots,
         };
         match section {
             HarnessSection::Tasks => {
@@ -537,6 +552,16 @@ impl HarnessPane {
 }
 
 impl HarnessPane {
+    /// Open a launcher's brief: its own file in Harness → Knowledge.
+    pub(crate) fn open_brief(
+        &self,
+    ) -> impl Fn(&SharedString, &SharedString, &mut Window, &mut App) + 'static + use<> {
+        let broker = self.request_broker.clone();
+        move |root, path, _window, cx| {
+            crate::views::launch_briefs::open_brief(&broker, root, path, cx);
+        }
+    }
+
     /// Apply a lane-divider drag. Clamped so neither lane can be collapsed.
     pub fn set_lane_fraction(&mut self, fraction: f32, cx: &mut Context<Self>) {
         let clamped = fraction.clamp(MIN_LANE_FRACTION, 1.0 - MIN_LANE_FRACTION);

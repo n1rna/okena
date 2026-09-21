@@ -29,36 +29,13 @@ const MAX_DOC_BYTES: u64 = 2 * 1024 * 1024;
 ///
 /// None when project discovery is off, and never a worktree (a second checkout
 /// of a repo already listed) or an agent session (rooted above repos, not in
-/// one). Only the active space's projects: each space has its own roots, so a
-/// repo in another space must not put a store on this one's list.
-/// What a space looks for knowledge in.
-///
-/// The two halves travel together because both are the *space's*: its own
-/// projects, and the registered stores it follows, in its own order. Bundling
-/// them keeps every helper below taking one scope rather than two arguments
-/// that must not be mixed between spaces.
-#[derive(Clone, Debug, Default)]
-pub struct KnowledgeSources {
-    pub projects: Vec<ProjectSource>,
-    /// `None` is every registered store — what a profile had before spaces.
-    /// `Some` is exactly those, in that order.
-    pub follows: Option<Vec<String>>,
-}
-
-/// The knowledge sources for the active space.
-pub fn knowledge_sources(projects: &[ProjectData], settings: &AppSettings) -> KnowledgeSources {
-    KnowledgeSources {
-        projects: knowledge_project_sources(projects, settings),
-        follows: settings.active_space().knowledge.stores.clone(),
-    }
-}
-
+/// one). Only the active space's: each space has its own roots, so a repo in
+/// another space must not put a store on this one's list.
 pub fn knowledge_project_sources(
     projects: &[ProjectData],
     settings: &AppSettings,
 ) -> Vec<ProjectSource> {
-    let space = settings.active_space();
-    if !space.knowledge.projects {
+    if !settings.active_space().knowledge.projects {
         return Vec::new();
     }
     projects
@@ -72,15 +49,35 @@ pub fn knowledge_project_sources(
         .collect()
 }
 
+/// Everything discovery needs: the registry, the projects to look in, which
+/// stores the space follows, and the saved order the roots come back in.
+///
+/// One function so no caller can accidentally discover without the order and
+/// hand back a list that disagrees with the one briefs resolve through — or
+/// without the space, and hand back another space's roots.
+pub(super) fn knowledge_sources(
+    registry: &Path,
+    projects: &[ProjectSource],
+    settings: &AppSettings,
+) -> Sources {
+    let space = settings.active_space();
+    Sources {
+        registry_path: registry.to_path_buf(),
+        projects: projects.to_vec(),
+        stores: space.knowledge.stores.clone(),
+        order: space.knowledge.order.clone(),
+    }
+}
+
 /// Run a knowledge action; `None` for any other action.
 pub fn execute_knowledge_action(
     action: &ActionRequest,
-    sources: &KnowledgeSources,
+    projects: &[ProjectSource],
     settings: &AppSettings,
 ) -> Option<ActionResult> {
     let registry = registry::registry_path(&get_config_dir());
     ensure_defaults(&registry);
-    execute_at(&registry, action, sources, settings)
+    execute_at(&registry, action, projects, settings)
 }
 
 /// Put okena's own briefs on disk and in the registry, once per run.
@@ -118,50 +115,50 @@ pub(super) fn defaults_store() -> std::path::PathBuf {
 fn execute_at(
     registry: &Path,
     action: &ActionRequest,
-    sources: &KnowledgeSources,
+    projects: &[ProjectSource],
     settings: &AppSettings,
 ) -> Option<ActionResult> {
+    // Built once, here, so every reply about roots — the listing, what a key
+    // resolves to, the override candidates — reads them in the one saved
+    // order (QBL-425) rather than in whatever order discovery produced.
+    let sources = &knowledge_sources(registry, projects, settings);
     Some(match action {
-        ActionRequest::KnowledgeStores => to_result(
-            serde_json::to_value(stores(registry, sources)),
-            "knowledge stores",
-        ),
-        ActionRequest::KnowledgeTree { root } => tree_of(registry, sources, root.as_deref()),
-        ActionRequest::KnowledgeRead { root, path } => {
-            read(registry, sources, root.as_deref(), path)
+        ActionRequest::KnowledgeStores => {
+            to_result(serde_json::to_value(stores(sources)), "knowledge stores")
         }
+        ActionRequest::KnowledgeTree { root } => tree_of(sources, root.as_deref()),
+        ActionRequest::KnowledgeRead { root, path } => read(sources, root.as_deref(), path),
         ActionRequest::KnowledgeWrite {
             root,
             path,
             content,
             revision,
-        } => write(registry, sources, root.as_deref(), path, content, revision),
+        } => write(sources, root.as_deref(), path, content, revision),
         ActionRequest::KnowledgeFileCreate {
             root,
             path,
             content,
-        } => in_root(registry, sources, root.as_deref(), |key, dir| {
+        } => in_root(sources, root.as_deref(), |key, dir| {
             super::document_files::create_file(key, dir, path, content, MAX_DOC_BYTES)
         }),
         ActionRequest::KnowledgeFolderCreate { root, path } => {
-            in_root(registry, sources, root.as_deref(), |key, dir| {
+            in_root(sources, root.as_deref(), |key, dir| {
                 super::document_files::create_folder(key, dir, path)
             })
         }
         ActionRequest::KnowledgeFileRename { root, from, to } => {
-            in_root(registry, sources, root.as_deref(), |key, dir| {
+            in_root(sources, root.as_deref(), |key, dir| {
                 super::document_files::rename(key, dir, tree::resolve_document, from, to)
             })
         }
         ActionRequest::KnowledgeFileDelete { root, path } => {
-            in_root(registry, sources, root.as_deref(), |key, dir| {
+            in_root(sources, root.as_deref(), |key, dir| {
                 super::document_files::delete(key, dir, tree::resolve_document, path)
             })
         }
-        ActionRequest::KnowledgeOverrides { path } => overrides(registry, sources, path),
-        ActionRequest::KnowledgeOverride { root, path } => {
-            override_into(registry, sources, root, path)
-        }
+        ActionRequest::KnowledgeOverrides { path } => overrides(sources, path),
+        ActionRequest::KnowledgeLayering => layering(sources),
+        ActionRequest::KnowledgeOverride { root, path } => override_into(sources, root, path),
         ActionRequest::KnowledgeStoreClone { url, path } => match git::clone_store(
             registry,
             url,
@@ -207,18 +204,16 @@ fn execute_at(
                 Err(e) => failed(e),
             }
         }
-        ActionRequest::KnowledgeStoreFetch { root } => sync(registry, sources, root, |path| {
+        ActionRequest::KnowledgeStoreFetch { root } => sync(sources, root, |path| {
             git::fetch(path).map(|()| git::status(path).unwrap_or_default())
         }),
-        ActionRequest::KnowledgeStorePull { root } => sync(registry, sources, root, git::pull),
+        ActionRequest::KnowledgeStorePull { root } => sync(sources, root, git::pull),
         ActionRequest::KnowledgeStoreCommit {
             root,
             paths,
             message,
-        } => sync(registry, sources, root, |path| {
-            git::commit(path, paths, message)
-        }),
-        ActionRequest::KnowledgeStorePush { root } => sync(registry, sources, root, git::push),
+        } => sync(sources, root, |path| git::commit(path, paths, message)),
+        ActionRequest::KnowledgeStorePush { root } => sync(sources, root, git::push),
         _ => return None,
     })
 }
@@ -243,17 +238,13 @@ fn registered(out: RegisterOutcome) -> ActionResult {
     })))
 }
 
-fn discovered(registry: &Path, sources: &KnowledgeSources) -> KnowledgeStores {
-    discover::discover(&Sources {
-        registry_path: registry.to_path_buf(),
-        projects: sources.projects.clone(),
-        stores: sources.follows.clone(),
-    })
+fn discovered(sources: &Sources) -> KnowledgeStores {
+    discover::discover(sources)
 }
 
 /// Every root, with sync state on each store.
-fn stores(registry: &Path, sources: &KnowledgeSources) -> KnowledgeStores {
-    let mut stores = discovered(registry, sources);
+fn stores(sources: &Sources) -> KnowledgeStores {
+    let mut stores = discovered(sources);
     git::attach_status(&mut stores);
     stores
 }
@@ -268,8 +259,8 @@ fn stores(registry: &Path, sources: &KnowledgeSources) -> KnowledgeStores {
 /// where a copy could go and whether putting it there would have any effect.
 /// The daemon answers rather than the client, because the order is resolution's
 /// and nothing else should be reimplementing it.
-fn overrides(registry: &Path, sources: &KnowledgeSources, path: &str) -> ActionResult {
-    let layers = candidates(registry, sources);
+fn overrides(sources: &Sources, path: &str) -> ActionResult {
+    let layers = candidates(sources);
     let layered = prompts::is_layered(path);
     let listed: Vec<serde_json::Value> = layers
         .iter()
@@ -299,12 +290,86 @@ fn overrides(registry: &Path, sources: &KnowledgeSources, path: &str) -> ActionR
 
 /// Every root a copy could go in, in resolution order: healthy, and not
 /// okena's own.
-fn candidates(registry: &Path, sources: &KnowledgeSources) -> Vec<KnowledgeRoot> {
-    discovered(registry, sources)
+fn candidates(sources: &Sources) -> Vec<KnowledgeRoot> {
+    discovered(sources)
         .roots
         .into_iter()
         .filter(|r| r.healthy && !r.builtin)
         .collect()
+}
+
+/// Every healthy root, in layering order, with okena's own last.
+///
+/// The layers are [`candidates`] — resolution's own order, which is discovery's
+/// — and okena's defaults are appended rather than left out. They are not a
+/// layer: the store holds a readable copy of the built-ins, which resolution
+/// reaches as its compiled-in last resort. Last is therefore exactly where a
+/// list of "who holds a copy of this" has to put them, and it is what makes
+/// "the default is what applies" a state the list can show.
+fn layer_order(sources: &Sources) -> Vec<KnowledgeRoot> {
+    let all = discovered(sources).roots;
+    let (builtin, layers): (Vec<_>, Vec<_>) = all
+        .into_iter()
+        .filter(|r| r.healthy)
+        .partition(|r| r.builtin);
+    layers.into_iter().chain(builtin).collect()
+}
+
+/// Which roots hold a copy of each layered file, and which copy is applied.
+///
+/// One answer for every root at once: a template's detail page lists the roots
+/// holding a copy, and the sidebar marks the templates that have an override,
+/// so asking per file would be a request per row (QBL-426).
+///
+/// A copy is a file that exists. What is *applied* is the first root that
+/// supplies it, which is resolution's own rule and not the same thing — an
+/// empty file is a placeholder, not an answer, and falls through to the layer
+/// below. Saying both is what lets the view tell you your placeholder is doing
+/// nothing.
+fn layering(sources: &Sources) -> ActionResult {
+    let roots = layer_order(sources);
+    let mut paths: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    for root in &roots {
+        for rel in tree::layered_paths(Path::new(&root.path)) {
+            paths.entry(rel).or_default();
+        }
+    }
+    let listed: serde_json::Map<String, serde_json::Value> = paths
+        .into_keys()
+        .map(|rel| {
+            let copies: Vec<&KnowledgeRoot> = roots
+                .iter()
+                .filter(|r| Path::new(&r.path).join(&rel).is_file())
+                .collect();
+            let applied = copies
+                .iter()
+                .find(|r| prompts::supplies(Path::new(&r.path), &rel))
+                .map(|r| r.key.clone());
+            let value = serde_json::json!({
+                "copies": copies.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
+                "applied": applied,
+            });
+            (rel, value)
+        })
+        .collect();
+    ActionResult::Ok(Some(serde_json::json!({
+        "roots": roots.iter().map(root_line).collect::<Vec<_>>(),
+        "paths": listed,
+    })))
+}
+
+/// One root as the layering answer names it.
+fn root_line(root: &KnowledgeRoot) -> serde_json::Value {
+    serde_json::json!({
+        "key": root.key,
+        "name": root.name,
+        "kind": match root.kind {
+            KnowledgeRootKind::Store => "store",
+            KnowledgeRootKind::Project => "project",
+        },
+        "builtin": root.builtin,
+    })
 }
 
 /// Copy okena's default for `path` into `root`, at the same path.
@@ -314,17 +379,12 @@ fn candidates(registry: &Path, sources: &KnowledgeSources) -> Vec<KnowledgeRoot>
 /// path goes through the same checks a read does. An existing file is opened,
 /// never overwritten: a second Override must not discard the edits the first
 /// one was made for.
-fn override_into(
-    registry: &Path,
-    sources: &KnowledgeSources,
-    root: &str,
-    path: &str,
-) -> ActionResult {
-    let target = match resolve_writable_root(registry, sources, Some(root)) {
+fn override_into(sources: &Sources, root: &str, path: &str) -> ActionResult {
+    let target = match resolve_writable_root(sources, Some(root)) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
-    let defaults = match discovered(registry, sources)
+    let defaults = match discovered(sources)
         .roots
         .into_iter()
         .find(|r| r.builtin && r.healthy)
@@ -390,11 +450,10 @@ fn read_only(root: &KnowledgeRoot) -> String {
 /// from any paired client and from agents over okena's MCP server, so the
 /// refusal has to live at the daemon.
 pub(super) fn resolve_writable_root(
-    registry: &Path,
-    sources: &KnowledgeSources,
+    sources: &Sources,
     key: Option<&str>,
 ) -> Result<KnowledgeRoot, String> {
-    let root = resolve_root(registry, sources, key)?;
+    let root = resolve_root(sources, key)?;
     if root.builtin {
         return Err(read_only(&root));
     }
@@ -404,11 +463,10 @@ pub(super) fn resolve_writable_root(
 /// A usable root the client named, checked against what discovery found —
 /// never a path taken on trust.
 pub(super) fn resolve_root(
-    registry: &Path,
-    sources: &KnowledgeSources,
+    sources: &Sources,
     key: Option<&str>,
 ) -> Result<KnowledgeRoot, String> {
-    let stores = discovered(registry, sources);
+    let stores = discovered(sources);
     let root = match key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(key) => stores.root(key).cloned().ok_or_else(|| {
             format!(
@@ -430,8 +488,8 @@ pub(super) fn resolve_root(
     Ok(root)
 }
 
-fn tree_of(registry: &Path, sources: &KnowledgeSources, key: Option<&str>) -> ActionResult {
-    let root = match resolve_root(registry, sources, key) {
+fn tree_of(sources: &Sources, key: Option<&str>) -> ActionResult {
+    let root = match resolve_root(sources, key) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -441,13 +499,8 @@ fn tree_of(registry: &Path, sources: &KnowledgeSources, key: Option<&str>) -> Ac
     to_result(serde_json::to_value(&t), "knowledge tree")
 }
 
-fn read(
-    registry: &Path,
-    sources: &KnowledgeSources,
-    key: Option<&str>,
-    path: &str,
-) -> ActionResult {
-    let root = match resolve_root(registry, sources, key) {
+fn read(sources: &Sources, key: Option<&str>, path: &str) -> ActionResult {
+    let root = match resolve_root(sources, key) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -483,14 +536,13 @@ fn read(
 /// Replace an existing file, through the same root and path checks as
 /// [`read`]: a write must not be a way out of a root that a read is not.
 fn write(
-    registry: &Path,
-    sources: &KnowledgeSources,
+    sources: &Sources,
     key: Option<&str>,
     path: &str,
     content: &str,
     revision: &str,
 ) -> ActionResult {
-    let root = match resolve_writable_root(registry, sources, key) {
+    let root = match resolve_writable_root(sources, key) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -522,12 +574,11 @@ fn write(
 /// The tree lists entries, not folders, so a folder emptied by a delete or a
 /// rename simply stops showing.
 fn in_root(
-    registry: &Path,
-    sources: &KnowledgeSources,
+    sources: &Sources,
     key: Option<&str>,
     op: impl FnOnce(&str, &Path) -> ActionResult,
 ) -> ActionResult {
-    match resolve_writable_root(registry, sources, key) {
+    match resolve_writable_root(sources, key) {
         Ok(root) => op(&root.key, Path::new(&root.path)),
         Err(e) => ActionResult::Err(e),
     }
@@ -548,12 +599,11 @@ fn register(registry: &Path, path: &str) -> ActionResult {
 /// Run `op` — fetch, pull, commit or push — in a store's checkout. Replies
 /// with its sync state after.
 fn sync(
-    registry: &Path,
-    sources: &KnowledgeSources,
+    sources: &Sources,
     key: &str,
     op: impl FnOnce(&Path) -> Result<okena_core::knowledge::KnowledgeGitStatus, KnowledgeError>,
 ) -> ActionResult {
-    let root = match resolve_root(registry, sources, Some(key)) {
+    let root = match resolve_root(sources, Some(key)) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -655,11 +705,12 @@ pub(super) fn draft(
     }
     let context_items =
         super::context::resolve_for_launch(&ws.data.projects, settings, &context_refs);
-    let sources = knowledge_sources(&ws.data.projects, settings);
+    let projects = knowledge_project_sources(&ws.data.projects, settings);
     let registry = registry::registry_path(&get_config_dir());
     // A draft session exists to write into the root, so okena's own is refused
     // here for the same reason a save is.
-    let root = match resolve_writable_root(&registry, &sources, root.as_deref()) {
+    let sources = knowledge_sources(&registry, &projects, settings);
+    let root = match resolve_writable_root(&sources, root.as_deref()) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -814,7 +865,9 @@ mod draft_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionResult, discovered, execute_at, knowledge_project_sources};
+    use super::{
+        ActionResult, discovered, execute_at, knowledge_project_sources, knowledge_sources,
+    };
     use crate::workspace::persistence::AppSettings;
     use crate::workspace::state::ProjectData;
     use okena_core::api::ActionRequest;
@@ -853,34 +906,23 @@ mod tests {
     }
 
     fn run(sandbox: &Path, projects: &[ProjectSource], action: ActionRequest) -> ActionResult {
-        run_following(sandbox, projects, None, action)
+        run_ordered(sandbox, projects, action, &AppSettings::default())
     }
 
-    /// Run an action as a space that follows exactly `follows`, in that order.
-    fn run_following(
+    fn run_ordered(
         sandbox: &Path,
         projects: &[ProjectSource],
-        follows: Option<&[&str]>,
         action: ActionRequest,
+        settings: &AppSettings,
     ) -> ActionResult {
-        execute_at(
-            &registry(sandbox),
-            &action,
-            &super::KnowledgeSources {
-                projects: projects.to_vec(),
-                follows: follows.map(|f| f.iter().map(|s| s.to_string()).collect()),
-            },
-            &AppSettings::default(),
-        )
-        .expect("a knowledge action")
+        execute_at(&registry(sandbox), &action, projects, settings).expect("a knowledge action")
     }
 
-    /// The sources a space with these projects and every registered store has.
-    fn sources(projects: &[ProjectSource]) -> super::KnowledgeSources {
-        super::KnowledgeSources {
-            projects: projects.to_vec(),
-            follows: None,
-        }
+    /// Settings whose only content is the saved order of knowledge roots.
+    fn ordered(order: &[&str]) -> AppSettings {
+        let mut settings = AppSettings::default();
+        settings.active_space_mut().knowledge.order = order.iter().map(|k| (*k).to_string()).collect();
+        settings
     }
 
     /// Decode a successful action's payload into whatever the binding asks for.
@@ -1230,7 +1272,7 @@ mod tests {
     }
 
     const DEFAULTS_KEY: &str = "store:okena-defaults";
-    const TEMPLATE: &str = "templates/spec-draft.md";
+    const TEMPLATE: &str = "templates/briefs/spec-draft.md";
 
     #[test]
     fn okenas_defaults_are_listed_as_builtin_and_every_write_to_them_is_refused() {
@@ -1355,6 +1397,103 @@ mod tests {
     }
 
     #[test]
+    fn layering_lists_every_root_holding_a_copy_with_okenas_own_last() {
+        let (sandbox, defaults) = with_defaults("layering", "acme");
+        // A second store, so there is an order to follow rather than a winner
+        // by default. Its id sorts after `acme`, which is the order the
+        // registry lists them in and so the order the layers come in.
+        store(&sandbox.join("zeta"), "zeta");
+        okena_knowledge::registry::register(
+            &registry(&sandbox),
+            &sandbox.join("zeta").to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        let ask = || -> serde_json::Value {
+            ok!(run(&sandbox, &[], ActionRequest::KnowledgeLayering))
+        };
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|k| k.as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // The order is the layers' own, and okena's store is last: it is not a
+        // layer, it is the fallback made readable.
+        let out = ask();
+        let listed: Vec<&str> = out["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed, ["store:acme", "store:zeta", DEFAULTS_KEY], "{out}");
+        let stores: KnowledgeStores = ok!(run(&sandbox, &[], ActionRequest::KnowledgeStores));
+        let discovery: Vec<&str> = stores
+            .roots
+            .iter()
+            .filter(|r| r.healthy && !r.builtin)
+            .map(|r| r.key.as_str())
+            .collect();
+        assert_eq!(&listed[..discovery.len()], discovery.as_slice(), "{out}");
+        assert_eq!(out["roots"][2]["builtin"], true);
+
+        // Nobody overrides the brief yet, so okena's own copy is the one
+        // applied — and it is the only copy there is.
+        let at = |out: &serde_json::Value, path: &str| out["paths"][path].clone();
+        let brief = at(&out, TEMPLATE);
+        assert_eq!(keys(&brief["copies"]), [DEFAULTS_KEY], "{brief}");
+        assert_eq!(brief["applied"], DEFAULTS_KEY);
+
+        // Both stores take a copy. They are listed in layering order, and the
+        // first one is what a launch reads.
+        write(&sandbox.join("zeta").join(TEMPLATE), "Zeta drafts it");
+        write(&sandbox.join("acme").join(TEMPLATE), "Acme drafts it");
+        let brief = at(&ask(), TEMPLATE);
+        assert_eq!(
+            keys(&brief["copies"]),
+            ["store:acme", "store:zeta", DEFAULTS_KEY],
+            "{brief}"
+        );
+        assert_eq!(brief["applied"], "store:acme");
+
+        // Delete the winning copy and the highlight moves down the order.
+        std::fs::remove_file(sandbox.join("acme").join(TEMPLATE)).unwrap();
+        let brief = at(&ask(), TEMPLATE);
+        assert_eq!(keys(&brief["copies"]), ["store:zeta", DEFAULTS_KEY]);
+        assert_eq!(brief["applied"], "store:zeta");
+
+        // An empty copy is a placeholder, not an answer: it is listed as a
+        // copy, and what applies is still the layer below it.
+        write(&sandbox.join("acme").join(TEMPLATE), "---\nfor: x\n---\n");
+        let brief = at(&ask(), TEMPLATE);
+        assert_eq!(
+            keys(&brief["copies"]),
+            ["store:acme", "store:zeta", DEFAULTS_KEY]
+        );
+        assert_eq!(brief["applied"], "store:zeta");
+
+        // With every override gone, okena's default applies again.
+        std::fs::remove_file(sandbox.join("acme").join(TEMPLATE)).unwrap();
+        std::fs::remove_file(sandbox.join("zeta").join(TEMPLATE)).unwrap();
+        let brief = at(&ask(), TEMPLATE);
+        assert_eq!(keys(&brief["copies"]), [DEFAULTS_KEY]);
+        assert_eq!(brief["applied"], DEFAULTS_KEY);
+
+        // A partial and a skill layer the same way; a doc is not layered at
+        // all and is not in the answer.
+        let out = ask();
+        assert!(out["paths"]["templates/partials/reporting.md"].is_object(), "{out}");
+        assert!(out["paths"]["skills/project-map/SKILL.md"].is_object(), "{out}");
+        assert!(out["paths"]["docs/readme.md"].is_null(), "{out}");
+        assert!(out["paths"]["README.md"].is_null(), "{out}");
+        assert!(defaults.join(TEMPLATE).is_file());
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
     fn an_override_copies_the_default_once_and_never_over_an_existing_file() {
         let (sandbox, defaults) = with_defaults("override", "acme");
         let copy = sandbox.join("acme").join(TEMPLATE);
@@ -1412,6 +1551,119 @@ mod tests {
     }
 
     #[test]
+    fn the_top_root_with_the_file_wins_and_moving_a_root_changes_which_copy_launches() {
+        // QBL-425's acceptance walk, over the real resolver and the real
+        // layer list a launch builds (`briefs::layers_of`), so what this
+        // asserts is what the next agent launch would be sent.
+        use okena_knowledge::prompts::{self, Flow};
+
+        let (sandbox, _) = with_defaults("ordering", "acme");
+        store(&sandbox.join("ops"), "ops");
+        okena_knowledge::registry::register(
+            &registry(&sandbox),
+            &sandbox.join("ops").to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        let repo = sandbox.join("web");
+        write(&repo.join(".okena/knowledge/docs/a.md"), "# A\n");
+        let projects = [ProjectSource {
+            name: "web".into(),
+            path: repo.clone(),
+        }];
+        let web_key = okena_core::specs::path_root_key(
+            &repo.join(".okena/knowledge").to_string_lossy(),
+        );
+
+        // The same template in three roots, each saying which root it is.
+        let copy = |dir: &Path, text: &str| write(&dir.join(TEMPLATE), text);
+        copy(&sandbox.join("acme"), "Acme's way.");
+        copy(&sandbox.join("ops"), "Ops's way.");
+        copy(&repo.join(".okena/knowledge"), "Web's way.");
+
+        // What a launch would send, resolved through the saved order.
+        let launched = |order: &[&str]| -> prompts::Brief {
+            let settings = ordered(order);
+            let roots = super::briefs::layers_of(&discovered(&knowledge_sources(
+                &registry(&sandbox),
+                &projects,
+                &settings,
+            )));
+            prompts::brief(
+                Flow::SpecDraft,
+                &super::briefs::layers(&roots),
+                &prompts::Vars::new(),
+            )
+        };
+
+        // Unarranged, the roots layer the way discovery found them.
+        assert_eq!(launched(&[]).text(), "Acme's way.");
+
+        // "With the same template in two roots, the one higher in the order is
+        // used by the next agent launch."
+        assert_eq!(launched(&["store:ops", "store:acme"]).text(), "Ops's way.");
+        // "Move the other root above it. The next launch uses that copy."
+        assert_eq!(launched(&["store:acme", "store:ops"]).text(), "Acme's way.");
+        // A project root is in the same one list, not a band below it.
+        assert_eq!(launched(&[&web_key, "store:acme"]).text(), "Web's way.");
+
+        // "Remove the file from the winning root. The next launch uses the
+        // next root down, then the built-in."
+        let order = ["store:ops", "store:acme", web_key.as_str()];
+        let _: serde_json::Value = ok!(run_ordered(
+            &sandbox,
+            &projects,
+            ActionRequest::KnowledgeFileDelete {
+                root: Some("store:ops".into()),
+                path: TEMPLATE.into(),
+            },
+            &ordered(&order),
+        ));
+        assert_eq!(launched(&order).text(), "Acme's way.");
+        std::fs::remove_file(sandbox.join("acme").join(TEMPLATE)).unwrap();
+        assert_eq!(launched(&order).text(), "Web's way.");
+        std::fs::remove_file(repo.join(".okena/knowledge").join(TEMPLATE)).unwrap();
+        assert!(launched(&order).source.is_builtin());
+
+        // "Add a new root that has a copy of a template. It doesn't win until
+        // moved above the current winner."
+        copy(&sandbox.join("acme"), "Acme's way.");
+        store(&sandbox.join("zeta"), "zeta");
+        copy(&sandbox.join("zeta"), "Zeta's way.");
+        okena_knowledge::registry::register(
+            &registry(&sandbox),
+            &sandbox.join("zeta").to_string_lossy(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            launched(&order).text(),
+            "Acme's way.",
+            "a root nobody has placed goes to the bottom, so it beats nothing"
+        );
+        assert_eq!(
+            launched(&["store:zeta", "store:acme"]).text(),
+            "Zeta's way.",
+            "and wins as soon as it is moved above the winner"
+        );
+
+        // "okena-defaults is always consulted last and isn't part of the
+        // order": its own copy of the template cannot be dragged over a root.
+        assert_eq!(
+            launched(&[DEFAULTS_KEY, "store:acme"]).text(),
+            "Acme's way."
+        );
+        std::fs::remove_file(sandbox.join("acme").join(TEMPLATE)).unwrap();
+        std::fs::remove_file(sandbox.join("zeta").join(TEMPLATE)).unwrap();
+        assert!(
+            launched(&[DEFAULTS_KEY]).source.is_builtin(),
+            "with no root holding it, the answer is okena's compiled-in one"
+        );
+
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
     fn overriding_a_default_changes_the_next_brief_and_deleting_it_restores_okenas() {
         // QBL-415's acceptance walk, end to end over the real actions and the
         // real renderer: override a default, edit the copy, see the next brief
@@ -1426,16 +1678,17 @@ mod tests {
             name: "web".into(),
             path: repo.clone(),
         }];
-        let sources = sources(&projects);
         // The layers a launch would resolve through, in the daemon's order.
-        let layers = || -> Vec<(String, std::path::PathBuf)> {
-            discovered(&registry(&sandbox), &sources)
+        let layers_in = |order: &[&str]| -> Vec<(String, std::path::PathBuf)> {
+            let settings = ordered(order);
+            discovered(&knowledge_sources(&registry(&sandbox), &projects, &settings))
                 .roots
                 .into_iter()
                 .filter(|r| r.healthy && !r.builtin)
                 .map(|r| (r.key.clone(), std::path::PathBuf::from(&r.path)))
                 .collect()
         };
+        let layers = || layers_in(&[]);
         let brief = |roots: &[(String, std::path::PathBuf)]| {
             let borrowed: Vec<prompts::Root<'_>> = roots
                 .iter()
@@ -1565,102 +1818,4 @@ mod tests {
         );
         std::fs::remove_dir_all(&sandbox).ok();
     }
-
-    // ---- a space's own roots (QBL-430) ----
-
-    #[test]
-    fn a_space_sees_only_the_stores_it_follows_in_its_own_order() {
-        let sandbox = tmpdir("space-roots");
-        let a = sandbox.join("a");
-        let b = sandbox.join("b");
-        store(&a, "acme-eng");
-        store(&b, "beta-eng");
-        for path in [&a, &b] {
-            let _registered: serde_json::Value = ok!(run(
-                &sandbox,
-                &[],
-                ActionRequest::KnowledgeStoreRegister {
-                    path: path.to_string_lossy().into_owned(),
-                },
-            ));
-        }
-
-        // Default follows every registered store.
-        let all: KnowledgeStores = ok!(run(&sandbox, &[], ActionRequest::KnowledgeStores));
-        let keys: Vec<&str> = all
-            .roots
-            .iter()
-            .filter(|r| !r.builtin)
-            .map(|r| r.key.as_str())
-            .collect();
-        assert!(keys.contains(&"store:acme-eng"), "{keys:?}");
-        assert!(keys.contains(&"store:beta-eng"), "{keys:?}");
-
-        // A space that follows one sees one…
-        let one: KnowledgeStores = ok!(run_following(
-            &sandbox,
-            &[],
-            Some(&["beta-eng"]),
-            ActionRequest::KnowledgeStores
-        ));
-        let keys: Vec<&str> = one
-            .roots
-            .iter()
-            .filter(|r| !r.builtin)
-            .map(|r| r.key.as_str())
-            .collect();
-        assert_eq!(keys, ["store:beta-eng"]);
-
-        // …and the order it lists them in is the order they are shown.
-        let ordered: KnowledgeStores = ok!(run_following(
-            &sandbox,
-            &[],
-            Some(&["beta-eng", "acme-eng"]),
-            ActionRequest::KnowledgeStores
-        ));
-        let keys: Vec<&str> = ordered
-            .roots
-            .iter()
-            .filter(|r| !r.builtin)
-            .map(|r| r.key.as_str())
-            .collect();
-        assert_eq!(keys, ["store:beta-eng", "store:acme-eng"]);
-    }
-
-    #[test]
-    fn a_new_space_follows_no_store_at_all() {
-        let sandbox = tmpdir("space-empty");
-        let a = sandbox.join("a");
-        store(&a, "acme-eng");
-        let _registered: serde_json::Value = ok!(run(
-            &sandbox,
-            &[],
-            ActionRequest::KnowledgeStoreRegister {
-                path: a.to_string_lossy().into_owned(),
-            },
-        ));
-        let none: KnowledgeStores = ok!(run_following(
-            &sandbox,
-            &[],
-            Some(&[]),
-            ActionRequest::KnowledgeStores
-        ));
-        assert!(
-            none.roots.iter().all(|r| r.builtin),
-            "a new space starts with no roots of its own"
-        );
-    }
-
-    #[test]
-    fn following_a_store_that_was_unregistered_is_skipped_not_an_error() {
-        let sandbox = tmpdir("space-stale");
-        let listed: KnowledgeStores = ok!(run_following(
-            &sandbox,
-            &[],
-            Some(&["gone"]),
-            ActionRequest::KnowledgeStores
-        ));
-        assert!(listed.roots.iter().all(|r| r.builtin));
-    }
-
 }

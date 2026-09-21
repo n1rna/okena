@@ -19,11 +19,19 @@ to an agent that has never heard of okena.
 ├── docs/**/*.md                  principles, processes, architecture, runbooks
 ├── skills/**/SKILL.md            one skill per directory holding a SKILL.md
 ├── agents/**/*.md                one subagent per file
-└── templates/**/*.md             prompt templates
+└── templates/
+    ├── briefs/<flow>.md          the brief for one launch flow
+    ├── partials/<name>.md        text shared between briefs
+    └── **/*.md                   any other prompt template
 ```
 
 Every folder is optional. A root needs at least one kind folder or an identity.
 Anything outside the four kind folders (a `README.md`, CI config) is ignored.
+
+`templates/` has two folders okena reads by name: `briefs/`, one file per
+[launch flow](#flows), and `partials/`, the [shared text](#partials) they
+include. Both are listed as directories of their own in the Knowledge view.
+Anything else under `templates/` is a template the store keeps for itself.
 
 | Kind | What counts as an entry | Name |
 |---|---|---|
@@ -204,11 +212,25 @@ used by OpenSpec stores, is described in
 ## In okena
 
 - **Harness → Knowledge** has these parts:
-  - **Root list:** every root, with its health and a sync badge (`↑` commits to
-    push, `↓` commits to pull, `•` uncommitted changes).
-  - **Entry list:** the open root's entries grouped by kind, with docs nested
-    by folder, and a filter over titles, names, paths, descriptions and tags.
+  - **Root list:** every root, in the order it layers in, with its health and a
+    sync badge (`↑` commits to push, `↓` commits to pull, `•` uncommitted
+    changes). `+` beside the ROOTS heading opens the **Roots page**.
+  - **Entry list:** the open root's entries grouped by kind, with docs and
+    templates nested by folder — so `briefs` and `partials` are directories
+    holding one row per file — and a filter over titles, names, paths,
+    descriptions and tags.
     Markdown entries render formatted, and a skill lists its supporting files.
+    A template one of your roots holds a copy of is marked `override` when
+    that copy is what a launch reads, and `default` when a copy exists but
+    okena's own is still what is sent — an empty file is a placeholder, not an
+    answer. A template only okena has is not marked.
+  - **Copies:** an opened template, partial or skill lists every root holding
+    a copy of it, in [layering order](#resolution) and ending in
+    `okena-defaults`, with the copy a launch actually reads highlighted and
+    labelled **applied**. Each one opens that root's copy. The list follows
+    the roots: reorder them and the highlight moves, delete the winning copy
+    and it moves to the next. A doc or an agent has no list — nothing
+    overrides them.
   - **Editing:** an opened file can be edited and saved with `cmd-s`
     (`ctrl-s`). A Markdown file toggles between **Edit** (the source) and
     **Preview**; any other file opens straight in the editor. A file with
@@ -237,6 +259,34 @@ used by OpenSpec stores, is described in
   - **In a project root:** committing is left to you.
   - **Agent:** it starts the agent you pick, else `harness.agent_command`;
     without an agent it refuses.
+
+### The Roots page
+
+`+` beside the sidebar's ROOTS heading opens the Roots page in the right-hand
+column, where a document would be — the same way **New** opens its form, so the
+roots you are changing stay on screen beside it. Knowledge and Specs share it,
+and it is also offered from either section's empty state, where there is no
+sidebar to put a `+` in.
+
+The page:
+
+- **Adds a root**, with the same three choices Settings offers — clone a
+  repository, add an existing folder, create a new one. It is the same form,
+  not a copy of it.
+- **Lists every root** with its kind, health, path and what it holds, problems
+  included, so a broken root is fixed from the same place it is listed.
+- **Removes one.** A store is unregistered and its checkout stays on disk. A
+  Specs folder root is dropped from `harness.specs.folders`. A project root has
+  neither, so it has no Remove: it belongs to its repository. `okena-defaults`
+  has none either — it is rewritten on every start.
+- **Reorders Knowledge roots by dragging**, which saves at once and changes
+  which copy of a template the next agent launch uses. The drop line sits along
+  the top of the row you are over, so a root lands where that line is.
+  `okena-defaults` is shown last without a handle. Specs roots are not layered,
+  so the Specs list has no order and no handles.
+
+### Elsewhere
+
 - **Settings → Knowledge** clones a repository, adds an existing folder or
   creates a new store — the same three choices Settings → Specs offers. It
   removes a store from the registry while leaving the checkout on disk. It also
@@ -372,8 +422,14 @@ release.
 ### Flows
 
 A **flow** is a point at which okena briefs an agent. A store overrides one by
-putting a file at `templates/<flow>.md`; its frontmatter should say
+putting a file at `templates/briefs/<flow>.md`; its frontmatter should say
 `for: <flow>`.
+
+The briefs used to sit flat at `templates/<flow>.md`, beside the partials.
+They moved into `briefs/` so the two kinds of file are told apart at a glance,
+and **there is no migration**: a copy left at the old path is read by nothing.
+okena sweeps the old paths out of its own `okena-defaults` store on each start;
+an override of your own stays where you put it and simply stops applying.
 
 | Flow | When | Variables |
 |---|---|---|
@@ -389,6 +445,7 @@ putting a file at `templates/<flow>.md`; its frontmatter should say
 | `knowledge-draft` | Adding to or updating a knowledge root | `request`, `path`, `what`, `commit_note`, `context` |
 | `doc-refine` | Changing one open spec, change file or knowledge file, without committing | `request`, `file`, `path`, `root_path`, `what`, `context` |
 | `agent-session` | A free-form session against a goal you typed. Break down and Refine send their rendered brief as the goal | `goal`, `projects`, `context` |
+| `extension-build` | Building an okena [extension](extensions.md) from a summary, started by **Build an extension** on the Extensions page. The summary is optional, so it is a block | `summary`, `projects`, `context` |
 | `project-scan` | Writing or updating a repository's [project map](project-map.md#scanning) | `project`, `path`, `map_root`, `skill`, `start` |
 | `projects-scan` | Finding [links](project-map.md#scanning-links) between repositories | `projects`, `skill` |
 
@@ -447,14 +504,36 @@ words come from the partials above.
 Per flow, per partial and per skill, okena reads every root it can see, in
 order, and uses the first one that has the file:
 
-1. Registered stores, in registry order.
-2. Project roots, by project name.
-3. okena's built-in, which is compiled in.
+1. Every root, in the order below.
+2. okena's built-in, which is compiled in.
 
-Nothing configures this — there is no setting naming one root as the source of
-briefs, and a file overrides a default simply by existing at the same path in a
-root that comes earlier. `okena-defaults` is never a layer: it holds a copy of
-the built-ins for reading, and the built-ins are step 3 already.
+Nothing configures *which* root briefs come from — there is no setting naming
+one as the source, and a file overrides a default simply by existing at the
+same path in a root that comes earlier. `okena-defaults` is never a layer: it
+holds a copy of the built-ins for reading, and the built-ins are step 2 already.
+
+#### The order
+
+Stores and project roots form **one ordered list**, saved as
+`harness.knowledge.order` — root keys (`store:<id>`, `path:<absolute path>`),
+top first:
+
+- A root the list names sits where the list puts it, so a project root can be
+  above a store or below it.
+- A root the list does not name — one added since the order was last saved —
+  goes to the **bottom**, keeping discovery order (registered stores in
+  registry order, then project roots by project name) among its peers. It
+  overrides nothing until it is moved up.
+- **`okena-defaults` is always last and is never in the list.** It cannot be
+  moved above the roots meant to override it.
+- The order is saved with your settings, so it survives a restart. Keys for
+  roots that are no longer discovered — unregistered, or a project that left
+  the workspace — drop out of it the next time it is saved. A root whose
+  checkout is merely missing keeps its place.
+
+Keys, not paths: the order is a preference, while the checkout paths stay
+machine state in the registry, so a synced `settings.json` means the same thing
+on every machine. Arrange the list on the [Roots page](#the-roots-page).
 
 A root can override one partial — say, `reporting` — without supplying any
 template, and one template without supplying any partial. An empty file is not
@@ -472,11 +551,14 @@ passed alongside the rendered brief, before it, and never replace it.
 
 ### The `okena-defaults` store
 
-okena's own templates, partials and skills (the
+okena's own briefs, partials and skills (the
 [`project-map` skill](project-map.md#the-project-map-skill)) are written to
 `<profile config dir>/knowledge/okena-defaults` and registered, so they are
 readable in Harness → Knowledge like any other store. They are the same bytes
-the built-ins render from.
+the built-ins render from, at the paths a root of your own would override them
+at: `templates/briefs/<flow>.md`, `templates/partials/<name>.md` and
+`skills/<name>/SKILL.md`. A file okena used to manage here and no longer does
+is removed on the next start, so the store never shows a brief no launch reads.
 
 - It is a knowledge root, not a git repository.
 - **It is read-only.** okena rewrites every file in it to match the build on
@@ -489,7 +571,9 @@ the built-ins render from.
   okena copies the file there at the same path, ready to edit, and
   [resolution](#resolution) then prefers it. A root that already has the file
   is opened rather than overwritten, and the picker says when a copy would lose
-  to a root that comes earlier. Deleting your copy restores okena's.
+  to a root that comes earlier. Deleting your copy restores okena's. Which
+  roots already hold a copy, and which one is applied, is the **Copies** list
+  above — on a default and on your own copy alike.
 
 ## Limits
 

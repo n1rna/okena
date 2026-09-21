@@ -949,6 +949,7 @@ infrastructure:
                 path: repo.clone(),
             }],
             stores: None,
+            order: Vec::new(),
         });
         let keys: Vec<_> = found.roots.iter().map(|r| r.key.clone()).collect();
         assert_eq!(keys, [report.root_key.expect("a root key")]);

@@ -508,6 +508,52 @@ impl Default for SidebarSettings {
     }
 }
 
+/// Default width of the Knowledge and Specs file sidebar, in pixels — the
+/// width both views were fixed at before it could be dragged.
+pub const DEFAULT_HARNESS_FILES_WIDTH: f32 = 280.0;
+
+fn default_harness_files_width() -> f32 {
+    DEFAULT_HARNESS_FILES_WIDTH
+}
+
+/// The file sidebar shared by the Knowledge and Specs views: whether it is
+/// open, and how wide.
+///
+/// One setting for both, not one each: they are the same sidebar over
+/// different roots, so a width you settled on in one is the width you want in
+/// the other. Width shares the main sidebar's bounds
+/// ([`MIN_SIDEBAR_WIDTH`]..[`MAX_SIDEBAR_WIDTH`]).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct HarnessFilesSettings {
+    /// Open by default: a fresh view must show the roots it is about, and a
+    /// document with nothing to open it from is a dead end.
+    #[serde(default = "default_true")]
+    pub is_open: bool,
+    #[serde(default = "default_harness_files_width")]
+    pub width: f32,
+}
+
+impl Default for HarnessFilesSettings {
+    fn default() -> Self {
+        Self {
+            is_open: true,
+            width: DEFAULT_HARNESS_FILES_WIDTH,
+        }
+    }
+}
+
+impl HarnessFilesSettings {
+    /// Hold a width inside the bounds the sidebar may take.
+    pub fn clamp_width(width: f32) -> f32 {
+        // A NaN out of a drag would otherwise pass `clamp` straight through
+        // and lay the sidebar out as nothing.
+        if width.is_nan() {
+            return DEFAULT_HARNESS_FILES_WIDTH;
+        }
+        width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+    }
+}
+
 /// Status bar appearance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusBarSettings {
@@ -568,6 +614,10 @@ pub struct AppSettings {
     /// Sidebar settings
     #[serde(default)]
     pub sidebar: SidebarSettings,
+
+    /// The Knowledge and Specs file sidebar's open state and width.
+    #[serde(default)]
+    pub harness_files: HarnessFilesSettings,
     /// Whether to show border around focused terminal
     #[serde(default = "default_show_focused_border")]
     pub show_focused_border: bool,
@@ -923,6 +973,7 @@ impl Default for AppSettings {
             theme_mode: ThemeMode::default(),
             active_session: None,
             sidebar: SidebarSettings::default(),
+            harness_files: HarnessFilesSettings::default(),
             harness: HarnessConfig::default(),
             github_enterprise_hosts: Vec::new(),
             gh_path: None,
@@ -1582,6 +1633,38 @@ mod tests {
     }
 
     #[test]
+    fn the_knowledge_root_order_survives_a_restart_and_stays_absent_until_set() {
+        // What "the order is saved with the user's settings and survives a
+        // restart" comes down to: the list round-trips through the file, and a
+        // user who never arranged anything gets no key written at all.
+        // The order belongs to a space now (QBL-430), so it round-trips there.
+        let mut arranged = AppSettings::default();
+        arranged.active_space_mut().knowledge.order =
+            vec!["path:/repo/.okena/knowledge".into(), "store:acme-eng".into()];
+        let written = serde_json::to_string(&arranged).expect("serialize");
+        let read_back: AppSettings = serde_json::from_str(&written).expect("deserialize");
+        assert_eq!(
+            read_back.active_space().knowledge.order,
+            ["path:/repo/.okena/knowledge", "store:acme-eng"],
+            "the order a restart reads back is the order that was saved"
+        );
+
+        let untouched = serde_json::to_string(&AppSettings::default()).expect("serialize");
+        assert!(
+            !untouched.contains("\"order\""),
+            "an order nobody has set should not be written: {untouched}"
+        );
+        // And a file written before this story still loads, with no order —
+        // folded into the Default space along with the rest of the block.
+        let mut old: AppSettings =
+            serde_json::from_str(r#"{"harness":{"knowledge":{"clone_dir":"~/k"}}}"#)
+                .expect("an older file still loads");
+        old.ensure_spaces();
+        assert!(old.active_space().knowledge.order.is_empty());
+        assert_eq!(old.active_space().knowledge.clone_dir.as_deref(), Some("~/k"));
+    }
+
+    #[test]
     fn a_settings_file_still_naming_a_prompts_store_loads_and_drops_it() {
         // QBL-415 removed `harness.knowledge.prompts`: briefs resolve across
         // every root now, so there is nothing to point at. A settings file
@@ -1744,6 +1827,48 @@ mod tests {
     fn a_space_naming_no_connection_still_reads_the_backend_everyone_had() {
         let space = SpaceData::new("client-a", "Client A");
         assert_eq!(space.connection_id(), "linear");
+    }
+
+    #[test]
+    fn a_settings_file_written_before_the_file_sidebar_opens_it_at_the_old_width() {
+        // Every settings file written before QBL-428 lacks the key, and the
+        // sidebar it describes was open and 280px wide. Loading one must not
+        // close the sidebar or resize it.
+        let loaded: AppSettings = serde_json::from_str("{}").expect("an old file still loads");
+        assert!(loaded.harness_files.is_open);
+        assert_eq!(loaded.harness_files.width, DEFAULT_HARNESS_FILES_WIDTH);
+    }
+
+    #[test]
+    fn the_file_sidebar_survives_a_save_and_a_load() {
+        let settings = AppSettings {
+            harness_files: HarnessFilesSettings {
+                is_open: false,
+                width: 412.0,
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let loaded: AppSettings = serde_json::from_str(&json).expect("deserialize");
+        assert!(!loaded.harness_files.is_open);
+        assert_eq!(loaded.harness_files.width, 412.0);
+    }
+
+    #[test]
+    fn a_file_sidebar_width_is_held_inside_its_bounds() {
+        assert_eq!(HarnessFilesSettings::clamp_width(300.0), 300.0);
+        assert_eq!(HarnessFilesSettings::clamp_width(0.0), MIN_SIDEBAR_WIDTH);
+        assert_eq!(HarnessFilesSettings::clamp_width(-40.0), MIN_SIDEBAR_WIDTH);
+        assert_eq!(
+            HarnessFilesSettings::clamp_width(9_000.0),
+            MAX_SIDEBAR_WIDTH
+        );
+        // A drag that divided by a zero width would otherwise lay the sidebar
+        // out as nothing, with no way back to a usable size.
+        assert_eq!(
+            HarnessFilesSettings::clamp_width(f32::NAN),
+            DEFAULT_HARNESS_FILES_WIDTH
+        );
     }
 
     #[test]

@@ -52,7 +52,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use context::{context_catalog, read_in_scope, session_scope};
-pub use knowledge::{execute_knowledge_action, knowledge_project_sources, knowledge_sources};
+pub use knowledge::{execute_knowledge_action, knowledge_project_sources};
 pub use project::{
     MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
 };
@@ -887,6 +887,7 @@ pub fn execute_action(
         ),
         ActionRequest::AgentStartSession {
             goal,
+            brief,
             name,
             root,
             project_ids,
@@ -900,6 +901,7 @@ pub fn execute_action(
             ws,
             window_id,
             goal,
+            brief,
             name,
             root,
             project_ids,
@@ -1027,6 +1029,7 @@ pub fn execute_action(
         | ActionRequest::KnowledgeFileDelete { .. }
         | ActionRequest::KnowledgeOverrides { .. }
         | ActionRequest::KnowledgeOverride { .. }
+        | ActionRequest::KnowledgeLayering
         | ActionRequest::KnowledgeStoreClone { .. }
         | ActionRequest::KnowledgeStoreRegister { .. }
         | ActionRequest::KnowledgeStoreUnregister { .. }
@@ -1036,7 +1039,7 @@ pub fn execute_action(
         | ActionRequest::KnowledgeStoreCommit { .. }
         | ActionRequest::KnowledgeStorePush { .. }) => knowledge::execute_knowledge_action(
             &action,
-            &knowledge::knowledge_sources(&ws.data.projects, settings),
+            &knowledge::knowledge_project_sources(&ws.data.projects, settings),
             settings,
         )
         .unwrap_or_else(|| ActionResult::Err("not a knowledge action".into())),

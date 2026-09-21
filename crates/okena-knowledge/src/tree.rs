@@ -39,6 +39,21 @@ pub fn count_entries(root: &Path) -> KnowledgeCounts {
     count(&walk(root, false))
 }
 
+/// The paths in `root` the layers resolve — templates, partials and skills —
+/// relative to it, sorted.
+///
+/// Read without opening a file, like [`count_entries`]: this answers "which
+/// roots hold a copy of each template" for every root at once, and the answer
+/// is a list of names, not of contents.
+pub fn layered_paths(root: &Path) -> Vec<String> {
+    walk(root, false)
+        .entries
+        .into_iter()
+        .map(|e| e.path)
+        .filter(|p| crate::prompts::is_layered(p))
+        .collect()
+}
+
 /// Whether `root` has any kind folder at all.
 pub fn has_kind_folder(root: &Path) -> bool {
     KnowledgeKind::all()
@@ -441,6 +456,30 @@ mod tests {
         // Counting without reading finds exactly what reading lists.
         assert_eq!(count_entries(root), counts);
         assert!(tree.status.is_empty());
+    }
+
+    #[test]
+    fn only_the_paths_the_layers_resolve_are_listed_as_layered() {
+        // What "which roots hold a copy of this template?" is asked over: the
+        // files resolution walks the roots for, and nothing else.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        write(&root.join("templates/briefs/task-start.md"), "Work on {key}");
+        write(&root.join("templates/partials/reporting.md"), "Report.");
+        write(&root.join("skills/release/SKILL.md"), "---\nname: release\n---\n");
+        write(&root.join("skills/release/checklist.md"), "x");
+        write(&root.join("docs/ci.md"), "# CI\n");
+        write(&root.join("agents/reviewer.md"), "x");
+
+        assert_eq!(
+            layered_paths(root),
+            [
+                "skills/release/SKILL.md",
+                "templates/briefs/task-start.md",
+                "templates/partials/reporting.md",
+            ]
+        );
+        assert!(layered_paths(&root.join("nowhere")).is_empty());
     }
 
     #[test]

@@ -322,20 +322,22 @@ Knowledge stores are git repositories of engineering docs, skills, agents and
 prompt templates; [`knowledge.md`](knowledge.md) describes their layout and
 behaviour. The stores on a machine are listed in okena's registry,
 `<profile config dir>/knowledge/stores.yaml`, not in `settings.json`: checkout
-paths are machine state. Settings only shape discovery and cloning.
+paths are machine state. Settings shape discovery and cloning, and hold the one
+order the roots layer in.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `spaces[].knowledge.projects` | bool | `true` | Find knowledge in **that space's** projects: the stores a repository follows in `.okena/knowledge.yaml`, and its own `.okena/knowledge/` (or `root:`) folders. Worktrees and agent sessions are skipped |
-| `spaces[].knowledge.stores` | string[] | — | The registered stores this space follows, by id, in the order they are shown. Unset is every registered store, which is what Default keeps; a newly added space starts with an empty list, so it follows none. An id naming a store that is no longer registered is skipped |
+| `spaces[].knowledge.stores` | string[] | — | The registered stores this space follows, by id. Unset is every registered store, which is what Default keeps; a newly added space starts with an empty list, so it follows none. An id naming a store that is no longer registered is skipped |
+| `spaces[].knowledge.order` | list of strings | `[]` | The order this space's knowledge roots layer in, as root keys (`store:<id>`, `path:<absolute path>`), top first. A root not listed goes to the bottom; `okena-defaults` is always last and never listed; keys for roots that are gone drop out ([the order](knowledge.md#the-order)). Per space, so two spaces may follow the same store and layer it differently |
 | `spaces[].knowledge.clone_dir` | string | `~/knowledge` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
 
 Like the Specs keys, these live on a **space**. A `harness.knowledge` block in an
 older `settings.json` is read once into the Default space and dropped on the next
 save.
 
-There is no key naming one root as the source of launch briefs. Templates,
-partials and skills resolve across every root okena can see, in discovery order
+There is no key naming one root as the *source* of launch briefs. Templates,
+partials and skills resolve across every root okena can see, in the order above
 ([resolution](knowledge.md#resolution)); a `harness.knowledge.prompts` left in
 an older `settings.json` is ignored and dropped on the next save.
 

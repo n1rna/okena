@@ -302,6 +302,7 @@ impl HarnessPane {
             }),
         )
         .brief(crate::views::launch_briefs::brief_for(&self.client, "knowledge-draft", cx))
+        .on_open_brief(self.open_brief())
         .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
             this.start_knowledge_draft(launch.command.to_string(), launch.model.clone(), cx);
         }))

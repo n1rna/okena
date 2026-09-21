@@ -7,7 +7,10 @@
 //! which owns those files and takes the CLI's registry lock.
 
 use super::SettingsPanel;
-use super::components::{AddMode, init_git_toggle, mode_chip, hook_input_row, section_container, section_header};
+use super::components::{hook_input_row, section_container, section_header};
+use crate::views::components::add_root_form::{
+    AddMode, AddRootChrome, AddRootForm, RootKind, describe, render_add_root,
+};
 use crate::settings::settings_entity;
 use crate::theme::{ThemeColors, theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_ms};
@@ -37,16 +40,9 @@ pub(super) struct SpecsPage {
     busy: bool,
     error: Option<String>,
     notice: Option<String>,
-    mode: AddMode,
-    init_git: bool,
+    /// The add-a-root form, shared with the Roots page (QBL-429).
+    add: AddRootForm,
     folder_input: Entity<SimpleInputState>,
-    clone_url_input: Entity<SimpleInputState>,
-    clone_path_input: Entity<SimpleInputState>,
-    register_path_input: Entity<SimpleInputState>,
-    register_id_input: Entity<SimpleInputState>,
-    setup_id_input: Entity<SimpleInputState>,
-    setup_path_input: Entity<SimpleInputState>,
-    setup_remote_input: Entity<SimpleInputState>,
     clone_dir_input: Entity<SimpleInputState>,
     data_dir_input: Entity<SimpleInputState>,
     config_dir_input: Entity<SimpleInputState>,
@@ -110,16 +106,8 @@ impl SpecsPage {
             busy: false,
             error: None,
             notice: None,
-            mode: AddMode::Clone,
-            init_git: true,
+            add: AddRootForm::new(RootKind::Specs, cx),
             folder_input: text_input(cx, "e.g. ~/p/specs", None),
-            clone_url_input: text_input(cx, "e.g. git@github.com:acme/team-plans.git", None),
-            clone_path_input: text_input(cx, "Leave blank to use the clone folder below", None),
-            register_path_input: text_input(cx, "e.g. ~/openspec/team-plans", None),
-            register_id_input: text_input(cx, "Taken from the store's identity", None),
-            setup_id_input: text_input(cx, "e.g. team-plans", None),
-            setup_path_input: text_input(cx, "e.g. ~/openspec/team-plans", None),
-            setup_remote_input: text_input(cx, "e.g. git@github.com:acme/team-plans.git", None),
             clone_dir_input,
             data_dir_input,
             config_dir_input,
@@ -241,32 +229,6 @@ fn reference(r: &SpecReference, t: &ThemeColors, cx: &App) -> AnyElement {
     }
 }
 
-pub(super) fn labeled_input(
-    label: &str,
-    hint: &str,
-    input: &Entity<SimpleInputState>,
-    t: &ThemeColors,
-    cx: &App,
-) -> AnyElement {
-    v_flex()
-        .gap(px(4.0))
-        .child(
-            div()
-                .text_size(ui_text_ms(cx))
-                .text_color(rgb(t.text_secondary))
-                .child(label.to_string()),
-        )
-        .child(
-            okena_ui::input::input_container(t, None)
-                .w_full()
-                .px(px(8.0))
-                .py(px(5.0))
-                .child(SimpleInput::new(input).text_size(ui_text(13.0, cx))),
-        )
-        .child(muted(hint.to_string(), t, cx))
-        .into_any_element()
-}
-
 impl SettingsPanel {
     fn discovery_fingerprint(cx: &App) -> String {
         let s = &settings_entity(cx).read(cx).settings;
@@ -328,7 +290,7 @@ impl SettingsPanel {
     fn run_spec_action(
         &mut self,
         action: ActionRequest,
-        describe: fn(&serde_json::Value) -> String,
+        describe: impl Fn(&serde_json::Value) -> String + 'static,
         cx: &mut Context<Self>,
     ) {
         if self.specs.busy {
@@ -353,15 +315,7 @@ impl SettingsPanel {
                         Ok(v) => {
                             this.specs.notice =
                                 Some(describe(&v.unwrap_or(serde_json::Value::Null)));
-                            for input in [
-                                &this.specs.register_path_input,
-                                &this.specs.register_id_input,
-                                &this.specs.setup_id_input,
-                                &this.specs.setup_path_input,
-                                &this.specs.setup_remote_input,
-                            ] {
-                                input.update(cx, |i, cx| i.set_value("", cx));
-                            }
+                            this.specs.add.clear(cx);
                             this.refresh_spec_stores(cx);
                         }
                         Err(e) => this.specs.error = Some(e),
@@ -373,36 +327,22 @@ impl SettingsPanel {
         .detach();
     }
 
-    fn clone_spec_store(&mut self, cx: &mut Context<Self>) {
-        let value =
-            |input: &Entity<SimpleInputState>, cx: &App| input.read(cx).value().trim().to_string();
-        let url = value(&self.specs.clone_url_input, cx);
-        let path = value(&self.specs.clone_path_input, cx);
-        if url.is_empty() {
-            self.specs.error = Some("Enter the repository URL to clone.".into());
-            cx.notify();
-            return;
+    /// Send whatever the shared form is asking for, or say what is missing.
+    fn submit_add_spec_root(&mut self, cx: &mut Context<Self>) {
+        let mode = self.specs.add.mode;
+        match self.specs.add.request(cx) {
+            Ok(action) => {
+                self.run_spec_action(action, move |v| describe(RootKind::Specs, mode, v), cx)
+            }
+            Err(missing) => {
+                self.specs.error = Some(missing);
+                cx.notify();
+            }
         }
-        self.run_spec_action(
-            ActionRequest::SpecStoreClone {
-                url,
-                path: (!path.is_empty()).then_some(path),
-            },
-            |v| {
-                let id = v["id"].as_str().unwrap_or("store");
-                let root = v["root"].as_str().unwrap_or("the destination");
-                if v["metadata_created"].as_bool() == Some(true) {
-                    format!(
-                        "Cloned '{id}' into {root}. okena wrote .openspec-store/store.yaml — commit it so every clone carries the same id."
-                    )
-                } else {
-                    format!("Cloned store '{id}' into {root}.")
-                }
-            },
-            cx,
-        );
     }
 
+    /// Register the checkout at `path`, from the shared form or from the
+    /// "Register" button on a root okena found but nobody has registered.
     fn register_spec_store(&mut self, path: String, id: Option<String>, cx: &mut Context<Self>) {
         if path.trim().is_empty() {
             self.specs.error = Some("Choose the store checkout's folder.".into());
@@ -411,52 +351,7 @@ impl SettingsPanel {
         }
         self.run_spec_action(
             ActionRequest::SpecStoreRegister { path, id },
-            |v| {
-                let id = v["id"].as_str().unwrap_or("store");
-                if v["metadata_created"].as_bool() == Some(true) {
-                    format!(
-                        "Registered '{id}'. okena wrote .openspec-store/store.yaml — commit it so every clone carries the same id."
-                    )
-                } else if v["already_registered"].as_bool() == Some(true) {
-                    format!("'{id}' was already registered at that folder.")
-                } else {
-                    format!("Registered store '{id}'.")
-                }
-            },
-            cx,
-        );
-    }
-
-    fn create_spec_store(&mut self, cx: &mut Context<Self>) {
-        let value =
-            |input: &Entity<SimpleInputState>, cx: &App| input.read(cx).value().trim().to_string();
-        let id = value(&self.specs.setup_id_input, cx);
-        let path = value(&self.specs.setup_path_input, cx);
-        let remote = value(&self.specs.setup_remote_input, cx);
-        if id.is_empty() || path.is_empty() {
-            self.specs.error = Some("A new store needs an id and a folder.".into());
-            cx.notify();
-            return;
-        }
-        self.run_spec_action(
-            ActionRequest::SpecStoreSetup {
-                id,
-                path,
-                remote: (!remote.is_empty()).then_some(remote),
-                init_git: self.specs.init_git,
-            },
-            |v| {
-                let committed = if v["committed"].as_bool() == Some(true) {
-                    " with an initial commit"
-                } else {
-                    ""
-                };
-                format!(
-                    "Created store '{}' at {}{committed}. Push it where teammates can clone it; each registers their own checkout.",
-                    v["id"].as_str().unwrap_or("store"),
-                    v["root"].as_str().unwrap_or("")
-                )
-            },
+            |v| describe(RootKind::Specs, AddMode::Register, v),
             cx,
         );
     }
@@ -752,135 +647,27 @@ impl SettingsPanel {
             .into_any_element()
     }
 
-    fn render_spec_mode_chip(&self, mode: AddMode, cx: &mut Context<Self>) -> AnyElement {
-        let t = theme(cx);
-        mode_chip(
-            format!("specs-mode-{mode:?}"),
-            mode.label(),
-            self.specs.mode == mode,
-            &t,
-            cx,
-            cx.listener(move |this, _, _window, cx| {
-                this.specs.mode = mode;
-                this.specs.error = None;
-                cx.notify();
-            }),
-        )
-    }
-
     fn render_add_spec_store(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        let busy = self.specs.busy;
-        let tabs = h_flex()
-            .gap(px(6.0))
-            .flex_wrap()
-            .children(AddMode::ALL.map(|m| self.render_spec_mode_chip(m, cx)));
-
-        let form = match self.specs.mode {
-            AddMode::Clone => v_flex()
-                .gap(px(10.0))
-                .child(labeled_input(
-                    "Repository URL",
-                    "Git runs without prompts, so credentials come from an SSH agent or credential helper.",
-                    &self.specs.clone_url_input,
-                    &t,
-                    cx,
-                ))
-                .child(labeled_input(
-                    "Destination (optional)",
-                    "",
-                    &self.specs.clone_path_input,
-                    &t,
-                    cx,
-                ))
-                .child(h_flex().child(self.spec_button(
-                    "specs-clone-submit".into(),
-                    if busy { "Cloning…" } else { "Clone" },
-                    true,
-                    |this, cx| this.clone_spec_store(cx),
-                    cx,
-                ))),
-            AddMode::Register => v_flex()
-                .gap(px(10.0))
-                .child(labeled_input(
-                    "Folder",
-                    "The top of the checkout, with an openspec/ tree in it.",
-                    &self.specs.register_path_input,
-                    &t,
-                    cx,
-                ))
-                .child(labeled_input(
-                    "Store id (optional)",
-                    "Only for a plain OpenSpec root; a store brings its own id.",
-                    &self.specs.register_id_input,
-                    &t,
-                    cx,
-                ))
-                .child(h_flex().child(self.spec_button(
-                    "specs-register-submit".into(),
-                    if busy { "Adding…" } else { "Add" },
-                    true,
-                    |this, cx| {
-                        let path = this.specs.register_path_input.read(cx).value().trim().to_string();
-                        let id = this.specs.register_id_input.read(cx).value().trim().to_string();
-                        this.register_spec_store(path, (!id.is_empty()).then_some(id), cx);
-                    },
-                    cx,
-                ))),
-            AddMode::Create => {
-                let init_git = self.specs.init_git;
-                v_flex()
-                    .gap(px(10.0))
-                    .child(labeled_input(
-                        "Store id",
-                        "Kebab-case. Repos point at it with `store: team-plans` in openspec/config.yaml.",
-                        &self.specs.setup_id_input,
-                        &t,
-                        cx,
-                    ))
-                    .child(labeled_input(
-                        "Folder",
-                        "An empty folder outside any other git repository.",
-                        &self.specs.setup_path_input,
-                        &t,
-                        cx,
-                    ))
-                    .child(labeled_input(
-                        "Remote (optional)",
-                        "",
-                        &self.specs.setup_remote_input,
-                        &t,
-                        cx,
-                    ))
-                    .child(h_flex().child(init_git_toggle(
-                        "specs-init-git",
-                        init_git,
-                        &t,
-                        cx,
-                        cx.listener(|this, _, _window, cx| {
-                            this.specs.init_git = !this.specs.init_git;
-                            cx.notify();
-                        }),
-                    )))
-                    .child(h_flex().child(self.spec_button(
-                        "specs-create-submit".into(),
-                        if busy { "Creating…" } else { "Create store" },
-                        true,
-                        |this, cx| this.create_spec_store(cx),
-                        cx,
-                    )))
-            }
-        };
-
         section_container(&t)
-            .child(
-                v_flex()
-                    .px(px(12.0))
-                    .py(px(10.0))
-                    .gap(px(12.0))
-                    .child(tabs)
-                    .child(form),
-            )
+            .child(render_add_root(
+                &self.specs.add,
+                AddRootChrome {
+                    id_prefix: "specs",
+                    busy: self.specs.busy,
+                },
+                cx,
+                cx.listener(|this, mode: &AddMode, _window, cx| {
+                    this.specs.add.mode = *mode;
+                    this.specs.error = None;
+                    cx.notify();
+                }),
+                cx.listener(|this, _, _window, cx| {
+                    this.specs.add.init_git = !this.specs.add.init_git;
+                    cx.notify();
+                }),
+                cx.listener(|this, _, _window, cx| this.submit_add_spec_root(cx)),
+            ))
             .into_any_element()
     }
 

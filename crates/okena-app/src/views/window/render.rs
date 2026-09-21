@@ -211,12 +211,14 @@ impl WindowView {
         let workspace = self.workspace.clone();
         let focus_manager = self.focus_manager.clone();
         let window_id = self.window_id;
+        let terminals = self.terminals.clone();
         let canvas = cx.new(|cx| {
             crate::views::project_canvas::ProjectCanvas::new(
                 client,
                 workspace,
                 focus_manager,
                 window_id,
+                terminals,
                 cx,
             )
         });

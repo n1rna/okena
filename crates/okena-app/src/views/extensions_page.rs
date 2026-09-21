@@ -11,12 +11,16 @@ use crate::theme::theme;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
+use okena_core::harness::SessionBrief;
 use okena_extensions::ExtensionRegistry;
+use okena_ui::button::button_primary;
 use okena_ui::theme::with_alpha;
 use okena_ui::toggle::toggle_switch;
 use okena_ui::tokens::{ui_text, ui_text_ms, ui_text_sm};
 use okena_views_extensions::{ExtensionsManager, card, heading, icon_tile};
 use okena_workspace::extensions_state::extensions_entity;
+use okena_workspace::request_broker::RequestBroker;
+use okena_workspace::requests::{NewAgentPrefill, OverlayRequest};
 use std::collections::HashMap;
 
 /// How wide the page's column grows; wider than this, lines get long to read.
@@ -24,6 +28,8 @@ const COLUMN_WIDTH: f32 = 860.0;
 
 pub struct ExtensionsPage {
     manager: Entity<ExtensionsManager>,
+    /// Where "Build an extension" sends its launcher request.
+    broker: Entity<RequestBroker>,
     /// The built-in extension whose settings are open, by id.
     expanded: Option<&'static str>,
     /// Built-in extensions' settings views, made on first open and kept, so an
@@ -33,7 +39,11 @@ pub struct ExtensionsPage {
 
 impl ExtensionsPage {
     /// `open` shows that extension's details, by key.
-    pub fn new(open: Option<String>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        open: Option<String>,
+        broker: Entity<RequestBroker>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let manager = cx.new(|cx| {
             let mut manager = ExtensionsManager::new(open, cx);
             // The page pads its own column.
@@ -48,9 +58,27 @@ impl ExtensionsPage {
         }
         Self {
             manager,
+            broker,
             expanded: None,
             settings_views: HashMap::new(),
         }
+    }
+
+    /// Open the agent launcher on the extension-build brief.
+    ///
+    /// Writing an extension is a doc-reading job — the reference, the
+    /// template, the `wasm32-wasip2` target — so the page hands it to an
+    /// agent rather than to the person. Everything but the summary is the
+    /// launcher's own: which agent, which model, where it works.
+    fn build_an_extension(&mut self, cx: &mut Context<Self>) {
+        let prefill = NewAgentPrefill {
+            heading: Some("Build an extension".to_string()),
+            brief: Some(SessionBrief::ExtensionBuild),
+            ..Default::default()
+        };
+        self.broker.update(cx, |broker, cx| {
+            broker.push_overlay_request(OverlayRequest::NewAgentDialog(Box::new(prefill)), cx);
+        });
     }
 
     /// Show the extension `key` with its details open.
@@ -78,7 +106,7 @@ impl ExtensionsPage {
         cx.notify();
     }
 
-    fn render_header(&self, built_in_on: usize, cx: &App) -> impl IntoElement {
+    fn render_header(&self, built_in_on: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let (installed, running) = extensions_entity(cx)
             .map(|e| {
@@ -148,6 +176,12 @@ impl ExtensionsPage {
                     .gap(px(20.0))
                     .child(stat(built_in_on + running, "on"))
                     .child(stat(installed, "from git")),
+            )
+            .child(
+                button_primary("ext-build-one", "Build an extension", &t)
+                    .debug_selector(|| "ext-build".into())
+                    .flex_shrink_0()
+                    .on_click(cx.listener(|this, _, _, cx| this.build_an_extension(cx))),
             )
     }
 
@@ -357,9 +391,16 @@ mod tests {
     use crate::theme::{AppTheme, GlobalTheme, ThemeMode};
     use gpui::AppContext as _;
     use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
+    use okena_workspace::request_broker::RequestBroker;
     use std::sync::Arc;
 
-    fn page(cx: &mut TestAppContext) -> (Entity<ExtensionsPage>, &mut VisualTestContext) {
+    fn page(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<ExtensionsPage>,
+        Entity<RequestBroker>,
+        &mut VisualTestContext,
+    ) {
         cx.update(|cx| {
             gpui_component::init(cx);
             let theme = cx.new(|_| AppTheme::new(ThemeMode::Dark, true));
@@ -411,10 +452,12 @@ mod tests {
                 .collect();
             extensions.update(cx, |state, cx| state.replace(list, cx));
         });
-        let (page, vcx) = cx.add_window_view(|_, cx| ExtensionsPage::new(None, cx));
+        let broker = cx.update(|cx| cx.new(|_| RequestBroker::new()));
+        let for_page = broker.clone();
+        let (page, vcx) = cx.add_window_view(|_, cx| ExtensionsPage::new(None, for_page, cx));
         vcx.simulate_resize(size(px(760.0), px(650.0)));
         vcx.run_until_parked();
-        (page, vcx)
+        (page, broker, vcx)
     }
 
     /// A settings view of a known height, to measure an open row by.
@@ -430,11 +473,39 @@ mod tests {
         }
     }
 
+    /// The header's one action: it opens the agent launcher on the
+    /// extension-build brief, with nothing else filled in — the person picks
+    /// the agent, the root and what it should do.
+    #[gpui::test]
+    fn build_an_extension_opens_the_launcher_for_that_brief(cx: &mut TestAppContext) {
+        use okena_workspace::requests::OverlayRequest;
+        let (_page, broker, vcx) = page(cx);
+        let button = vcx.debug_bounds("ext-build").expect("the header's button");
+        vcx.simulate_click(button.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+
+        let requests = vcx.update(|_, cx| broker.update(cx, |b, _| b.drain_overlay_requests()));
+        let prefill = match requests.as_slice() {
+            [OverlayRequest::NewAgentDialog(prefill)] => prefill.clone(),
+            other => panic!("expected one new-agent request, got {other:?}"),
+        };
+        assert_eq!(
+            prefill.brief,
+            Some(okena_core::harness::SessionBrief::ExtensionBuild)
+        );
+        assert_eq!(prefill.heading.as_deref(), Some("Build an extension"));
+        // Nothing prefilled: the summary, the root and the projects are the
+        // person's to fill in.
+        assert!(prefill.goal.is_empty());
+        assert!(prefill.root.is_empty());
+        assert!(prefill.project_ids.is_empty());
+    }
+
     /// The installed list follows the built-in one by the column's gap, not a
     /// screen further down — closed, and with a row's settings open.
     #[gpui::test]
     fn the_sections_follow_each_other(cx: &mut TestAppContext) {
-        let (page, vcx) = page(cx);
+        let (page, _broker, vcx) = page(cx);
         let gap = |vcx: &mut VisualTestContext| {
             let built_in = vcx.debug_bounds("ext-builtin").expect("built-in section");
             let manager = vcx.debug_bounds("ext-manager").expect("installed section");

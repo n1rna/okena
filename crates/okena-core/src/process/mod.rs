@@ -15,8 +15,8 @@
 mod bus;
 
 pub use bus::{
-    CommandBus, CommandCancellation, CommandHandle, CommandSpec, Lane, StderrSink, current_lane,
-    with_lane,
+    CommandBus, CommandCancellation, CommandHandle, CommandSpec, Lane, ProcessTree, StderrSink,
+    current_lane, with_lane,
 };
 
 /// Create a [`std::process::Command`] that does **not** flash a console

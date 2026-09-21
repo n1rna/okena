@@ -1704,7 +1704,15 @@ pub enum ActionRequest {
     AgentStartSession {
         /// The user's own description of what the agent should do. Becomes its
         /// opening prompt.
+        ///
+        /// Required for a free-form session, which is nothing without it.
+        /// Optional under a `brief`, whose flow says the standing part.
         goal: String,
+        /// The standing job this session is for, which picks the flow its
+        /// brief comes from. `None` is a free-form session, briefed by
+        /// `agent-session` against `goal` alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        brief: Option<crate::harness::SessionBrief>,
         /// Short name for the session. Empty derives one from the goal.
         #[serde(default)]
         name: String,
@@ -2092,6 +2100,19 @@ pub enum ActionRequest {
     KnowledgeOverrides {
         path: String,
     },
+    /// Which roots hold a copy of each layered file, and which copy is applied.
+    ///
+    /// The whole picture at once rather than one file at a time, because both
+    /// things that need it need it for a list: a template's detail page names
+    /// every root holding a copy, and the sidebar marks each template that has
+    /// an override (QBL-426). Replies with `{ roots: [{ key, name, kind,
+    /// builtin }], paths: { "<path in a root>": { copies: [key…], applied } }
+    /// }`. `roots` is layering order — every healthy root, okena's own last,
+    /// since it is not a layer but the compiled-in fallback made readable.
+    /// `copies` are the roots where the file exists, in that order, and
+    /// `applied` is the first one a launch would actually read, which is not
+    /// the first copy when an earlier one is empty.
+    KnowledgeLayering,
     /// Copy a file from okena's defaults into `root`, at the same path.
     ///
     /// How a default is changed: the copy is yours to edit, and resolution
@@ -3219,6 +3240,7 @@ mod tests {
             },
             ActionRequest::AgentStartSession {
                 goal: "g".into(),
+                brief: None,
                 name: String::new(),
                 root: String::new(),
                 project_ids: vec!["p1".into()],

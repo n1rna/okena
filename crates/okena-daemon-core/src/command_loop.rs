@@ -3167,6 +3167,7 @@ pub async fn daemon_command_loop(
                 | ActionRequest::KnowledgeFileDelete { .. }
                 | ActionRequest::KnowledgeOverrides { .. }
                 | ActionRequest::KnowledgeOverride { .. }
+                | ActionRequest::KnowledgeLayering
                 | ActionRequest::KnowledgeStoreClone { .. }
                 | ActionRequest::KnowledgeStoreRegister { .. }
                 | ActionRequest::KnowledgeStoreUnregister { .. }
@@ -3177,10 +3178,11 @@ pub async fn daemon_command_loop(
                 | ActionRequest::KnowledgeStorePush { .. }),
             ) => {
                 let app_settings = settings.lock().clone();
-                let sources = okena_app_core::workspace::actions::execute::knowledge_sources(
-                    &workspace.lock().data.projects,
-                    &app_settings,
-                );
+                let sources =
+                    okena_app_core::workspace::actions::execute::knowledge_project_sources(
+                        &workspace.lock().data.projects,
+                        &app_settings,
+                    );
                 let worker_runtime = runtime.clone();
                 let _task = runtime.spawn(async move {
                     let result = worker_runtime

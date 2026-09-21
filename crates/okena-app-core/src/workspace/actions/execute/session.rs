@@ -310,7 +310,11 @@ pub fn prepare_workspace_replacement(
             prepared_hooks.push(prepared);
         }
     }
-    ordinary.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+    // Launches stay in the order they were collected — projects in order, and
+    // within each project the panes in layout order. Sorting by `terminal_id`
+    // looks like it buys determinism, but a pane that has never run yet is
+    // given a fresh UUID just above, so the key is random: the same workspace
+    // would publish and spawn its terminals in a different order every load.
     PreparedWorkspaceReplacement {
         data,
         ordinary,
