@@ -58,17 +58,16 @@ pub struct ProjectInfoPanel {
     /// The daemon's configured agent, drawn as the launcher's default.
     default_agent: Option<String>,
     /// A scan on its way, so a double click does not start two.
+    ///
+    /// Nothing is said when one starts: its session is listed by the launcher
+    /// that started it, like every other agent. A start that fails is a toast,
+    /// where the rest of okena puts what went wrong.
     scan_starting: bool,
-    scan_error: Option<String>,
-    /// What the last scan start did.
-    scan_notice: Option<String>,
     /// Links across every scanned project, as the daemon last matched them.
     links: Option<ProjectLinks>,
     links_reading: bool,
     /// A links scan on its way.
     links_starting: bool,
-    links_error: Option<String>,
-    links_notice: Option<String>,
     /// Everything the project owns, behind the MAP section's button.
     menu: Entity<ChipSearch>,
     /// What the menu lists, rebuilt when the context or the links change.
@@ -127,13 +126,9 @@ impl ProjectInfoPanel {
             map_reading: false,
             default_agent: None,
             scan_starting: false,
-            scan_error: None,
-            scan_notice: None,
             links: None,
             links_reading: false,
             links_starting: false,
-            links_error: None,
-            links_notice: None,
             menu,
             entries: Vec::new(),
             context_items: Vec::new(),
@@ -350,6 +345,16 @@ impl ProjectInfoPanel {
         self.push_workbench(request, cx);
     }
 
+    /// Open a launcher's brief: its own file in Harness → Knowledge.
+    pub(super) fn open_brief(
+        &self,
+    ) -> impl Fn(&SharedString, &SharedString, &mut Window, &mut App) + 'static + use<> {
+        let broker = self.request_broker.clone();
+        move |root, path, _window, cx| {
+            crate::views::launch_briefs::open_brief(&broker, root, path, cx);
+        }
+    }
+
     /// Open the project's `project-map.yaml`, invalid or not.
     fn open_manifest(&mut self, cx: &mut Context<Self>) {
         let Some(root_key) = self.map.as_ref().and_then(|m| m.root_key.clone()) else {
@@ -490,8 +495,6 @@ impl ProjectInfoPanel {
             return;
         }
         self.links_starting = true;
-        self.links_error = None;
-        self.links_notice = None;
         cx.notify();
 
         let client = self.client.clone();
@@ -509,16 +512,11 @@ impl ProjectInfoPanel {
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     this.links_starting = false;
-                    match result {
-                        Ok(v) => {
-                            let name = v
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("the session");
-                            this.links_notice =
-                                Some(format!("Started {name} — it is in the sidebar."));
-                        }
-                        Err(e) => this.links_error = Some(e),
+                    if let Err(e) = result {
+                        crate::views::panels::toast::ToastManager::error(
+                            format!("Could not scan for links: {e}"),
+                            cx,
+                        );
                     }
                     cx.notify();
                 });
@@ -560,8 +558,6 @@ impl ProjectInfoPanel {
             return;
         }
         self.scan_starting = true;
-        self.scan_error = None;
-        self.scan_notice = None;
         cx.notify();
 
         let client = self.client.clone();
@@ -580,16 +576,11 @@ impl ProjectInfoPanel {
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     this.scan_starting = false;
-                    match result {
-                        Ok(v) => {
-                            let name = v
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("the session");
-                            this.scan_notice =
-                                Some(format!("Started {name} — it is in the sidebar."));
-                        }
-                        Err(e) => this.scan_error = Some(e),
+                    if let Err(e) = result {
+                        crate::views::panels::toast::ToastManager::error(
+                            format!("Could not scan the project: {e}"),
+                            cx,
+                        );
                     }
                     cx.notify();
                 });

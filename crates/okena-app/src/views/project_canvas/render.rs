@@ -160,6 +160,38 @@ impl Render for ProjectCanvas {
 }
 
 impl ProjectCanvas {
+    /// The link scans started over the selected projects, so an agent looking
+    /// for links is shown where it was asked for.
+    fn link_sessions(&self, cx: &App) -> Vec<okena_ui::agent_launcher::LauncherSession> {
+        let t = theme(cx);
+        let workspace = self.workspace.read(cx);
+        let names: Vec<String> = self
+            .selected
+            .iter()
+            .filter_map(|id| workspace.project(id).map(|p| p.name.clone()))
+            .collect();
+        workspace
+            .projects()
+            .iter()
+            .filter(|p| {
+                p.custom_session
+                    .as_deref()
+                    .is_some_and(|label| label.starts_with("Link "))
+                    && p.project_scan.as_deref().is_some_and(|scanned| {
+                        scanned.split(", ").any(|n| names.iter().any(|name| name == n))
+                    })
+            })
+            .filter_map(|p| {
+                crate::views::agent_session::AgentSessionInfo::collect(
+                    workspace,
+                    &self.terminals,
+                    &p.id,
+                )
+            })
+            .map(|info| crate::views::agent_session::launcher_session(&info, &t))
+            .collect()
+    }
+
     /// One project's card: its name and map status, then its areas with the
     /// concepts in each — scaled with the canvas.
     fn render_card(
@@ -354,12 +386,18 @@ impl ProjectCanvas {
                 "canvas-links-launcher",
                 format!("Scan links across {} projects", self.selected.len()),
             )
-            .subtitle("One agent looks for links between the selected projects and writes each into both maps.")
             .options(crate::views::agent_session::launch_options(
                 self.default_agent.as_deref(),
                 t,
             ))
             .preferred(self.default_agent.clone())
+            .sessions(self.link_sessions(cx))
+            // Nothing on disk to collide over, so a finished scan must not
+            // hide the way to run another.
+            .launch_alongside_sessions()
+            .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
+                this.open_project(id.as_ref(), cx);
+            }))
             .busy(self.links_starting.then_some("Starting…"))
             .brief(crate::views::launch_briefs::brief_for(&self.client, "projects-scan", cx))
             .on_launch(cx.listener(
@@ -374,17 +412,6 @@ impl ProjectCanvas {
                 t,
                 cx,
             ));
-        }
-        if let Some(notice) = &self.notice {
-            panel = panel.child(muted(notice.clone(), t, cx));
-        }
-        if let Some(error) = &self.error {
-            panel = panel.child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.warning))
-                    .child(error.clone()),
-            );
         }
         panel.into_any_element()
     }

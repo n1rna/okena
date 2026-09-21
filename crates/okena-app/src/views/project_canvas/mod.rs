@@ -59,6 +59,8 @@ pub struct ProjectCanvas {
     workspace: Entity<Workspace>,
     focus_manager: Entity<FocusManager>,
     window_id: WindowId,
+    /// Read for whether the link sessions it started are still running.
+    terminals: okena_terminal::TerminalsRegistry,
     /// The projects on the canvas: client ids, in the overview's order.
     projects: Vec<String>,
     /// Each project's map as last read, by client id. A project the daemon
@@ -75,8 +77,6 @@ pub struct ProjectCanvas {
     selected: BTreeSet<String>,
     default_agent: Option<String>,
     links_starting: bool,
-    notice: Option<String>,
-    error: Option<String>,
     save_view: Option<Task<()>>,
 }
 
@@ -86,6 +86,7 @@ impl ProjectCanvas {
         workspace: Entity<Workspace>,
         focus_manager: Entity<FocusManager>,
         window_id: WindowId,
+        terminals: okena_terminal::TerminalsRegistry,
         cx: &mut Context<Self>,
     ) -> Self {
         let canvas = Self {
@@ -93,6 +94,7 @@ impl ProjectCanvas {
             workspace,
             focus_manager,
             window_id,
+            terminals,
             projects: Vec::new(),
             maps: HashMap::new(),
             links: None,
@@ -103,8 +105,6 @@ impl ProjectCanvas {
             selected: BTreeSet::new(),
             default_agent: None,
             links_starting: false,
-            notice: None,
-            error: None,
             save_view: None,
         };
         canvas.refresh_default_agent(cx);
@@ -474,8 +474,6 @@ impl ProjectCanvas {
             return;
         }
         self.links_starting = true;
-        self.notice = None;
-        self.error = None;
         cx.notify();
 
         let client = self.client.clone();
@@ -493,15 +491,13 @@ impl ProjectCanvas {
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     this.links_starting = false;
-                    match result {
-                        Ok(v) => {
-                            let name = v
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("the session");
-                            this.notice = Some(format!("Started {name} — it is in the sidebar."));
-                        }
-                        Err(e) => this.error = Some(e),
+                    // Nothing is said when one starts: the launcher lists the
+                    // session it started. A failure is a toast.
+                    if let Err(e) = result {
+                        crate::views::panels::toast::ToastManager::error(
+                            format!("Could not scan for links: {e}"),
+                            cx,
+                        );
                     }
                     cx.notify();
                 });

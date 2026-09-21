@@ -127,8 +127,33 @@ fn parse(flow: &str, value: &serde_json::Value) -> LaunchBrief {
     LaunchBrief {
         name: SharedString::from(name.to_string()),
         source: format!("Briefed by {}", describe_brief_source(flow, source)).into(),
+        file: brief_file(source),
         models,
     }
+}
+
+/// The knowledge file a brief is, when it is one: okena's built-in templates
+/// are not on disk, so there is nothing to open.
+fn brief_file(source: &serde_json::Value) -> Option<(SharedString, SharedString)> {
+    let root = source.get("root")?.as_str()?;
+    let path = source.get("path")?.as_str()?;
+    Some((SharedString::from(root.to_string()), SharedString::from(path.to_string())))
+}
+
+/// Open a brief's own file in Harness → Knowledge.
+pub(crate) fn open_brief(
+    broker: &Entity<okena_workspace::request_broker::RequestBroker>,
+    root: &SharedString,
+    path: &SharedString,
+    cx: &mut App,
+) {
+    let request = okena_workspace::requests::WorkbenchRequest::OpenKnowledgeDoc {
+        root_key: root.to_string(),
+        path: path.to_string(),
+    };
+    broker.update(cx, |broker, cx| {
+        broker.push_workbench_request(request, cx);
+    });
 }
 
 /// Say where a launch brief's template comes from.
@@ -167,6 +192,15 @@ mod tests {
         );
         assert_eq!(brief.models.for_agent("claude"), Some("sonnet"));
         assert_eq!(brief.models.for_agent("codex"), Some("gpt-5-codex"));
+        // The file the chip opens.
+        let (root, path) = brief.file.expect("a template in a root is a file");
+        assert_eq!((root.as_ref(), path.as_ref()), ("store:acme", "templates/task-start.md"));
+    }
+
+    #[test]
+    fn a_built_in_template_is_no_file_to_open() {
+        let brief = parse("task-start", &serde_json::json!({ "source": { "builtin": true } }));
+        assert_eq!(brief.file, None);
     }
 
     #[test]

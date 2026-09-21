@@ -3099,6 +3099,7 @@ impl HarnessPane {
             strategy.template(),
             cx,
         ))
+        .on_open_brief(self.open_brief())
         .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
             this.quick_start_selection(launch.command.to_string(), launch.model.clone(), cx);
         }))
@@ -3289,6 +3290,7 @@ impl HarnessPane {
                 work_flow,
                 cx,
             ))
+            .on_open_brief(self.open_brief())
             .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
                 if has_work {
                     // The branch is taken, so this one needs a name — and
@@ -3342,7 +3344,6 @@ impl HarnessPane {
         let for_launch = task.clone();
         let for_configure = task.clone();
         okena_ui::agent_launcher::AgentLauncher::new(format!("task-breakdown-{external_id}"), title)
-            .subtitle("Writes sub-tasks back through okena's MCP")
             .options(crate::views::agent_session::launch_options(
                 self.tasks.default_agent.as_deref(),
                 &t,
@@ -3358,6 +3359,7 @@ impl HarnessPane {
                 TaskHelper::BreakDown.flow(),
                 cx,
             ))
+            .on_open_brief(self.open_brief())
             .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
                 this.start_task_helper(
                     &for_launch,
@@ -3404,7 +3406,6 @@ impl HarnessPane {
         let for_launch = task.clone();
         let for_configure = task.clone();
         okena_ui::agent_launcher::AgentLauncher::new(format!("task-refine-{external_id}"), title)
-            .subtitle("Asks what it would guess, then rewrites the task")
             .options(crate::views::agent_session::launch_options(
                 self.tasks.default_agent.as_deref(),
                 &t,
@@ -3420,6 +3421,7 @@ impl HarnessPane {
                 TaskHelper::Refine.flow(),
                 cx,
             ))
+            .on_open_brief(self.open_brief())
             .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
                 this.start_task_helper(
                     &for_launch,
@@ -4082,6 +4084,7 @@ impl HarnessPane {
                     cx.notify();
                 }))
                 .brief(launch_brief)
+                .on_open_brief(self.open_brief())
                 .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
                     this.confirm_start(launch.command.to_string(), launch.model.clone(), cx);
                 }));

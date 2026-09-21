@@ -163,7 +163,6 @@ impl HarnessPane {
                 format!("{}-document-agent", section.slug()),
                 "Refine with agent",
             )
-            .subtitle("Changes only this file, and commits nothing")
             .options(crate::views::agent_session::launch_options(
                 self.tasks.default_agent.as_deref(),
                 &t,
@@ -194,6 +193,7 @@ impl HarnessPane {
                 "doc-refine",
                 cx,
             ))
+            .on_open_brief(self.open_brief())
             .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
                 this.start_document_refine(
                     section,

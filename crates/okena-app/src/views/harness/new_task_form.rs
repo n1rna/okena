@@ -487,7 +487,6 @@ impl HarnessPane {
         options.push(crate::views::agent_session::no_agent_option("File it", &t));
         body = body.child(
             okena_ui::agent_launcher::AgentLauncher::new("new-task-launcher", "Draft the task")
-                .subtitle("An agent writes the description and any sub-tasks")
                 .options(options)
                 .preferred(self.tasks.default_agent.clone())
                 .busy(match (creating, drafting) {
@@ -500,6 +499,7 @@ impl HarnessPane {
                     "task-create",
                     cx,
                 ))
+                .on_open_brief(self.open_brief())
                 .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
                     // The empty command is "File it": the same direct create
                     // the form always had.
