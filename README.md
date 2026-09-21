@@ -142,19 +142,161 @@ This fork publishes its own releases from [`n1rna/okena`](https://github.com/n1r
 ### Status Bar
 - CPU usage, memory usage, and current time displayed at the bottom
 
-## Building
+## Building from source
 
-Requires Rust toolchain (edition 2024).
+Okena builds on macOS, Linux and Windows. The Rust toolchain is pinned in
+`rust-toolchain.toml`, so rustup installs the right version (1.95.0) on the
+first `cargo` command — you only install the platform toolchain and Bun by hand.
+
+The build has **two stages that must run in order**: the web client, then Rust.
+Skipping the first one is the most common way for a fresh clone to fail — see
+[step 2](#2-build-the-web-client-first).
+
+### 1. Prerequisites
+
+Every platform needs:
+
+- **[rustup](https://rustup.rs)** — `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+- **[Bun](https://bun.sh)** — `curl -fsSL https://bun.sh/install | bash` (Windows: `irm bun.sh/install.ps1 | iex`)
+- **Git**
+
+Then the platform-specific part:
+
+<details open>
+<summary><b>macOS</b></summary>
+
+You need **full Xcode**, not just the Command Line Tools. GPUI compiles its
+Metal shaders during the build (`xcrun -sdk macosx metal`), and the Metal
+compiler is not part of the CLT — with only the CLT installed the build fails in
+`gpui_macos` with `metal shader compilation failed`.
 
 ```bash
-cargo build --release
+# Install Xcode from the App Store, then point the toolchain at it:
+sudo xcode-select --switch /Applications/Xcode.app
+
+# Xcode 16 and newer ship the Metal compiler as a separate download:
+xcodebuild -downloadComponent MetalToolchain
 ```
 
-## Running
+Nothing else is required — no Homebrew packages, and no cmake.
+
+</details>
+
+<details open>
+<summary><b>Linux (Debian/Ubuntu)</b></summary>
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  build-essential clang libclang-dev pkg-config cmake \
+  libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev \
+  libwayland-dev libvulkan-dev libegl1-mesa-dev \
+  libssl-dev libfontconfig-dev
+```
+
+CI installs this same list without `build-essential`, `clang` and
+`libclang-dev`, because GitHub's runner image already has them. On a bare
+machine or container you do need them: GPUI generates bindings with bindgen,
+which requires libclang.
+
+On other distributions, install the equivalents of the above — the XCB,
+xkbcommon, Wayland, Vulkan, EGL, OpenSSL and fontconfig development headers.
+
+</details>
+
+<details open>
+<summary><b>Windows</b></summary>
+
+- **Visual Studio 2022** with the **Desktop development with C++** workload,
+  which provides the MSVC `x86_64-pc-windows-msvc` toolchain.
+- Build from the **x64 Native Tools Command Prompt for VS 2022**. In a plain
+  shell, Git for Windows' `link.exe` shadows the MSVC linker on `PATH` and the
+  link step fails.
+
+</details>
+
+### 2. Build the web client first
+
+This step is **not optional**, even if you never open the web UI.
+`okena-remote-server` embeds `web/dist` into the binary at compile time with
+`RustEmbed`, and `web/dist` is not checked in. Build it and `cargo build` stops
+with:
+
+```
+#[derive(RustEmbed)] folder '.../web/dist' does not exist
+```
+
+```bash
+cd web
+bun install --frozen-lockfile
+bun run build
+cd ..
+```
+
+You only need to repeat this when the web client itself changes.
+
+### 3. Build
+
+```bash
+cargo build --release -p okena -p okena-daemon
+```
+
+Build **both** binaries. `okena` is the desktop app and `okena-daemon` is the
+GPUI-free daemon that owns all the real state (see
+[ADR-0001](docs/decisions/0001-headless-two-process-daemon.md)). The app looks
+for an `okena-daemon` sibling next to itself and quietly falls back to
+`okena --headless` when it is missing, so a build without it works but is not
+what ships.
+
+They land in `target/release/`.
+
+### 4. Run
 
 ```bash
 cargo run
 ```
+
+That builds and runs a debug binary, which is slower but compiles faster — the
+usual choice while developing. For the release build, run `target/release/okena`
+directly.
+
+### macOS: build a .app bundle
+
+```bash
+./scripts/bundle-macos.sh           # builds, then writes dist/Okena.app
+./scripts/bundle-macos.sh --dmg     # also writes dist/Okena-<version>-<target>.dmg
+```
+
+Useful flags: `--target <triple>` to pick the architecture
+(`aarch64-apple-darwin` or `x86_64-apple-darwin`) and `--skip-build` to bundle
+binaries you have already built. The script reads the version from
+`Cargo.toml`.
+
+### Running the tests
+
+```bash
+cargo test --workspace
+```
+
+Pass `--workspace`. The workspace declares no `default-members`, so a bare
+`cargo test` runs the root `okena` package alone and silently skips every crate
+that holds the actual tests.
+
+Some tests skip themselves when a prerequisite is missing, so they pass without
+proving anything. To run the full set:
+
+```bash
+sudo apt-get install -y dtach zsh fish   # session-teardown and shell-quoting tests
+rustup target add wasm32-wasip2          # the extension host builds WASM fixtures
+cargo build -p okena-tui                 # the end-to-end tests drive this binary
+```
+
+Then set `OKENA_REQUIRE_SHELLS=1`, `OKENA_REQUIRE_WASM=1` and
+`OKENA_REQUIRE_TUI=1`, which turn each of those skips into a failure. That is
+what CI does, so that a green run proves what it claims.
+
+See [docs/reference/testing.md](docs/reference/testing.md) for test selection
+rules and the GPUI test harness.
 
 ## Keyboard Shortcuts
 
