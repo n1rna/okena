@@ -10,6 +10,12 @@ use std::time::{Duration, Instant};
 /// Output beyond this is dropped, so a runaway program cannot fill memory.
 const MAX_OUTPUT: usize = 16 * 1024 * 1024;
 
+/// Once the program itself is gone, how long its reader threads get to collect
+/// what is already sitting in the pipes before anything it left behind holding
+/// them is killed. Same bound, for the same reason, as `POST_EXIT_DRAIN` in
+/// `okena_core::process::bus`.
+const POST_EXIT_DRAIN: Duration = Duration::from_millis(100);
+
 /// Where programs are looked up. The daemon passes an extended PATH, since
 /// one started from the Dock inherits a minimal one.
 #[derive(Clone, Debug, Default)]
@@ -82,6 +88,13 @@ pub struct Finished {
     pub timed_out: bool,
 }
 
+/// Run a program to completion or to its timeout, whichever comes first.
+///
+/// The timeout bounds this call, not just the program: whatever the program
+/// starts is killed with it. That has to be deliberate, because a descendant
+/// holds the stdout/stderr pipes it inherited, and collecting the output means
+/// waiting for those pipes to close — so killing only the program we spawned
+/// would leave this returning whenever *its children* felt like exiting.
 pub fn run(run: Run<'_>) -> Result<Finished, String> {
     let mut command = okena_core::process::command(&run.program.to_string_lossy());
     command
@@ -106,8 +119,7 @@ pub fn run(run: Run<'_>) -> Result<Finished, String> {
         command.current_dir(cwd);
     }
 
-    let mut child = command
-        .spawn()
+    let (mut child, tree) = okena_core::process::ProcessTree::spawn(&mut command)
         .map_err(|e| format!("cannot run {}: {e}", run.program.display()))?;
 
     let stdin_writer = match (run.stdin, child.stdin.take()) {
@@ -125,15 +137,30 @@ pub fn run(run: Run<'_>) -> Result<Finished, String> {
 
     let deadline = Instant::now() + run.timeout;
     let mut timed_out = false;
+    // `Child::try_wait` would reap the group leader as soon as it exits, and
+    // its pid — which is the group id `terminate` signals — could then be
+    // handed to an unrelated process while descendants still run under it.
+    // `ProcessTree::exited` leaves the leader waitable until the group is gone.
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() >= deadline => {
+        match okena_core::process::ProcessTree::exited(&mut child) {
+            Ok(true) => {
+                // The program has finished, but anything it left running still
+                // holds the pipes. Take what is already buffered, then kill the
+                // group so the joins below cannot wait on a stranger.
+                drain_briefly(&stdout, &stderr, POST_EXIT_DRAIN);
+                tree.terminate();
+                break child.wait().ok();
+            }
+            Ok(false) if Instant::now() >= deadline => {
                 timed_out = true;
+                // The whole group, not just the direct child: a killed shell's
+                // children keep its pipes open and this call would go on
+                // waiting for them long past the timeout it was given.
+                tree.terminate();
                 let _ = child.kill();
                 break child.wait().ok();
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Ok(false) => std::thread::sleep(Duration::from_millis(10)),
             Err(e) => return Err(format!("waiting for {}: {e}", run.program.display())),
         }
     };
@@ -157,6 +184,27 @@ pub fn run(run: Run<'_>) -> Result<Finished, String> {
         stderr: collect(stderr),
         timed_out,
     })
+}
+
+/// Wait for both readers to reach EOF, giving up after `grace`.
+///
+/// Only ever a courtesy: the caller kills the process group straight after, and
+/// that is what guarantees the pipes close and the joins return.
+fn drain_briefly(
+    stdout: &Option<std::thread::JoinHandle<Vec<u8>>>,
+    stderr: &Option<std::thread::JoinHandle<Vec<u8>>>,
+    grace: Duration,
+) {
+    let done = |handle: &Option<std::thread::JoinHandle<Vec<u8>>>| {
+        handle.as_ref().is_none_or(|handle| handle.is_finished())
+    };
+    let deadline = Instant::now() + grace;
+    while !(done(stdout) && done(stderr)) {
+        if Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn reader(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
@@ -215,6 +263,39 @@ mod tests {
         assert!(done.timed_out);
         assert_eq!(done.exit_code, None);
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    /// The timeout has to reach the program's children too. A shell that
+    /// backgrounds `sleep` and waits leaves that `sleep` holding the stdout and
+    /// stderr pipes it inherited, so killing the shell alone stops nothing that
+    /// matters: this call still blocks collecting output until `sleep` exits on
+    /// its own, 30 seconds after a 200ms deadline.
+    #[test]
+    fn a_timeout_kills_what_the_program_started_too() {
+        let started = Instant::now();
+        let done = sh("sleep 30 & echo $!; wait", None, Duration::from_millis(200));
+        assert!(done.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        // Returning on time is not the same as having killed it. The shell
+        // printed its child's pid before backgrounding it; `kill -0` says
+        // whether that child is still around. SIGKILL is delivered
+        // asynchronously and the orphan is reaped by init, so give it a moment
+        // rather than asserting on the first probe.
+        let pid: u32 = done.stdout.trim().parse().expect("the backgrounded pid");
+        let mut gone = false;
+        for _ in 0..100 {
+            let probe = sh(&format!("kill -0 {pid}"), None, Duration::from_secs(5));
+            if probe.exit_code != Some(0) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            gone,
+            "pid {pid} outlived the timeout that killed its parent"
+        );
     }
 
     #[test]
