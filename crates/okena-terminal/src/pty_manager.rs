@@ -1890,13 +1890,15 @@ impl PtyManager {
     #[cfg(unix)]
     fn get_tmux_service_pids(&self, terminal_id: &str) -> Vec<u32> {
         let session_name = self.session_backend().session_name(terminal_id);
-        let output = match crate::process::safe_output(crate::process::command("tmux").args([
-            "list-panes",
-            "-t",
-            &session_name,
-            "-F",
-            "#{pane_pid}",
-        ])) {
+        let output = match crate::process::safe_output(
+            crate::session_backend::session_backend_command("tmux").args([
+                "list-panes",
+                "-t",
+                &session_name,
+                "-F",
+                "#{pane_pid}",
+            ]),
+        ) {
             Ok(o) if o.status.success() => o,
             _ => return self.get_shell_pid(terminal_id).into_iter().collect(),
         };
@@ -1915,18 +1917,57 @@ impl PtyManager {
     }
 
     /// Batch version of `get_service_pids` for multiple terminals at once.
-    /// On Linux with dtach, reads `/proc` once instead of spawning `lsof` per terminal.
+    /// On Linux with dtach, reads `/proc` once instead of spawning `lsof` per
+    /// terminal; with tmux, one `list-panes -a` covers every session.
     pub fn get_batch_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
         #[cfg(unix)]
         {
-            if self.session_backend() == ResolvedBackend::Dtach {
-                return self.get_batch_dtach_service_pids(terminal_ids);
+            match self.session_backend() {
+                ResolvedBackend::Dtach => return self.get_batch_dtach_service_pids(terminal_ids),
+                ResolvedBackend::Tmux => return self.get_batch_tmux_service_pids(terminal_ids),
+                _ => {}
             }
         }
         // Fallback: call per-terminal method
         terminal_ids
             .iter()
             .map(|tid| (tid.to_string(), self.get_service_pids(tid)))
+            .collect()
+    }
+
+    /// Batch tmux pane lookup: one `list-panes -a` for every session at once,
+    /// instead of a `tmux` per terminal. The memory poll asks for every live
+    /// terminal every few seconds, so per-terminal spawning is the difference
+    /// between one subprocess a pass and one per open terminal.
+    ///
+    /// A session tmux does not report falls back to the PTY's own child, as the
+    /// single-terminal path does.
+    #[cfg(unix)]
+    fn get_batch_tmux_service_pids(&self, terminal_ids: &[&str]) -> HashMap<String, Vec<u32>> {
+        let panes = match crate::process::safe_output(
+            crate::session_backend::session_backend_command("tmux").args([
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name} #{pane_pid}",
+            ]),
+        ) {
+            Ok(output) if output.status.success() => {
+                parse_tmux_pane_pids(&String::from_utf8_lossy(&output.stdout))
+            }
+            _ => HashMap::new(),
+        };
+
+        let backend = self.session_backend();
+        terminal_ids
+            .iter()
+            .map(|&tid| {
+                let pids = match panes.get(&backend.session_name(tid)) {
+                    Some(pids) if !pids.is_empty() => pids.clone(),
+                    _ => self.get_shell_pid(tid).into_iter().collect(),
+                };
+                (tid.to_string(), pids)
+            })
             .collect()
     }
 
@@ -2076,14 +2117,16 @@ impl PtyManager {
         ));
 
         // Use tmux capture-pane to get the entire scrollback buffer
-        let result = crate::process::safe_output(crate::process::command("tmux").args([
-            "capture-pane",
-            "-t",
-            &session_name,
-            "-p", // output to stdout
-            "-S",
-            "-", // start from beginning of scrollback
-        ]));
+        let result = crate::process::safe_output(
+            crate::session_backend::session_backend_command("tmux").args([
+                "capture-pane",
+                "-t",
+                &session_name,
+                "-p", // output to stdout
+                "-S",
+                "-", // start from beginning of scrollback
+            ]),
+        );
 
         match result {
             Ok(output) if output.status.success() => {
@@ -2266,6 +2309,28 @@ fn wait_for_exit_code(pid: u32) -> Option<u32> {
         let _ = pid;
         None
     }
+}
+
+/// Parse `tmux list-panes -a -F '#{session_name} #{pane_pid}'` into the pane
+/// pids of each session.
+///
+/// Split at the last space, not the first: okena's own session names have no
+/// spaces, but a session a user made by hand can, and it is listed too.
+#[cfg(unix)]
+fn parse_tmux_pane_pids(stdout: &str) -> HashMap<String, Vec<u32>> {
+    let mut panes: HashMap<String, Vec<u32>> = HashMap::new();
+    for line in stdout.lines() {
+        let Some((session, pid)) = line.trim().rsplit_once(' ') else {
+            continue;
+        };
+        if let Ok(pid) = pid.trim().parse::<u32>() {
+            panes
+                .entry(session.trim().to_string())
+                .or_default()
+                .push(pid);
+        }
+    }
+    panes
 }
 
 /// Find which PIDs have the given Unix sockets open.
@@ -2518,6 +2583,29 @@ pub(crate) fn terminal_launch_environment(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// The pane pid is the shell tmux runs, which lives under the tmux server
+    /// and not under the attach process okena holds — so the memory poll only
+    /// ever reaches an agent's real processes through this output.
+    #[cfg(unix)]
+    #[test]
+    fn tmux_panes_are_read_per_session() {
+        let panes = parse_tmux_pane_pids(
+            "tm-1850944c 44261\ntm-1850944c 44263\ntm-abcdef01 500\n\nrubbish\n",
+        );
+        assert_eq!(panes["tm-1850944c"], vec![44261, 44263], "every pane counts");
+        assert_eq!(panes["tm-abcdef01"], vec![500]);
+        assert_eq!(panes.len(), 2, "a line with no pid is skipped: {panes:?}");
+    }
+
+    /// A hand-made session sits in the same listing; its name must not be
+    /// truncated at the first space into a name no lookup matches.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_name_with_a_space_keeps_it() {
+        let panes = parse_tmux_pane_pids("my session 77\n");
+        assert_eq!(panes["my session"], vec![77]);
+    }
 
     #[test]
     fn a_terminal_launches_knowing_its_own_id() {
