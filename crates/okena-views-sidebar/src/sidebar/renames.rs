@@ -5,7 +5,14 @@ use super::Sidebar;
 use gpui::*;
 use okena_core::api::ActionRequest;
 use okena_core::theme::FolderColor;
-use okena_ui::rename_state::{cancel_rename, finish_rename, start_rename_with_blur};
+use okena_ui::rename_state::{RenameState, cancel_rename, finish_rename, start_rename_with_blur};
+
+/// Start a rename with the whole name selected, so typing replaces it and an
+/// arrow key or a click keeps it to edit: what a rename does everywhere else.
+fn select_name<Id>(rename: RenameState<Id>, cx: &mut App) -> RenameState<Id> {
+    rename.input.update(cx, |input, cx| input.select_all(cx));
+    rename
+}
 
 impl Sidebar {
     pub fn start_rename(
@@ -16,12 +23,15 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.terminal_rename = Some(start_rename_with_blur(
-            (project_id, terminal_id),
-            &current_name,
-            "Terminal name...",
-            |this, _window, cx| this.finish_rename(cx),
-            window,
+        self.terminal_rename = Some(select_name(
+            start_rename_with_blur(
+                (project_id, terminal_id),
+                &current_name,
+                "Terminal name...",
+                |this, _window, cx| this.finish_rename(cx),
+                window,
+                cx,
+            ),
             cx,
         ));
         let workspace = self.workspace.clone();
@@ -71,12 +81,15 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.project_rename = Some(start_rename_with_blur(
-            project_id,
-            &current_name,
-            "Project name...",
-            |this, _window, cx| this.finish_project_rename(cx),
-            window,
+        self.project_rename = Some(select_name(
+            start_rename_with_blur(
+                project_id,
+                &current_name,
+                "Project name...",
+                |this, _window, cx| this.finish_project_rename(cx),
+                window,
+                cx,
+            ),
             cx,
         ));
         let workspace = self.workspace.clone();
@@ -195,12 +208,15 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.folder_rename = Some(start_rename_with_blur(
-            folder_id,
-            &current_name,
-            "Folder name...",
-            |this, _window, cx| this.finish_folder_rename(cx),
-            window,
+        self.folder_rename = Some(select_name(
+            start_rename_with_blur(
+                folder_id,
+                &current_name,
+                "Folder name...",
+                |this, _window, cx| this.finish_folder_rename(cx),
+                window,
+                cx,
+            ),
             cx,
         ));
         let workspace = self.workspace.clone();

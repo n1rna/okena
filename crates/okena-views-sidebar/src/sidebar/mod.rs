@@ -21,6 +21,8 @@ mod worktree;
 mod from_project_test;
 #[cfg(test)]
 mod project_agents_test;
+#[cfg(test)]
+mod window_test;
 
 pub use harness_nav::harness_nav_entries;
 
