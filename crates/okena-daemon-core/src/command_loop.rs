@@ -2904,6 +2904,7 @@ pub async fn daemon_command_loop(
     deadlines: SoftCloseDeadlines,
     git_poll_trigger_tx: tokio::sync::mpsc::UnboundedSender<GitPollTrigger>,
     agent_activity: Arc<crate::agent_activity::AgentActivityTracker>,
+    agent_usage: Arc<crate::agent_usage::AgentUsageTracker>,
     extension_host: Option<Arc<okena_extension_host::host::ExtensionHost>>,
     // Back into this loop, for extension actions that start agent sessions.
     self_bridge: Option<okena_remote_server::bridge::BridgeSender>,
@@ -3787,6 +3788,53 @@ pub async fn daemon_command_loop(
                             }
                             let _ = git_poll_trigger_tx
                                 .send(GitPollTrigger::linked_worktrees(session_id));
+                        }
+                        CommandResult::Ok(None)
+                    }
+
+                    // ── Agent usage reports ──────────────────────────────────────
+                    // Claude's status line: where its transcript is, which the
+                    // usage poll reads the tokens from, and the cost it has
+                    // counted, which goes on the session as it stands.
+                    ActionRequest::AgentUsageReport {
+                        terminal_id,
+                        cost_usd,
+                        transcript_path,
+                    } => {
+                        if let Some(path) = transcript_path {
+                            agent_usage.record_transcript(&terminal_id, path.into());
+                        }
+                        if let Some(cost_usd) = cost_usd {
+                            let mut ws = workspace.lock();
+                            let session = ws
+                                .find_project_for_terminal(&terminal_id)
+                                .filter(|p| p.is_any_agent_session())
+                                .map(|p| p.id.clone());
+                            let changed = session.is_some_and(|session_id| {
+                                ws.data
+                                    .projects
+                                    .iter_mut()
+                                    .find(|p| p.id == session_id)
+                                    .is_some_and(|p| {
+                                        let next = crate::agent_usage::with_cost(
+                                            p.agent_usage.as_ref(),
+                                            cost_usd,
+                                        );
+                                        let changed = next.is_some();
+                                        if changed {
+                                            p.agent_usage = next;
+                                        }
+                                        changed
+                                    })
+                            });
+                            if changed {
+                                let mut cx = DaemonWorkspaceCx::new(
+                                    &workspace_tick,
+                                    &hook_runner,
+                                    &hook_monitor,
+                                );
+                                ws.notify_data(&mut cx);
+                            }
                         }
                         CommandResult::Ok(None)
                     }
@@ -5532,6 +5580,7 @@ mod tests {
                 Arc::new(Mutex::new(HashMap::new())),
                 tokio::sync::mpsc::unbounded_channel().0,
                 self.agent_activity,
+                Default::default(),
                 None,
                 None,
             ))
@@ -7023,6 +7072,92 @@ mod tests {
             .await;
     }
 
+    /// The cost Claude's status line reports lands on its session and shows
+    /// in the next snapshot, beside whatever tokens the poll has read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_status_lines_cost_reaches_the_snapshot() {
+        let h = harness();
+        let session = |id: &str, terminal: &str, kind: &str| {
+            let mut project: okena_workspace::state::ProjectData =
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "name": id, "path": "/tmp", kind: "go",
+                }))
+                .expect("project");
+            project.layout = Some(LayoutNode::Terminal {
+                terminal_id: Some(terminal.into()),
+                minimized: false,
+                detached: false,
+                shell_type: ShellType::Custom {
+                    path: "claude".into(),
+                    args: Vec::new(),
+                },
+                zoom_level: 1.0,
+                agent: false,
+            });
+            project
+        };
+        {
+            let mut ws = h.workspace.lock();
+            let mut read = session("s1", "t1", "custom_session");
+            read.agent_usage = Some(okena_core::agent_usage::AgentUsage {
+                tokens: 45_000,
+                output_only: false,
+                cost_usd: None,
+            });
+            // An ordinary project someone runs claude in: not a session.
+            let repo = session("repo", "t2", "unused");
+            ws.data.project_order.extend(["s1".into(), "repo".into()]);
+            ws.data.projects.extend([read, repo]);
+        }
+        let (bridge_tx, bridge_rx) = bridge_channel();
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let handle = h.spawn_loop(bridge_rx);
+                let usage_after = |terminal: &'static str, cost_usd: Option<f64>| {
+                    let bridge_tx = bridge_tx.clone();
+                    async move {
+                        let result = request(
+                            &bridge_tx,
+                            RemoteCommand::Action(ActionRequest::AgentUsageReport {
+                                terminal_id: terminal.into(),
+                                cost_usd,
+                                transcript_path: Some("/x/c1.jsonl".into()),
+                            }),
+                            "AgentUsageReport",
+                        )
+                        .await;
+                        assert!(matches!(result, CommandResult::Ok(None)), "{result:?}");
+                        let value =
+                            match request(&bridge_tx, RemoteCommand::GetState, "GetState").await {
+                                CommandResult::Ok(Some(v)) => v,
+                                other => panic!("expected Ok(Some), got {other:?}"),
+                            };
+                        let resp: StateResponse = serde_json::from_value(value).expect("state");
+                        resp.projects
+                            .into_iter()
+                            .map(|p| (p.id, p.agent_usage))
+                            .collect::<HashMap<_, _>>()
+                    }
+                };
+
+                let priced = usage_after("t1", Some(1.25)).await;
+                let usage = priced["s1"].clone().expect("usage");
+                assert_eq!((usage.tokens, usage.cost_usd), (45_000, Some(1.25)));
+                // No cost in the report: what is known stands.
+                let unchanged = usage_after("t1", None).await;
+                assert_eq!(unchanged["s1"], priced["s1"]);
+                // Not an agent session, and a terminal nobody has.
+                assert_eq!(usage_after("t2", Some(9.0)).await["repo"], None);
+                usage_after("gone", Some(9.0)).await;
+
+                drop(bridge_tx);
+                handle.await.expect("loop task joins");
+            })
+            .await;
+    }
+
     /// App-scoped `GetSettingsSchema` returns `Ok(Some(_))` with settings keys.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_settings_schema_round_trip() {
@@ -7331,6 +7466,7 @@ mod tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
@@ -8063,6 +8199,7 @@ mod tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig {
@@ -8826,6 +8963,7 @@ mod tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
@@ -9083,6 +9221,7 @@ mod tests {
                 agent_purpose: None,
                 context_projects: Vec::new(),
                 closed_at: None,
+                agent_usage: None,
                 agent: None,
                 folder_color: Default::default(),
                 hooks: Default::default(),
@@ -10731,6 +10870,7 @@ mod tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig {

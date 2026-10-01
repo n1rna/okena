@@ -6876,6 +6876,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "uuid",
 ]
 
@@ -6927,6 +6928,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "dirs 5.0.1",
  "log",
  "okena-app-core",
  "okena-context",

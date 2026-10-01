@@ -92,6 +92,7 @@ pub fn build_api_project(
         agent_purpose: p.agent_purpose.clone(),
         context_projects: p.context_projects.clone(),
         closed_at: p.closed_at,
+        agent_usage: p.agent_usage.clone(),
         // Only a closed session asks: a live one is running in its directory,
         // and a stat for every project on every snapshot would buy nothing.
         cwd_missing: p.is_closed() && !std::path::Path::new(&p.path).is_dir(),
@@ -339,5 +340,33 @@ mod worktree_wire_tests {
         assert!(!api(dir.path(), Some(5)).cwd_missing);
         // An open session is not asked: nothing reopens it.
         assert!(!api(&gone, None).cwd_missing);
+    }
+
+    #[test]
+    fn a_sessions_usage_is_sent_open_or_closed() {
+        let usage = okena_core::agent_usage::AgentUsage {
+            tokens: 45_230,
+            output_only: true,
+            cost_usd: None,
+        };
+        let api = |closed_at: Option<u64>, usage: Option<okena_core::agent_usage::AgentUsage>| {
+            let mut p: ProjectData = serde_json::from_value(serde_json::json!({
+                "id": "s", "name": "session", "path": "/tmp", "custom_session": "audit",
+            }))
+            .unwrap();
+            p.closed_at = closed_at;
+            p.agent_usage = usage;
+            super::build_api_project(
+                &p,
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+            )
+        };
+        assert_eq!(api(None, Some(usage.clone())).agent_usage, Some(usage.clone()));
+        assert_eq!(api(Some(5), Some(usage.clone())).agent_usage, Some(usage));
+        assert_eq!(api(None, None).agent_usage, None);
     }
 }

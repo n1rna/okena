@@ -707,6 +707,7 @@ mod tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             agent: None,
             id: id.to_string(),
             name: id.to_string(),

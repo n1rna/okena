@@ -50,7 +50,7 @@ pub enum Command {
     /// run by hand.
     #[command(name = "agent-event", hide = true)]
     AgentEvent {
-        /// turn-started, tool, needs-input, turn-ended, or codex-notify
+        /// turn-started, tool, needs-input, turn-ended, statusline, or codex-notify
         signal: String,
         /// The JSON event Codex passes to its notify program
         payload: Option<String>,

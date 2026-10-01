@@ -86,6 +86,8 @@ pub(super) struct SessionRow {
     pub(super) card: CardState,
     /// What the agent last said it was doing.
     pub(super) status: Option<String>,
+    /// The tokens it has used, pre-formatted; `None` when none are known.
+    pub(super) tokens: Option<String>,
 }
 
 /// A closed session's row: who it was and when it was closed.
@@ -210,6 +212,7 @@ impl Sidebar {
             subtitle,
             card: card_state(running, activity),
             status,
+            tokens: p.agent_usage.as_ref().and_then(|usage| usage.tokens_short()),
         }
     }
 
@@ -389,6 +392,15 @@ impl Sidebar {
                             .text_size(ui_text_ms(cx))
                             .text_color(rgb(t.text_muted))
                             .child(memory)
+                    }))
+                    // Beside the memory, in the same quiet type: tokens only,
+                    // the cost is the Info tab's.
+                    .children(row.tokens.clone().map(|tokens| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(t.text_muted))
+                            .child(tokens)
                     }))
                     .child(
                         div()

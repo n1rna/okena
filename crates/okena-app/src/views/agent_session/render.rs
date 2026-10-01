@@ -351,6 +351,16 @@ impl AgentSessionPanel {
                 cx,
             ));
         }
+        // What the agent has used, as its own CLI counts it: tokens, and a
+        // cost only from a CLI that reports one. Stays after it stops.
+        if let Some(usage) = &info.usage {
+            if let Some(tokens) = usage.tokens_label() {
+                facts.push(self.chip(tokens, t.text_secondary, cx));
+            }
+            if let Some(cost) = usage.cost_label() {
+                facts.push(self.chip(format!("{cost} cost"), t.text_secondary, cx));
+            }
+        }
         if let Some(closed_at) = info.closed_at {
             let ago = okena_ui::ago::format_ago(closed_at, okena_ui::ago::now_millis());
             facts.push(self.chip(format!("closed {ago}"), t.text_muted, cx));

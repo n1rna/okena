@@ -565,6 +565,9 @@ impl DaemonCore {
         // notifications) and the command loop (native hook events), resolved by
         // its own poll, read by `GetState`.
         let agent_activity = Arc::new(crate::agent_activity::AgentActivityTracker::default());
+        // What each agent session has used: read from the agent CLIs' own
+        // records by its poll, told where Claude's are by the command loop.
+        let agent_usage = Arc::new(crate::agent_usage::AgentUsageTracker::default());
         // Extensions installed from git. Starting one loads and compiles its
         // component, so the host does it on each extension's own thread.
         let extension_host = crate::extensions::start_host(
@@ -613,6 +616,14 @@ impl DaemonCore {
                 remote_subscribed_terminals.clone(),
                 remote_visible_projects.clone(),
                 git_poll_trigger_rx,
+            ));
+            tokio::task::spawn_local(crate::agent_usage::run_agent_usage_poll(
+                agent_usage.clone(),
+                reactor.workspace.clone(),
+                settings.clone(),
+                reactor.workspace_tick.clone(),
+                reactor.hook_runner.clone(),
+                reactor.hook_monitor.clone(),
             ));
             tokio::task::spawn_local(crate::memory_poll::run_memory_poll(
                 reactor.workspace.clone(),
@@ -717,6 +728,7 @@ impl DaemonCore {
                 soft_close_deadlines,
                 git_poll_trigger_tx,
                 agent_activity,
+                agent_usage.clone(),
                 extension_host,
                 Some(self_bridge),
             );
@@ -926,6 +938,7 @@ mod shutdown_tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
@@ -1040,6 +1053,7 @@ mod shutdown_tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),
@@ -1140,6 +1154,7 @@ mod shutdown_tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),

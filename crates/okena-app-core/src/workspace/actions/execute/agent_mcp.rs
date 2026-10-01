@@ -134,6 +134,11 @@ fn mcp_args(agent: &str, exe: &Path, settings: &AppSettings) -> Vec<String> {
 /// turn marked working, and `PostToolUse` in particular brings it back from a
 /// permission prompt once you answer. `Notification` is how Claude Code says
 /// it is blocked on you.
+///
+/// The status line is how okena learns the session's cost: Claude Code hands
+/// its status line the running total and writes it nowhere else. Unlike
+/// hooks, a status line set here replaces the user's own, so `okena
+/// agent-event statusline` runs theirs and prints what it prints.
 fn claude_hook_settings(exe: &str) -> serde_json::Value {
     let command = |signal: &str| {
         json!({
@@ -151,7 +156,11 @@ fn claude_hook_settings(exe: &str) -> serde_json::Value {
             "PostToolUse": on_every_tool("tool"),
             "Notification": on("needs-input"),
             "Stop": on("turn-ended"),
-        }
+        },
+        "statusLine": {
+            "type": "command",
+            "command": format!("{} agent-event statusline", shell_quote(exe)),
+        },
     })
 }
 
@@ -317,6 +326,17 @@ mod tests {
             assert_eq!(hooks[event][0]["hooks"][0]["type"], "command");
         }
         assert_eq!(hooks["PreToolUse"][0]["matcher"], "*");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn claudes_status_line_hands_its_cost_to_okena() {
+        let settings = claude_hook_settings("/opt/My Okena/okena");
+        assert_eq!(settings["statusLine"]["type"], "command");
+        assert_eq!(
+            settings["statusLine"]["command"],
+            "'/opt/My Okena/okena' agent-event statusline"
+        );
     }
 
     #[cfg(not(windows))]

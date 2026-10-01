@@ -232,6 +232,7 @@ pub fn apply_remote_snapshot(
                     existing.agent_purpose = api_project.agent_purpose.clone();
                     existing.agent = api_project.agent.clone();
                     existing.closed_at = api_project.closed_at;
+                    existing.agent_usage = api_project.agent_usage.clone();
                     existing.pinned = api_project.pinned;
                     existing.last_activity_at = api_project.last_activity_at;
                     existing.default_shell = api_project.default_shell.clone();
@@ -321,6 +322,7 @@ pub fn apply_remote_snapshot(
                         agent_purpose: api_project.agent_purpose.clone(),
                         context_projects: api_project.context_projects.clone(),
                         closed_at: api_project.closed_at,
+                        agent_usage: api_project.agent_usage.clone(),
                         agent: api_project.agent.clone(),
                         folder_color: project_color,
                         hooks: HooksConfig::from_api(&api_project.hooks),
@@ -658,6 +660,7 @@ mod tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             cwd_missing: false,
             agent: None,
             agent_activity: Default::default(),
@@ -869,6 +872,37 @@ mod tests {
         apply_remote_snapshot(&mut data, &mut rs, &[snap(None, false)], WindowId::Main, DEFAULT_SPACE_ID);
         assert_eq!(data.projects[0].closed_at, None);
         assert!(!rs.snapshot("remote:c1:s").unwrap().cwd_missing);
+    }
+
+    #[test]
+    fn a_sessions_usage_is_mirrored_on_add_and_on_update() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let usage = |tokens: u64, cost_usd: Option<f64>| okena_core::agent_usage::AgentUsage {
+            tokens,
+            output_only: false,
+            cost_usd,
+        };
+        let snap = |usage: Option<okena_core::agent_usage::AgentUsage>| {
+            let mut p = api_project("s", None);
+            p.custom_session = Some("audit".into());
+            p.agent_usage = usage;
+            RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(vec![p], vec!["s".into()], vec![])),
+            }
+        };
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(Some(usage(1000, None)))], WindowId::Main, DEFAULT_SPACE_ID);
+        assert_eq!(data.projects[0].agent_usage, Some(usage(1000, None)));
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(Some(usage(9000, Some(0.5))))], WindowId::Main, DEFAULT_SPACE_ID);
+        assert_eq!(data.projects[0].agent_usage, Some(usage(9000, Some(0.5))));
+
+        // The daemon is the one that knows: what it stops saying, the client
+        // stops showing.
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(None)], WindowId::Main, DEFAULT_SPACE_ID);
+        assert_eq!(data.projects[0].agent_usage, None);
     }
 
     #[test]

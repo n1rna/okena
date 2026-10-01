@@ -159,6 +159,9 @@ pub struct AgentSessionInfo {
     pub parent: Option<RelatedAgent>,
     /// Agents on this task's sub-tasks.
     pub children: Vec<RelatedAgent>,
+    /// What the agent has used so far, as its own CLI counts it. Kept by the
+    /// daemon after the agent stops, so a closed session still has it.
+    pub usage: Option<okena_core::agent_usage::AgentUsage>,
     /// When the session was closed, in Unix millis; `None` while it is open.
     pub closed_at: Option<u64>,
     /// Whether a closed session's working directory is gone, as the daemon
@@ -441,6 +444,7 @@ impl AgentSessionInfo {
             workspaces,
             parent,
             children,
+            usage: project.agent_usage.clone(),
             closed_at: project.closed_at,
             cwd_missing: ws
                 .remote_snapshot(project_id)
@@ -613,6 +617,7 @@ mod tests {
             workspaces: Vec::new(),
             parent: None,
             children: Vec::new(),
+            usage: None,
             closed_at: None,
             cwd_missing: false,
         }

@@ -581,6 +581,14 @@ pub struct ProjectData {
     /// it clears this. Persisted so it stays closed across restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<u64>,
+    /// What the session's agent has used so far: its tokens, and its cost where
+    /// the agent CLI reports one.
+    ///
+    /// Written by the daemon, which reads it from the agent CLI's own records
+    /// while the agent runs. Persisted so a stopped or closed session still
+    /// shows what it used, after the files it was read from are gone too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_usage: Option<okena_core::agent_usage::AgentUsage>,
     /// Folder icon color for this project
     #[serde(default)]
     pub folder_color: FolderColor,
@@ -740,6 +748,7 @@ mod tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             folder_color: Default::default(),
             hooks: Default::default(),
             connection_id: None,
@@ -2432,6 +2441,26 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&p).expect("serialize")).expect("load");
         assert_eq!(back.repo_ids, ["repo1", "repo2"]);
     }
+
+    #[test]
+    fn a_session_keeps_what_its_agent_used() {
+        let mut p = make_project("/tmp/p");
+        // Nothing to say before the agent has used anything, and a
+        // workspace.json from before the field still loads.
+        let json = serde_json::to_value(&p).expect("serialize");
+        assert!(json.get("agent_usage").is_none(), "{json}");
+        let usage = okena_core::agent_usage::AgentUsage {
+            tokens: 1_234_567,
+            output_only: false,
+            cost_usd: Some(1.25),
+        };
+        p.agent_usage = Some(usage.clone());
+        // Closing a session is what its history is read after.
+        p.closed_at = Some(7);
+        let back: ProjectData =
+            serde_json::from_value(serde_json::to_value(&p).expect("serialize")).expect("load");
+        assert_eq!(back.agent_usage, Some(usage));
+    }
 }
 
 #[cfg(test)]
@@ -2460,6 +2489,7 @@ mod agent_session_tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             agent: None,
             folder_color: Default::default(),
             hooks: Default::default(),

@@ -2,6 +2,7 @@
 
 pub mod agent_activity;
 pub mod agent_model;
+pub mod agent_usage;
 pub mod agents;
 pub mod api;
 pub mod connections;

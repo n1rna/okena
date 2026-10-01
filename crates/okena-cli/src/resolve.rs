@@ -324,6 +324,7 @@ mod tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             cwd_missing: false,
             agent: None,
             agent_activity: Default::default(),

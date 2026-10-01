@@ -1095,6 +1095,15 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             event,
             pushed_from,
         },
+        ActionRequest::AgentUsageReport {
+            terminal_id,
+            cost_usd,
+            transcript_path,
+        } => ActionRequest::AgentUsageReport {
+            terminal_id: s(&terminal_id),
+            cost_usd,
+            transcript_path,
+        },
         ActionRequest::AgentRestart { project_id } => ActionRequest::AgentRestart {
             project_id: s(&project_id),
         },
