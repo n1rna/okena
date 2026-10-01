@@ -113,15 +113,17 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         }
         // Reads the map of every repository okena has open.
         ActionRequest::ProjectLinks => ActionClientKind::Search,
-        // A listing runs `git status` in every store, and a tree reads the
-        // head of every entry: more than the fast bucket allows on a large
-        // store.
+        // A listing runs `git status` in every store, a tree reads the head
+        // of every entry and a search reads every file of every root: more
+        // than the fast bucket allows on a large store.
         // A context search runs discovery and reads the roots it has not
         // cached yet: a first search over a large workspace outlasts the fast
         // bucket.
         ActionRequest::KnowledgeStores
         | ActionRequest::KnowledgeTree { .. }
+        | ActionRequest::KnowledgeSearch { .. }
         | ActionRequest::SpecStores
+        | ActionRequest::SpecSearch { .. }
         | ActionRequest::ContextSearch { .. } => ActionClientKind::Search,
         // Task-provider calls cross the internet. The provider's own HTTP
         // timeout is 20 s, so the fast bucket would abandon the request before

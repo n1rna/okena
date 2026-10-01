@@ -931,7 +931,8 @@ pub fn execute_action(
         // before they reach this match; these arms keep any other caller of
         // `execute_action` correct.
         ActionRequest::SpecStores => specs::stores(ws, settings),
-        action @ (ActionRequest::SpecStoreFetch { .. }
+        action @ (ActionRequest::SpecSearch { .. }
+        | ActionRequest::SpecStoreFetch { .. }
         | ActionRequest::SpecStorePull { .. }
         | ActionRequest::SpecStoreCommit { .. }
         | ActionRequest::SpecStorePush { .. }) => specs::execute_spec_git_action(
@@ -1022,6 +1023,7 @@ pub fn execute_action(
         action @ (ActionRequest::KnowledgeStores
         | ActionRequest::KnowledgeTree { .. }
         | ActionRequest::KnowledgeRead { .. }
+        | ActionRequest::KnowledgeSearch { .. }
         | ActionRequest::KnowledgeWrite { .. }
         | ActionRequest::KnowledgeFileCreate { .. }
         | ActionRequest::KnowledgeFolderCreate { .. }

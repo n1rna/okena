@@ -3077,11 +3077,13 @@ pub async fn daemon_command_loop(
             }
             // ── OpenSpec store git: off the queue and the workspace lock ──
             // The listing runs `git status` in every store checkout; fetch,
-            // pull and push reach the network, and commit runs the user's
-            // hooks. None of them changes the workspace, so discovery's sources
-            // are copied under a brief lock, as knowledge's are.
+            // pull and push reach the network, commit runs the user's hooks,
+            // and a search reads every root's documents. None of them changes
+            // the workspace, so discovery's sources are copied under a brief
+            // lock, as knowledge's are.
             RemoteCommand::Action(
                 action @ (ActionRequest::SpecStores
+                | ActionRequest::SpecSearch { .. }
                 | ActionRequest::SpecStoreFetch { .. }
                 | ActionRequest::SpecStorePull { .. }
                 | ActionRequest::SpecStoreCommit { .. }
@@ -3160,6 +3162,7 @@ pub async fn daemon_command_loop(
                 action @ (ActionRequest::KnowledgeStores
                 | ActionRequest::KnowledgeTree { .. }
                 | ActionRequest::KnowledgeRead { .. }
+                | ActionRequest::KnowledgeSearch { .. }
                 | ActionRequest::KnowledgeWrite { .. }
                 | ActionRequest::KnowledgeFileCreate { .. }
                 | ActionRequest::KnowledgeFolderCreate { .. }

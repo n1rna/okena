@@ -1832,6 +1832,18 @@ pub enum ActionRequest {
         root: Option<String>,
         path: String,
     },
+    /// Search every root's documents by name, path and content — a
+    /// `SpecSearchResult`.
+    ///
+    /// `roots` are keys from `SpecStores`; empty is every root, and a key the
+    /// daemon did not discover matches nothing
+    /// (`okena_core::doc_search::spec_matches`).
+    SpecSearch {
+        #[serde(default)]
+        query: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        roots: Vec<String>,
+    },
     /// Replace one existing document in a root. Replies with the new
     /// `revision`.
     ///
@@ -2044,6 +2056,22 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         path: String,
+    },
+    /// Search every root's files by name, path and content — a
+    /// `KnowledgeSearchResult`.
+    ///
+    /// `roots` are keys from `KnowledgeStores` and `kinds` the kinds to keep;
+    /// either left empty is no opinion. Values OR within a group and the
+    /// groups AND with each other and the text
+    /// (`okena_core::doc_search::knowledge_matches`). A root key the daemon
+    /// did not discover matches nothing.
+    KnowledgeSearch {
+        #[serde(default)]
+        query: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        roots: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kinds: Vec<crate::doc_search::KnowledgeFacet>,
     },
     /// Replace one existing file in a root. Replies with the new `revision`.
     ///
@@ -3226,6 +3254,15 @@ mod tests {
                 project_ids: vec!["p1".into()],
                 terminal_id: None,
                 limit: Some(20),
+            },
+            ActionRequest::KnowledgeSearch {
+                query: "smoke".into(),
+                roots: vec!["store:acme".into()],
+                kinds: vec![crate::doc_search::KnowledgeFacet::Partial],
+            },
+            ActionRequest::SpecSearch {
+                query: "login".into(),
+                roots: Vec::new(),
             },
             ActionRequest::ContextHit {
                 item: crate::context::ContextRef {

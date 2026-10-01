@@ -13,6 +13,10 @@ use super::briefs::{self, PromptRoots};
 use crate::workspace::persistence::{AppSettings, get_config_dir};
 use crate::workspace::state::ProjectData;
 use okena_core::api::ActionRequest;
+use okena_core::doc_search::{
+    KnowledgeFacet, KnowledgeHit, KnowledgeSearchFilter, KnowledgeSearchResult, SearchDoc,
+    knowledge_matches,
+};
 use okena_core::knowledge::{KnowledgeDocument, KnowledgeRoot, KnowledgeRootKind, KnowledgeStores};
 use okena_knowledge::discover::{self, ProjectSource, Sources};
 use okena_knowledge::prompts::{self, Flow, Vars};
@@ -128,6 +132,11 @@ fn execute_at(
         }
         ActionRequest::KnowledgeTree { root } => tree_of(sources, root.as_deref()),
         ActionRequest::KnowledgeRead { root, path } => read(sources, root.as_deref(), path),
+        ActionRequest::KnowledgeSearch {
+            query,
+            roots,
+            kinds,
+        } => search(sources, query, roots, kinds),
         ActionRequest::KnowledgeWrite {
             root,
             path,
@@ -531,6 +540,79 @@ fn read(sources: &Sources, key: Option<&str>, path: &str) -> ActionResult {
         }
         Err(e) => ActionResult::Err(format!("could not read {path}: {e}")),
     }
+}
+
+/// Search every usable root's entries by name, path and content (QBL-436).
+///
+/// Only roots discovery found are read, and only the files their trees list,
+/// through the same path check a read goes through: a search must not be a
+/// way to read what a read would refuse. A root that is not usable is skipped
+/// rather than failing the search — the listing already says what is wrong
+/// with it.
+fn search(
+    sources: &Sources,
+    query: &str,
+    roots: &[String],
+    kinds: &[KnowledgeFacet],
+) -> ActionResult {
+    let filter = KnowledgeSearchFilter {
+        query: query.to_string(),
+        roots: roots.to_vec(),
+        kinds: kinds.to_vec(),
+    };
+    // The Root and Kind choices alone, to tell whether a file is worth opening.
+    let groups = KnowledgeSearchFilter {
+        query: String::new(),
+        ..filter.clone()
+    };
+    let mut result = KnowledgeSearchResult::default();
+    for root in discovered(sources).roots.iter().filter(|r| r.healthy) {
+        let dir = Path::new(&root.path);
+        for entry in tree::read_tree(dir).entries {
+            result.total += 1;
+            let facet = KnowledgeFacet::of(entry.kind, &entry.name);
+            let names = [entry.title.as_str(), entry.name.as_str()];
+            let paths: Vec<&str> = std::iter::once(entry.path.as_str())
+                .chain(entry.files.iter().map(String::as_str))
+                .collect();
+            let doc = |content| SearchDoc {
+                root_key: &root.key,
+                names: &names,
+                paths: &paths,
+                content,
+            };
+            // Names and paths first: most searches are settled by them, and a
+            // file its root or kind has already ruled out is never opened.
+            let hit = knowledge_matches(&filter, facet, &doc(""))
+                || (knowledge_matches(&groups, facet, &doc(""))
+                    && knowledge_matches(
+                        &filter,
+                        facet,
+                        &doc(&searchable_text(dir, &entry.path)),
+                    ));
+            if hit {
+                result.hits.push(KnowledgeHit {
+                    root_key: root.key.clone(),
+                    path: entry.path,
+                    title: entry.title,
+                    facet,
+                });
+            }
+        }
+    }
+    to_result(serde_json::to_value(result), "knowledge search")
+}
+
+/// A listed file's text for searching: empty when it cannot be read as text
+/// or is past what a read would show, so it can still match by name.
+fn searchable_text(root: &Path, path: &str) -> String {
+    let Ok(real) = tree::resolve_document(root, path) else {
+        return String::new();
+    };
+    if real.metadata().is_ok_and(|m| m.len() > MAX_DOC_BYTES) {
+        return String::new();
+    }
+    std::fs::read_to_string(&real).unwrap_or_default()
 }
 
 /// Replace an existing file, through the same root and path checks as
@@ -1816,6 +1898,156 @@ mod tests {
             ))
             .contains("not a store")
         );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    // ---- searching every root (QBL-436) ----
+
+    /// Two registered stores with one of everything the Kind filter tells
+    /// apart, and a word that appears only inside one template's text.
+    fn searchable(sandbox: &Path) {
+        let eng = sandbox.join("eng");
+        store(&eng, "acme-eng");
+        write(&eng.join("docs/ci/pipeline.md"), "# Pipeline\nRuns on every merge.\n");
+        write(
+            &eng.join("templates/house-style.md"),
+            "Write plainly. Mention the Zeppelin rule.\n",
+        );
+        write(&eng.join("templates/partials/context.md"), "Shared context.\n");
+        write(&eng.join("templates/briefs/task-start.md"), "Start the task.\n");
+        write(
+            &eng.join("skills/release/SKILL.md"),
+            "---\nname: release\ndescription: Cut a release\n---\nSteps.\n",
+        );
+        write(&eng.join("skills/release/checklist.txt"), "tag, push\n");
+        let ops = sandbox.join("ops");
+        store(&ops, "acme-ops");
+        write(&ops.join("templates/partials/oncall.md"), "Who to page.\n");
+        for checkout in [&eng, &ops] {
+            okena_knowledge::registry::register(
+                &registry(sandbox),
+                &checkout.to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        }
+    }
+
+    fn search(
+        sandbox: &Path,
+        query: &str,
+        roots: &[&str],
+        kinds: &[okena_core::doc_search::KnowledgeFacet],
+    ) -> okena_core::doc_search::KnowledgeSearchResult {
+        ok!(run(
+            sandbox,
+            &[],
+            ActionRequest::KnowledgeSearch {
+                query: query.into(),
+                roots: roots.iter().map(|r| (*r).to_string()).collect(),
+                kinds: kinds.to_vec(),
+            },
+        ))
+    }
+
+    fn found(result: &okena_core::doc_search::KnowledgeSearchResult) -> Vec<String> {
+        result
+            .hits
+            .iter()
+            .map(|h| format!("{}:{}", h.root_key, h.path))
+            .collect()
+    }
+
+    #[test]
+    fn a_search_finds_a_word_that_is_only_inside_a_templates_text() {
+        let sandbox = tmpdir("search-content");
+        searchable(&sandbox);
+        // No name or path says "zeppelin"; only the file's text does.
+        let result = search(&sandbox, "  ZEPPELIN ", &[], &[]);
+        assert_eq!(found(&result), ["store:acme-eng:templates/house-style.md"]);
+        assert_eq!(
+            result.hits[0].facet,
+            okena_core::doc_search::KnowledgeFacet::Template
+        );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn a_search_covers_every_root_and_counts_every_file() {
+        let sandbox = tmpdir("search-all");
+        searchable(&sandbox);
+        // Nothing narrowing: everything, across both stores.
+        let everything = search(&sandbox, "", &[], &[]);
+        assert_eq!(everything.total, 8);
+        assert_eq!(everything.hits.len(), 8);
+
+        // A directory name, in both roots, through the path.
+        let partials = search(&sandbox, "templates/partials", &[], &[]);
+        assert_eq!(
+            found(&partials),
+            [
+                "store:acme-eng:templates/partials/context.md",
+                "store:acme-ops:templates/partials/oncall.md",
+            ]
+        );
+        assert_eq!(partials.total, 8, "the total is not narrowed");
+
+        // A skill is found by a supporting file it carries.
+        assert_eq!(
+            found(&search(&sandbox, "checklist", &[], &[])),
+            ["store:acme-eng:skills/release/SKILL.md"]
+        );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn kind_and_root_narrow_a_search_and_each_other() {
+        use okena_core::doc_search::KnowledgeFacet as F;
+        let sandbox = tmpdir("search-facets");
+        searchable(&sandbox);
+
+        // Kind = partial is only partials: not briefs, not plain templates.
+        let partials = search(&sandbox, "", &[], &[F::Partial]);
+        assert_eq!(
+            found(&partials),
+            [
+                "store:acme-eng:templates/partials/context.md",
+                "store:acme-ops:templates/partials/oncall.md",
+            ]
+        );
+        assert!(partials.hits.iter().all(|h| h.facet == F::Partial));
+
+        // Two kinds widen.
+        assert_eq!(search(&sandbox, "", &[], &[F::Partial, F::Brief]).hits.len(), 3);
+
+        // A root narrows, and text narrows within it.
+        let ops = search(&sandbox, "", &["store:acme-ops"], &[]);
+        assert!(ops.hits.iter().all(|h| h.root_key == "store:acme-ops"));
+        assert_eq!(ops.hits.len(), 2);
+        assert_eq!(
+            found(&search(&sandbox, "page", &["store:acme-ops"], &[])),
+            ["store:acme-ops:templates/partials/oncall.md"]
+        );
+
+        // Root and kind together: the one partial in that root.
+        assert_eq!(
+            found(&search(&sandbox, "", &["store:acme-eng"], &[F::Partial])),
+            ["store:acme-eng:templates/partials/context.md"]
+        );
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn a_search_cannot_name_a_root_the_daemon_did_not_discover() {
+        let sandbox = tmpdir("search-guard");
+        searchable(&sandbox);
+        write(&sandbox.join("elsewhere/docs/secret.md"), "ZEPPELIN SECRET\n");
+        // A key is a choice among discovered roots, never a directory.
+        let key = format!("path:{}", sandbox.join("elsewhere").to_string_lossy());
+        let result = search(&sandbox, "secret", &[&key], &[]);
+        assert!(result.hits.is_empty(), "{result:?}");
+        // And an unfiltered search never leaves the discovered roots either.
+        assert!(found(&search(&sandbox, "secret", &[], &[])).is_empty());
         std::fs::remove_dir_all(&sandbox).ok();
     }
 }

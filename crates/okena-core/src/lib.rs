@@ -7,6 +7,7 @@ pub mod api;
 pub mod connections;
 pub mod context;
 pub mod diagnostic;
+pub mod doc_search;
 pub mod extension;
 pub mod fs;
 pub mod git_poll;
