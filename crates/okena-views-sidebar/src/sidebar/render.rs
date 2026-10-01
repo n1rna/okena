@@ -115,6 +115,7 @@ impl Sidebar {
             .child(self.render_space_selector(cx))
             .child(self.render_space_overflow_menu(cx))
             .child(self.render_space_menu(cx))
+            .child(self.render_agent_menu(cx))
             .child(self.render_harness_nav(cx))
             // One header for the list: selector, overview, view options, add.
             .child(self.render_list_header(cx))

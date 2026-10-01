@@ -10,9 +10,9 @@
 //! One definition for every place that asks, so the session panel's WORKTREES
 //! list and the sidebar's tree cannot disagree about where an agent works.
 
-use crate::{AgentSortMode, ProjectData};
+use crate::{AgentSortMode, ProjectData, agent_order};
 use okena_core::tasks::TaskRef;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Whether `candidate` works on any of the session's tasks, and isn't the
 /// session itself.
@@ -40,6 +40,8 @@ pub fn is_related<'a>(
 pub struct SessionPlacement {
     by_worktree: HashMap<String, Vec<String>>,
     by_repo: HashMap<String, Vec<String>>,
+    /// The live sessions in the pinned tier, as the Agents list has them.
+    pinned: HashSet<String>,
 }
 
 impl SessionPlacement {
@@ -54,6 +56,12 @@ impl SessionPlacement {
     /// `repo_ids` that have no worktree of their own.
     pub fn for_repo(&self, repo_id: &str) -> &[String] {
         self.by_repo.get(repo_id).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Whether `session_id` is in the Agents list's pinned tier: a top-level
+    /// agent that is pinned, or a sub-agent of one.
+    pub fn is_pinned(&self, session_id: &str) -> bool {
+        self.pinned.contains(session_id)
     }
 
     /// Whether `session_id` is placed under anything.
@@ -73,34 +81,46 @@ impl SessionPlacement {
 /// Place every agent session in `projects` under the worktrees and repos it
 /// works in. Sessions linked to neither are left out.
 ///
-/// `live_order` orders the live sessions the way the Agents list does, so a
-/// worktree's agents read in the same order in both lists.
-pub fn place_sessions(projects: &[ProjectData], live_order: AgentSortMode) -> SessionPlacement {
-    let mut sessions: Vec<&ProjectData> = projects
+/// The live sessions are ordered as the Agents list orders them
+/// (`agent_order`): pinned ones first as arranged in `project_order`, the rest
+/// by `live_order`, a sub-agent right after its parent. So a worktree's agents
+/// read in the same order in both lists.
+pub fn place_sessions(
+    projects: &[ProjectData],
+    project_order: &[String],
+    live_order: AgentSortMode,
+) -> SessionPlacement {
+    let (live, mut closed): (Vec<&ProjectData>, Vec<&ProjectData>) = projects
         .iter()
         .filter(|p| p.worktree_info.is_none() && p.agent_role().is_some())
-        .collect();
-    sessions.sort_by(|a, b| match (a.closed_at, b.closed_at) {
-        (None, Some(_)) => std::cmp::Ordering::Less,
-        (Some(_), None) => std::cmp::Ordering::Greater,
-        (Some(x), Some(y)) => y.cmp(&x).then_with(|| a.name.cmp(&b.name)),
-        (None, None) => match live_order {
-            // A session that has never run anything sorts last rather than
-            // first, as it does in the Agents list.
-            AgentSortMode::Activity => b
-                .last_activity_at
-                .cmp(&a.last_activity_at)
-                .then_with(|| a.name.cmp(&b.name)),
-            AgentSortMode::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        },
+        .partition(|p| p.closed_at.is_none());
+    closed.sort_by(|a, b| {
+        b.closed_at
+            .cmp(&a.closed_at)
+            .then_with(|| a.name.cmp(&b.name))
     });
+    let by_id: HashMap<&str, &ProjectData> = live.iter().map(|p| (p.id.as_str(), *p)).collect();
+    let ordered = agent_order::order_live(&live, project_order, live_order);
+    let pinned: HashSet<String> = ordered
+        .iter()
+        .filter(|placed| placed.pinned)
+        .map(|placed| placed.id.clone())
+        .collect();
+    let sessions: Vec<&ProjectData> = ordered
+        .iter()
+        .filter_map(|placed| by_id.get(placed.id.as_str()).copied())
+        .chain(closed)
+        .collect();
 
     let worktrees: Vec<&ProjectData> = projects
         .iter()
         .filter(|p| p.worktree_info.is_some())
         .collect();
 
-    let mut placement = SessionPlacement::default();
+    let mut placement = SessionPlacement {
+        pinned,
+        ..Default::default()
+    };
     for session in sessions {
         let tasks: Vec<String> = session
             .linked_tasks()
@@ -276,7 +296,7 @@ mod tests {
             worktree("wt1", "okena", &["u1"]),
             session("s1", &["u1"]),
         ];
-        let placed = place_sessions(&projects, AgentSortMode::Activity);
+        let placed = place_sessions(&projects, &[], AgentSortMode::Activity);
         assert_eq!(placed.for_worktree("wt1"), ["s1"]);
         // Not also under the repo: it is shown where its work is.
         assert!(placed.for_repo("okena").is_empty());
@@ -288,7 +308,7 @@ mod tests {
             worktree("wt2", "okena", &["u2"]),
             session("s1", &["u1", "u2"]),
         ];
-        let placed = place_sessions(&projects, AgentSortMode::Activity);
+        let placed = place_sessions(&projects, &[], AgentSortMode::Activity);
         assert_eq!(placed.for_worktree("wt2"), ["s1"]);
     }
 
@@ -299,7 +319,7 @@ mod tests {
             worktree("wt-b", "repo-b", &["u2"]),
             session("s1", &["u1", "u2"]),
         ];
-        let placed = place_sessions(&projects, AgentSortMode::Activity);
+        let placed = place_sessions(&projects, &[], AgentSortMode::Activity);
         assert_eq!(placed.for_worktree("wt-a"), ["s1"]);
         assert_eq!(placed.for_worktree("wt-b"), ["s1"]);
     }
@@ -311,7 +331,7 @@ mod tests {
         let mut newer = session("s-new", &["u1"]);
         newer.last_activity_at = Some(20);
         let projects = vec![worktree("wt1", "okena", &["u1"]), older, newer];
-        let placed = place_sessions(&projects, AgentSortMode::Activity);
+        let placed = place_sessions(&projects, &[], AgentSortMode::Activity);
         assert_eq!(placed.for_worktree("wt1"), ["s-new", "s-old"]);
     }
 
@@ -320,7 +340,7 @@ mod tests {
         let mut coordinator = custom("coord");
         coordinator.repo_ids = ids(&["repo-a", "repo-b"]);
         let projects = vec![repo("repo-a"), repo("repo-b"), coordinator];
-        let placed = place_sessions(&projects, AgentSortMode::Activity);
+        let placed = place_sessions(&projects, &[], AgentSortMode::Activity);
         assert_eq!(placed.for_repo("repo-a"), ["coord"]);
         assert_eq!(placed.for_repo("repo-b"), ["coord"]);
     }
@@ -330,7 +350,7 @@ mod tests {
         let mut s = session("s1", &["u1"]);
         s.repo_ids = ids(&["okena"]);
         let projects = vec![worktree("wt1", "okena", &["u1"]), s];
-        let placed = place_sessions(&projects, AgentSortMode::Activity);
+        let placed = place_sessions(&projects, &[], AgentSortMode::Activity);
         assert_eq!(placed.for_worktree("wt1"), ["s1"]);
         assert!(placed.for_repo("okena").is_empty());
     }
@@ -340,7 +360,7 @@ mod tests {
         let mut s = custom("spec");
         s.context_projects = ids(&["okena"]);
         let projects = vec![repo("okena"), s];
-        let placed = place_sessions(&projects, AgentSortMode::Activity);
+        let placed = place_sessions(&projects, &[], AgentSortMode::Activity);
         assert!(placed.for_repo("okena").is_empty());
         assert!(
             placed.is_empty(),
@@ -355,7 +375,7 @@ mod tests {
             session("s1", &["u9"]),
             repo("okena"),
         ];
-        let placed = place_sessions(&projects, AgentSortMode::Activity);
+        let placed = place_sessions(&projects, &[], AgentSortMode::Activity);
         assert!(placed.for_worktree("wt1").is_empty());
         assert!(placed.is_empty());
     }
@@ -377,15 +397,48 @@ mod tests {
             closed_new,
             live_busy,
         ];
-        let placed = place_sessions(&projects, AgentSortMode::Activity);
+        let placed = place_sessions(&projects, &[], AgentSortMode::Activity);
         assert_eq!(
             placed.for_worktree("wt1"),
             ["live-busy", "live-idle", "closed-new", "closed-old"]
         );
-        let by_name = place_sessions(&projects, AgentSortMode::Name);
+        let by_name = place_sessions(&projects, &[], AgentSortMode::Name);
         assert_eq!(
             by_name.for_worktree("wt1"),
             ["live-busy", "live-idle", "closed-new", "closed-old"]
         );
+    }
+
+    #[test]
+    fn pinned_sessions_lead_a_worktrees_agents_as_they_lead_the_agents_list() {
+        // Three sessions share the worktree. `quiet` and `old` are pinned and
+        // arranged quiet-then-old; `busy` is the most recent and not pinned.
+        let mut busy = session("busy", &["u1"]);
+        busy.last_activity_at = Some(90);
+        let mut old = session("old", &["u1"]);
+        old.last_activity_at = Some(50);
+        old.pinned = true;
+        let mut quiet = session("quiet", &["u1"]);
+        quiet.last_activity_at = Some(10);
+        quiet.pinned = true;
+        let mut closed = session("closed", &["u1"]);
+        closed.closed_at = Some(5);
+        closed.pinned = true;
+        let projects = vec![busy, closed, old, worktree("wt1", "okena", &["u1"]), quiet];
+        let arranged = ids(&["quiet", "busy", "old"]);
+        for mode in [AgentSortMode::Activity, AgentSortMode::Name] {
+            // A pin is for live work: the closed session stays in the history.
+            assert_eq!(
+                place_sessions(&projects, &arranged, mode).for_worktree("wt1"),
+                ["quiet", "old", "busy", "closed"],
+                "{mode:?}"
+            );
+            let placed = place_sessions(&projects, &arranged, mode);
+            let pins: Vec<bool> = ["quiet", "old", "busy", "closed"]
+                .iter()
+                .map(|id| placed.is_pinned(id))
+                .collect();
+            assert_eq!(pins, [true, true, false, false]);
+        }
     }
 }

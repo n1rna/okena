@@ -78,13 +78,17 @@ pub enum ProjectSortMode {
     Activity,
 }
 
-/// How the sidebar orders agent sessions.
+/// How the sidebar orders the agent sessions that are not pinned.
 ///
 /// Deliberately not `ProjectSortMode`: its `Manual` arm means "follow
-/// `project_order` and the folder grouping", and nobody hand-arranges or files
-/// agent sessions — they are created by starting work and disappear when the
-/// work is done. Recency and name are the two axes that actually distinguish
-/// them.
+/// `project_order` and the folder grouping", and nobody files agent sessions
+/// or arranges all of them — they are created by starting work and disappear
+/// when the work is done. Recency and name are the two axes that actually
+/// distinguish them.
+///
+/// The few a user does want kept in place are pinned instead: pinned agents
+/// lead the list in a hand-arranged order whichever mode this is. See
+/// [`crate::agent_order`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentSortMode {

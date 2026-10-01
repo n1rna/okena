@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 pub use okena_layout::{LayoutNode, SplitDirection};
 pub use okena_state::agent_links;
+pub use okena_state::agent_order;
 pub use okena_state::agent_tree;
 pub use okena_state::{
     AgentRole, AgentSortMode, CanvasPoint, CanvasViewport, DropZone, FocusedTerminalState,

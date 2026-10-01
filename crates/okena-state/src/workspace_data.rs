@@ -603,6 +603,8 @@ pub struct ProjectData {
     /// Whether this project is pinned to the top of the activity-sorted view.
     /// Pinned projects keep their stable manual order; only non-pinned projects
     /// are reordered by activity. See [`crate::window_state::ProjectSortMode`].
+    /// For an agent session it is the pin of the Agents list instead, which
+    /// holds in either of that list's sorts. See [`crate::agent_order`].
     #[serde(default)]
     pub pinned: bool,
     /// Unix-millis timestamp of the project's last meaningful activity
