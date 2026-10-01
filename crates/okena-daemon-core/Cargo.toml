@@ -47,6 +47,9 @@ uuid = { version = "1.10", features = ["v4"] }
 anyhow = "1.0"
 # Process table for the per-terminal memory figures (`memory_poll`).
 sysinfo = "0.33"
+# Home directory, for where Codex and Copilot keep their session records
+# (`agent_usage`).
+dirs = "5.0"
 
 [dev-dependencies]
 # Throwaway repositories for the session push detection tests.

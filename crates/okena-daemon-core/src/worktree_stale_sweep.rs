@@ -140,6 +140,7 @@ mod tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             id: id.to_string(),
             name: id.to_string(),
             path: path.to_string(),

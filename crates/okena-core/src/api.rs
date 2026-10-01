@@ -539,6 +539,11 @@ pub struct ApiProject {
     /// leave it out of the overview and the waiting indicators.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<u64>,
+    /// What the session's agent has used so far: its tokens, and its cost where
+    /// the agent CLI reports one. Mirrors `ProjectData::agent_usage`; `None`
+    /// when nothing is known, and from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_usage: Option<crate::agent_usage::AgentUsage>,
     /// Whether a closed session's working directory is gone from the daemon's
     /// disk — its worktree was removed — so it cannot be reopened there.
     ///
@@ -2465,6 +2470,17 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pushed_from: Option<String>,
     },
+    /// What Claude Code's status line said about the session in `terminal_id`
+    /// (`okena agent-event statusline`): the cost Claude itself has counted,
+    /// which it writes to no file while it runs, and where its transcript is.
+    /// Keyed by terminal like [`ActionRequest::AgentHookEvent`].
+    AgentUsageReport {
+        terminal_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
+    },
     /// Restart a session's agent and resume its conversation.
     ///
     /// Distinct from closing the terminal and creating a new one, which starts
@@ -2947,6 +2963,11 @@ mod tests {
                 agent_purpose: None,
                 context_projects: Vec::new(),
                 closed_at: Some(1_700_000_500_000),
+                agent_usage: Some(crate::agent_usage::AgentUsage {
+                    tokens: 1_234_567,
+                    output_only: false,
+                    cost_usd: Some(1.25),
+                }),
                 cwd_missing: true,
                 pinned: true,
                 last_activity_at: Some(1_700_000_000_000),
@@ -3028,6 +3049,7 @@ mod tests {
         assert!(parsed.projects[0].pinned);
         assert_eq!(parsed.projects[0].last_activity_at, Some(1_700_000_000_000));
         assert_eq!(parsed.projects[0].closed_at, Some(1_700_000_500_000));
+        assert_eq!(parsed.projects[0].agent_usage, resp.projects[0].agent_usage);
         assert!(parsed.projects[0].cwd_missing);
         assert_eq!(parsed.projects[0].default_shell, Some(ShellType::Default));
         assert_eq!(parsed.projects[0].hook_terminals.len(), 1);
@@ -3570,6 +3592,7 @@ mod tests {
         .unwrap();
         assert_eq!(old.closed_at, None);
         assert!(!old.cwd_missing);
+        assert_eq!(old.agent_usage, None);
     }
 
     #[test]

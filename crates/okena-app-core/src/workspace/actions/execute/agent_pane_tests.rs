@@ -153,6 +153,7 @@ fn project(session: bool, default_shell: Option<ShellType>, layout: LayoutNode) 
         agent_purpose: None,
         context_projects: Vec::new(),
         closed_at: None,
+        agent_usage: None,
         agent: None,
         folder_color: Default::default(),
         hooks: HooksConfig::default(),

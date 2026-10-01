@@ -34,6 +34,7 @@ fn make_project(id: &str) -> ProjectData {
         agent_purpose: None,
         context_projects: Vec::new(),
         closed_at: None,
+        agent_usage: None,
         agent: None,
         folder_color: FolderColor::default(),
         hooks: HooksConfig::default(),

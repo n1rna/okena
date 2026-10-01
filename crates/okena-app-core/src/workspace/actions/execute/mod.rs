@@ -832,6 +832,10 @@ pub fn execute_action(
         ActionRequest::AgentHookEvent { .. } => {
             ActionResult::Err("agent hook events are handled by the daemon".into())
         }
+        // Likewise: the daemon keeps what it reads usage from beside the PTYs.
+        ActionRequest::AgentUsageReport { .. } => {
+            ActionResult::Err("agent usage reports are handled by the daemon".into())
+        }
         ActionRequest::AgentStart { project_id } => terminal::start_agent(
             ws,
             focus_manager,
@@ -2072,6 +2076,7 @@ mod reconnect_shell_tests {
             agent_purpose: None,
             context_projects: Vec::new(),
             closed_at: None,
+            agent_usage: None,
             agent: None,
             folder_color: Default::default(),
             hooks: HooksConfig::default(),

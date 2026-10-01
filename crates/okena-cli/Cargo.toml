@@ -28,3 +28,7 @@ base64 = "0.22"
 rand = "0.8"
 uuid = { version = "1.10", features = ["v4"] }
 dirs = "5.0"
+
+[dev-dependencies]
+# Throwaway settings files for the status line tests.
+tempfile = "3"

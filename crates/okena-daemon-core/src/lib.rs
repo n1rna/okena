@@ -30,6 +30,7 @@
 //! runs the reactor until shutdown.
 
 pub mod agent_activity;
+pub mod agent_usage;
 pub mod command_loop;
 mod context;
 pub mod daemon;
