@@ -9,7 +9,11 @@
 //!
 //! So this takes sessions that each know their own task and their task's
 //! parent, and returns them in reading order with a depth on each. Nothing
-//! here knows about okena's UI, its projects, or how a session was launched.
+//! here knows about okena's UI or its projects.
+//!
+//! One thing the tickets cannot say: a coordinator over tasks picked together
+//! starts agents on tickets that are not children of its own. Those sessions
+//! record who started them, and that wins — okena did start them together.
 //!
 //! Kept apart from the sidebar because it is the foundation for more than
 //! drawing an indent: handing a parent's context down to its children, rolling
@@ -27,6 +31,8 @@ pub struct AgentNode {
     pub task_id: Option<String>,
     /// Provider id of that task's parent, if it has one.
     pub parent_task_id: Option<String>,
+    /// The session that started this one, if an agent did.
+    pub started_by: Option<String>,
 }
 
 /// A session placed in the tree.
@@ -41,7 +47,8 @@ pub struct PlacedAgent {
 
 /// Arrange `nodes` so every session follows its parent, indented.
 ///
-/// A session is a child only when the agent on its task's parent is *also*
+/// A session sits under the one that started it, and otherwise under the
+/// agent on its task's parent. Either way only when that session is *also*
 /// running: an orphan is shown at the top level rather than hidden or
 /// indented under nothing, because the alternative is work that has quietly
 /// left the list.
@@ -63,13 +70,22 @@ pub fn arrange(nodes: &[AgentNode]) -> Vec<PlacedAgent> {
         }
     }
 
-    // A node's parent session, when its task's parent has one running and it
-    // is not the node itself.
+    let ids: HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
+
+    // A node's parent session: the one that started it when that is running,
+    // else the one on its task's parent. Never the node itself.
     let parent_of: HashMap<&str, &str> = nodes
         .iter()
         .filter_map(|node| {
-            let parent_task = node.parent_task_id.as_deref()?;
-            let parent = *session_for_task.get(parent_task)?;
+            let starter = node
+                .started_by
+                .as_deref()
+                .and_then(|id| ids.get(id).copied());
+            let by_task = || {
+                let parent_task = node.parent_task_id.as_deref()?;
+                session_for_task.get(parent_task).copied()
+            };
+            let parent = starter.or_else(by_task)?;
             (parent != node.id).then_some((node.id.as_str(), parent))
         })
         .collect();
@@ -130,6 +146,15 @@ mod tests {
             id: id.into(),
             task_id: task.map(str::to_string),
             parent_task_id: parent.map(str::to_string),
+            started_by: None,
+        }
+    }
+
+    /// A session the session `starter` started.
+    fn started(id: &str, task: Option<&str>, parent: Option<&str>, starter: &str) -> AgentNode {
+        AgentNode {
+            started_by: Some(starter.to_string()),
+            ..node(id, task, parent)
         }
     }
 
@@ -241,6 +266,61 @@ mod tests {
                 ("second".into(), 1)
             ]
         );
+    }
+
+    #[test]
+    fn an_agent_sits_under_the_coordinator_that_started_it() {
+        // Tasks picked together share no parent, and the coordinator is named
+        // after the first of them: the tickets alone list all three loose.
+        let nodes = [
+            node("coord", Some("A"), None),
+            started("a", Some("A"), None, "coord"),
+            started("b", Some("B"), None, "coord"),
+            node("loose", Some("C"), None),
+        ];
+        assert_eq!(
+            shape(&nodes),
+            [
+                ("coord".into(), 0),
+                ("a".into(), 1),
+                ("b".into(), 1),
+                ("loose".into(), 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn who_started_it_wins_over_the_tickets() {
+        // Its ticket is a child of the epic's, but the coordinator started it.
+        let nodes = [
+            node("epic", Some("E"), None),
+            node("coord", Some("X"), None),
+            started("s1", Some("S1"), Some("E"), "coord"),
+        ];
+        assert_eq!(
+            shape(&nodes),
+            [("epic".into(), 0), ("coord".into(), 0), ("s1".into(), 1)]
+        );
+    }
+
+    #[test]
+    fn an_agent_whose_starter_is_gone_falls_back_to_the_tickets() {
+        // The coordinator was closed. Its agents are still work in flight, so
+        // they go where the tickets put them rather than leaving the list.
+        let orphan = [started("a", Some("A"), None, "coord")];
+        assert_eq!(shape(&orphan), [("a".into(), 0)]);
+
+        let under_epic = [
+            node("epic", Some("E"), None),
+            started("s1", Some("S1"), Some("E"), "coord"),
+        ];
+        assert_eq!(shape(&under_epic), [("epic".into(), 0), ("s1".into(), 1)]);
+    }
+
+    #[test]
+    fn a_session_that_names_itself_as_starter_stays_at_the_top() {
+        let nodes = [started("a", Some("A"), None, "a")];
+        assert_eq!(shape(&nodes), [("a".into(), 0)]);
     }
 
     #[test]

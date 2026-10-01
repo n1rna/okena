@@ -488,6 +488,10 @@ pub struct ApiProject {
     /// ids like `worktree_ids`, prefixed the same way on a remote client.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repo_ids: Vec<String>,
+    /// The agent session that started this one. A project id, prefixed on a
+    /// remote client like `repo_ids`. Mirrors `ProjectData::started_by`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
     /// Agent-reported status and produced assets for this session. Like
     /// `task_ref`, it holds no okena-side ids, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2981,6 +2985,7 @@ mod tests {
                 task_ref: None,
                 also_tasks: Vec::new(),
                 repo_ids: Vec::new(),
+                started_by: None,
                 agent: None,
                 agent_activity: Default::default(),
                 spec_change: None,

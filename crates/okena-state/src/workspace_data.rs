@@ -511,6 +511,14 @@ pub struct ProjectData {
     /// Empty for everything else, whose repos are its worktrees' parents.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repo_ids: Vec<String>,
+    /// The agent session that started this one, by project id.
+    ///
+    /// Set when an agent starts another through `okena_start_work`, which is
+    /// what makes the new session its sub-agent. The tickets cannot say so:
+    /// a coordinator over picked tasks starts agents on tickets that are not
+    /// children of its own, and the lists would show them loose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
     /// Agent-reported state for this session: status and produced assets.
     ///
     /// Written by agents through okena's MCP server, never by the UI. Lives on
@@ -739,6 +747,7 @@ mod tests {
             task_ref: None,
             also_tasks: Vec::new(),
             repo_ids: Vec::new(),
+            started_by: None,
             agent: None,
             spec_change: None,
             knowledge_root: None,
@@ -2481,6 +2490,7 @@ mod agent_session_tests {
             task_ref: None,
             also_tasks: Vec::new(),
             repo_ids: Vec::new(),
+            started_by: None,
             spec_change: None,
             knowledge_root: None,
             project_scan: None,

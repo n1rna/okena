@@ -45,6 +45,11 @@ fn remote_ids(conn_id: &str, ids: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// One daemon project id as this client names it, prefixed like `remote_ids`.
+fn remote_id(conn_id: &str, id: Option<&str>) -> Option<String> {
+    id.map(|id| format!("remote:{}:{}", conn_id, id))
+}
+
 /// Result of applying a set of remote snapshots to the workspace data.
 #[derive(Clone, Debug, Default)]
 pub struct RemoteSyncOutcome {
@@ -224,6 +229,7 @@ pub fn apply_remote_snapshot(
                     existing.also_tasks = api_project.also_tasks.clone();
                     // Prefixed like `worktree_ids`: these are the daemon's project ids.
                     existing.repo_ids = remote_ids(conn_id, &api_project.repo_ids);
+                    existing.started_by = remote_id(conn_id, api_project.started_by.as_deref());
                     existing.spec_change = api_project.spec_change.clone();
                     existing.knowledge_root = api_project.knowledge_root.clone();
                     existing.project_scan = api_project.project_scan.clone();
@@ -314,6 +320,7 @@ pub fn apply_remote_snapshot(
                         task_ref: api_project.task_ref.clone(),
                         also_tasks: api_project.also_tasks.clone(),
                         repo_ids: remote_ids(conn_id, &api_project.repo_ids),
+                        started_by: remote_id(conn_id, api_project.started_by.as_deref()),
                         spec_change: api_project.spec_change.clone(),
                         knowledge_root: api_project.knowledge_root.clone(),
                         project_scan: api_project.project_scan.clone(),
@@ -652,6 +659,7 @@ mod tests {
             task_ref: None,
             also_tasks: Vec::new(),
             repo_ids: Vec::new(),
+            started_by: None,
             spec_change: None,
             knowledge_root: None,
             project_scan: None,
@@ -903,6 +911,30 @@ mod tests {
         // stops showing.
         apply_remote_snapshot(&mut data, &mut rs, &[snap(None)], WindowId::Main, DEFAULT_SPACE_ID);
         assert_eq!(data.projects[0].agent_usage, None);
+    }
+
+    #[test]
+    fn who_started_a_session_is_prefixed_on_add_and_on_update() {
+        let mut data = empty_data();
+        let mut rs = RemoteSyncState::new();
+        let snap = |starter: Option<&str>| {
+            let mut p = api_project("sub", Some(terminal("t1")));
+            p.started_by = starter.map(str::to_string);
+            RemoteSnapshot {
+                config: config("c1"),
+                state: Some(state_with(vec![p], vec!["sub".into()], vec![])),
+            }
+        };
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(Some("coord"))], WindowId::Main, DEFAULT_SPACE_ID);
+        // The coordinator's id as this client has it, or the tree finds no parent.
+        assert_eq!(data.projects[0].started_by.as_deref(), Some("remote:c1:coord"));
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(None)], WindowId::Main, DEFAULT_SPACE_ID);
+        assert_eq!(data.projects[0].started_by, None);
+
+        apply_remote_snapshot(&mut data, &mut rs, &[snap(Some("other"))], WindowId::Main, DEFAULT_SPACE_ID);
+        assert_eq!(data.projects[0].started_by.as_deref(), Some("remote:c1:other"));
     }
 
     #[test]

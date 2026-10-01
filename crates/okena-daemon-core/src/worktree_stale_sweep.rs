@@ -131,6 +131,7 @@ mod tests {
             task_ref: None,
             also_tasks: Vec::new(),
             repo_ids: Vec::new(),
+            started_by: None,
             agent: None,
             spec_change: None,
             knowledge_root: None,

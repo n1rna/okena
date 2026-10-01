@@ -66,14 +66,15 @@ pub fn order_live(
         AgentSortMode::Name => sorted.sort_by_key(|p| listed_name(p).to_lowercase()),
     }
 
-    // The tickets' own hierarchy, applied after sorting so the chosen order
-    // survives inside each level.
+    // Who started whom, then the tickets' own hierarchy, applied after
+    // sorting so the chosen order survives inside each level.
     let nodes: Vec<AgentNode> = sorted
         .iter()
         .map(|p| AgentNode {
             id: p.id.clone(),
             task_id: p.task_ref.as_ref().map(|t| t.id.external_id.clone()),
             parent_task_id: p.task_ref.as_ref().and_then(|t| t.parent_id.clone()),
+            started_by: p.started_by.clone(),
         })
         .collect();
     let placed = agent_tree::arrange(&nodes);
@@ -247,6 +248,34 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn agents_a_coordinator_started_follow_it_whatever_their_tickets_say() {
+        // Three tasks picked together, none a child of another. The
+        // coordinator is named after the first; the tickets list all loose.
+        let started = |id: &str, at: u64, task: &str| {
+            let mut p = on_task(id, at, task, None);
+            p.started_by = Some("coord".into());
+            p
+        };
+        let sessions = [
+            started("b", 40, "B"),
+            on_task("other", 30, "Z", None),
+            started("a", 20, "A"),
+            on_task("coord", 10, "A", None),
+        ];
+        assert_eq!(
+            shape(&sessions, &[], AgentSortMode::Activity),
+            ["other", "coord", "  b", "  a"]
+        );
+        // And they go where the coordinator goes when it is pinned.
+        let mut pinned_coord = sessions.clone();
+        pinned_coord[3].pinned = true;
+        assert_eq!(
+            shape(&pinned_coord, &["coord"], AgentSortMode::Activity),
+            ["*coord", "  *b", "  *a", "other"]
+        );
     }
 
     #[test]

@@ -322,3 +322,47 @@ fn a_folder_from_another_space_does_not_render_at_all(cx: &mut TestAppContext) {
     let sidebar = sidebar_over(cx, data);
     assert_eq!(rendered(&sidebar, cx), ["project:here-repo"]);
 }
+
+/// The Agents list's rows, in order, indented by depth.
+fn agents_list(sidebar: &gpui::Entity<Sidebar>, cx: &mut TestAppContext) -> Vec<String> {
+    sidebar.update(cx, |s, cx| {
+        let workspace = s.workspace.read(cx);
+        s.live_agent_order(workspace)
+            .into_iter()
+            .map(|agent| format!("{}{}", "  ".repeat(agent.depth), agent.id))
+            .collect()
+    })
+}
+
+#[gpui::test]
+fn the_agents_list_draws_a_coordinators_agents_under_it(cx: &mut TestAppContext) {
+    // A coordinator over three tasks picked together, started in a plain
+    // directory, and the agents it started on two of them. None of the
+    // tickets is a child of another, so the tickets alone list all loose.
+    let mut data = WorkspaceData::empty();
+    let started = |id: &str, on: &str| {
+        project(serde_json::json!({
+            "id": id, "name": id, "path": "/r/wt", "task_ref": task(on),
+            "started_by": "coord", "last_activity_at": 50,
+        }))
+    };
+    data.projects = vec![
+        project(serde_json::json!({
+            "id": "coord", "name": "coord", "path": "/home", "task_ref": task("u1"),
+            "also_tasks": [task("u2"), task("u3")], "repo_ids": ["plain"],
+            "last_activity_at": 10,
+        })),
+        started("one", "u1"),
+        started("two", "u2"),
+        project(serde_json::json!({
+            "id": "other", "name": "other", "path": "/r/x", "task_ref": task("u9"),
+            "last_activity_at": 90,
+        })),
+    ];
+    data.project_order = ["coord", "one", "two", "other"].map(String::from).to_vec();
+    let sidebar = sidebar_over(cx, data);
+    assert_eq!(
+        agents_list(&sidebar, cx),
+        ["other", "coord", "  one", "  two"]
+    );
+}
