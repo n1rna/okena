@@ -9,7 +9,6 @@
 
 use crate::theme::{ThemeColors, theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
-use crate::views::components::{SimpleInput, SimpleInputState};
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
@@ -18,7 +17,6 @@ use okena_core::knowledge::{
     Diagnostic, KnowledgeDocument, KnowledgeEntry, KnowledgeKind, KnowledgeRoot, KnowledgeRootKind,
     KnowledgeStores, KnowledgeTree, Severity,
 };
-use okena_ui::simple_input::InputChangedEvent;
 use std::collections::HashSet;
 
 use super::editor::{DocumentBuffer, Documents};
@@ -45,7 +43,6 @@ pub(crate) struct KnowledgeState {
     /// The open file's buffer, and any other with unsaved edits.
     pub(crate) documents: Documents,
     pub(crate) content_error: Option<String>,
-    pub(crate) filter: Entity<SimpleInputState>,
     /// Groups (`docs`) and doc folders (`docs/ci`) folded shut. Collapsed
     /// rather than expanded state, so a fresh view shows everything.
     pub(crate) collapsed: HashSet<String>,
@@ -53,13 +50,6 @@ pub(crate) struct KnowledgeState {
 
 impl KnowledgeState {
     pub(crate) fn new(cx: &mut Context<HarnessPane>) -> Self {
-        let filter = cx.new(|cx| SimpleInputState::new(cx).placeholder("Filter entries…"));
-        // The list filters as you type, so every keystroke re-renders.
-        cx.subscribe(
-            &filter,
-            |_this: &mut HarnessPane, _, _: &InputChangedEvent, cx| cx.notify(),
-        )
-        .detach();
         Self {
             stores: None,
             root_key: None,
@@ -71,7 +61,6 @@ impl KnowledgeState {
             selected: None,
             documents: Documents::default(),
             content_error: None,
-            filter,
             collapsed: HashSet::new(),
         }
     }
@@ -117,24 +106,9 @@ pub(crate) enum Row<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Group<'a> {
     pub(crate) kind: KnowledgeKind,
-    /// Matching entries, counted before folding.
+    /// Its entries, counted before folding.
     pub(crate) count: usize,
     pub(crate) rows: Vec<Row<'a>>,
-}
-
-/// Whether `entry` matches a filter typed by the user: case-insensitive, over
-/// what a person would search by. An empty filter matches everything.
-pub(crate) fn entry_matches(entry: &KnowledgeEntry, filter: &str) -> bool {
-    let needle = filter.trim().to_lowercase();
-    if needle.is_empty() {
-        return true;
-    }
-    std::iter::once(entry.title.as_str())
-        .chain(std::iter::once(entry.name.as_str()))
-        .chain(std::iter::once(entry.path.as_str()))
-        .chain(entry.description.as_deref())
-        .chain(entry.tags.iter().map(String::as_str))
-        .any(|field| field.to_lowercase().contains(&needle))
 }
 
 /// Kinds listed with their entries nested under folder rows.
@@ -147,29 +121,27 @@ pub(crate) fn entry_matches(entry: &KnowledgeEntry, filter: &str) -> bool {
 const NESTED_KINDS: &[KnowledgeKind] = &[KnowledgeKind::Doc, KnowledgeKind::Template];
 
 /// The list: kinds in their fixed order, empty kinds left out, docs and
-/// templates nested under folder rows. Folding is ignored while filtering, so
-/// a match is never hidden inside a closed folder.
+/// templates nested under folder rows.
+///
+/// Always the whole root: narrowing is the island's, which lists its matches
+/// across every root in place of this tree (`doc_search.rs`).
 pub(crate) fn group_entries<'a>(
     entries: &'a [KnowledgeEntry],
-    filter: &str,
     collapsed: &HashSet<String>,
 ) -> Vec<Group<'a>> {
-    let filtering = !filter.trim().is_empty();
     let mut groups = Vec::new();
     for kind in KnowledgeKind::all() {
-        let mut matching: Vec<&KnowledgeEntry> = entries
-            .iter()
-            .filter(|e| e.kind == kind && entry_matches(e, filter))
-            .collect();
+        let mut matching: Vec<&KnowledgeEntry> =
+            entries.iter().filter(|e| e.kind == kind).collect();
         if matching.is_empty() {
             continue;
         }
         matching.sort_by(|a, b| a.path.cmp(&b.path));
         let count = matching.len();
         let mut rows = Vec::new();
-        if filtering || !collapsed.contains(kind.folder()) {
+        if !collapsed.contains(kind.folder()) {
             if NESTED_KINDS.contains(&kind) {
-                nest(kind.folder(), &matching, filtering, collapsed, &mut rows);
+                nest(kind.folder(), &matching, collapsed, &mut rows);
             } else {
                 rows.extend(
                     matching
@@ -190,7 +162,6 @@ pub(crate) fn group_entries<'a>(
 fn nest<'a>(
     kind_folder: &str,
     entries: &[&'a KnowledgeEntry],
-    filtering: bool,
     collapsed: &HashSet<String>,
     rows: &mut Vec<Row<'a>>,
 ) {
@@ -219,7 +190,7 @@ fn nest<'a>(
             if depth >= open.len() {
                 open.push(folder);
             }
-            hidden = hidden || (!filtering && collapsed.contains(&key));
+            hidden = hidden || collapsed.contains(&key);
         }
         if !hidden {
             rows.push(Row::Entry {
@@ -338,6 +309,7 @@ impl HarnessPane {
                             this.knowledge.root_key = key;
                             this.knowledge.stores = Some(stores);
                             this.prune_knowledge_order(cx);
+                            this.doc_search_refreshed(HarnessSection::Knowledge, cx);
                             match tree {
                                 Some(Ok(tree)) => {
                                     this.knowledge.tree = Some(tree);
@@ -787,13 +759,18 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    /// Left column: roots, the filter, then the open root's entries by kind.
+    /// Left column: roots, then the open root's entries by kind.
+    ///
+    /// While the island narrows the page, the matches across every root stand
+    /// here instead (QBL-436).
     fn render_knowledge_tree(
         &self,
         stores: &KnowledgeStores,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let t = theme(cx);
+        if self.doc_search_active(HarnessSection::Knowledge) {
+            return self.render_doc_results(HarnessSection::Knowledge, cx);
+        }
         let builtin_root = self.knowledge_open_root().is_some_and(|r| r.builtin);
         let mut col = self.file_sidebar_column("knowledge-tree");
 
@@ -828,37 +805,26 @@ impl HarnessPane {
             return col.into_any_element();
         };
 
-        col = col.child(
-            h_flex()
-                .pt(px(10.0))
-                .gap(px(4.0))
-                .items_center()
-                .child(
-                    okena_ui::input::input_container(&t, None)
-                        .flex_1()
-                        .min_w_0()
-                        .px(px(6.0))
-                        .py(px(4.0))
-                        .child(SimpleInput::new(&self.knowledge.filter).text_size(ui_text_md(cx))),
-                )
-                // Not in okena's own store, which is rewritten on every
-                // start: a new entry there would not survive it.
-                .children((!builtin_root).then(|| {
-                    self.add_button(
-                        "knowledge-new-entry",
-                        "New entry",
-                        |this, window, cx| {
-                            this.open_new_form(
-                                HarnessSection::Knowledge,
-                                super::file_ops::NewItem::Knowledge(KnowledgeKind::Doc),
-                                window,
-                                cx,
-                            )
-                        },
+        // No `+` in okena's own store, which is rewritten on every start: a
+        // new entry there would not survive it.
+        col = col.child(if builtin_root {
+            self.section_label("Entries", cx)
+        } else {
+            self.tree_heading_with_add(
+                "Entries",
+                "knowledge-new-entry",
+                "New entry",
+                |this, window, cx| {
+                    this.open_new_form(
+                        HarnessSection::Knowledge,
+                        super::file_ops::NewItem::Knowledge(KnowledgeKind::Doc),
+                        window,
                         cx,
                     )
-                })),
-        );
+                },
+                cx,
+            )
+        });
         col = col.children(self.render_new_form(HarnessSection::Knowledge, cx));
         for d in &tree.status {
             col = col.child(
@@ -869,15 +835,10 @@ impl HarnessPane {
             );
         }
 
-        let filter = self.knowledge.filter.read(cx).value().to_string();
-        let groups = group_entries(&tree.entries, &filter, &self.knowledge.collapsed);
+        let groups = group_entries(&tree.entries, &self.knowledge.collapsed);
         if groups.is_empty() {
             col = col.child(self.kn_muted(
-                if tree.entries.is_empty() {
-                    "Nothing here yet — add Markdown under docs/, skills/, agents/ or templates/."
-                } else {
-                    "No entries match."
-                },
+                "Nothing here yet — add Markdown under docs/, skills/, agents/ or templates/.",
                 cx,
             ));
         }
@@ -1402,7 +1363,7 @@ impl HarnessPane {
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{Group, Row, entry_matches, group_entries};
+    use super::{Group, Row, group_entries};
     use okena_core::knowledge::{KnowledgeEntry, KnowledgeKind};
     use std::collections::HashSet;
 
@@ -1456,7 +1417,7 @@ mod tests {
     #[test]
     fn kinds_come_in_fixed_order_and_docs_nest_under_folders_once() {
         let entries = sample();
-        let groups = group_entries(&entries, "", &HashSet::new());
+        let groups = group_entries(&entries, &HashSet::new());
         assert_eq!(
             outline(&groups),
             [
@@ -1481,7 +1442,7 @@ mod tests {
     fn folding_hides_rows_but_keeps_the_fold_and_its_count() {
         let entries = sample();
         let collapsed: HashSet<String> = ["docs/ci".to_string(), "skills".to_string()].into();
-        let groups = group_entries(&entries, "", &collapsed);
+        let groups = group_entries(&entries, &collapsed);
         assert_eq!(
             outline(&groups),
             [
@@ -1510,7 +1471,7 @@ mod tests {
             entry(KnowledgeKind::Template, "house-style"),
         ];
         assert_eq!(
-            outline(&group_entries(&entries, "", &HashSet::new())),
+            outline(&group_entries(&entries, &HashSet::new())),
             [
                 "[Templates] 5",
                 "+briefs",
@@ -1527,7 +1488,7 @@ mod tests {
         // kind's folder so `docs/briefs` and `templates/briefs` are distinct.
         let collapsed: HashSet<String> = ["templates/partials".to_string()].into();
         assert_eq!(
-            outline(&group_entries(&entries, "", &collapsed)),
+            outline(&group_entries(&entries, &collapsed)),
             [
                 "[Templates] 5",
                 "+briefs",
@@ -1544,31 +1505,8 @@ mod tests {
             entry(KnowledgeKind::Agent, "reviewer"),
         ];
         assert_eq!(
-            outline(&group_entries(&flat, "", &HashSet::new())),
+            outline(&group_entries(&flat, &HashSet::new())),
             ["[Skills] 1", "release", "[Agents] 1", "reviewer"]
         );
-    }
-
-    #[test]
-    fn filtering_matches_case_insensitively_and_ignores_folds() {
-        let mut entries = sample();
-        entries[1].description = Some("How we REVIEW code".into());
-        entries[6].tags = vec!["Deploy".into()];
-        let collapsed: HashSet<String> = ["docs/ci".to_string(), "docs".to_string()].into();
-
-        assert_eq!(
-            outline(&group_entries(&entries, "review", &collapsed)),
-            ["[Docs] 1", "principles"]
-        );
-        assert_eq!(
-            outline(&group_entries(&entries, "deploy", &collapsed)),
-            ["[Skills] 1", "release"]
-        );
-        assert_eq!(
-            outline(&group_entries(&entries, "TAGGING", &collapsed)),
-            ["[Docs] 1", "+ci", "  +release", "    tagging"]
-        );
-        assert!(group_entries(&entries, "nothing-like-this", &collapsed).is_empty());
-        assert!(entry_matches(&entries[0], "   "));
     }
 }

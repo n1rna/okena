@@ -11,6 +11,7 @@
 //! than a settings write per mouse move.
 
 use crate::theme::theme;
+use crate::views::components::island::ISLAND_CLEARANCE;
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::v_flex;
@@ -62,7 +63,9 @@ impl HarnessPane {
             .w_full()
             .overflow_y_scroll()
             .px(px(6.0))
-            .pb(px(10.0))
+            // So the last rows scroll clear of the island, which floats over
+            // the bottom of the view and, in a narrow pane, over this column.
+            .pb(px(ISLAND_CLEARANCE))
     }
 
     /// Wrap a built column as the sidebar proper: the saved width, the divider

@@ -111,6 +111,7 @@ impl HarnessPane {
                             }
                             this.specs.root_key = key;
                             this.specs.stores = Some(stores);
+                            this.doc_search_refreshed(HarnessSection::Specs, cx);
                             match tree {
                                 Some(Ok(tree)) => {
                                     this.specs.tree = Some(tree);
@@ -586,7 +587,13 @@ impl HarnessPane {
     }
 
     /// Left column: the roots, then the open root's changes, specs and archive.
+    ///
+    /// While the island narrows the page, the matches across every root stand
+    /// here instead (QBL-436).
     fn render_spec_tree(&self, stores: &SpecStores, cx: &mut Context<Self>) -> AnyElement {
+        if self.doc_search_active(HarnessSection::Specs) {
+            return self.render_doc_results(HarnessSection::Specs, cx);
+        }
         let mut col = self.file_sidebar_column("spec-tree");
 
         // The roots are listed here, so this is where you add and manage

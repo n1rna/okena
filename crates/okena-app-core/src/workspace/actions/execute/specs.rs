@@ -15,7 +15,8 @@ use super::ActionResult;
 use super::briefs::{self, PromptRoots};
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{ProjectData, WindowId, Workspace};
-use okena_core::specs::{SpecRoot, SpecRootKind, SpecStores, change_slug};
+use okena_core::doc_search::{SearchDoc, SpecHit, SpecSearchFilter, SpecSearchResult, spec_matches};
+use okena_core::specs::{SpecDoc, SpecRoot, SpecRootKind, SpecStores, change_slug};
 use okena_knowledge::prompts::{Flow, Vars};
 use okena_openspec::discover::{self, ProjectSource, Sources};
 use okena_openspec::files::{self, DEFAULT_SCHEMA};
@@ -98,8 +99,9 @@ fn listing(sources: &Sources, settings: &AppSettings) -> SpecStores {
 }
 
 /// Run an OpenSpec action that runs git in store checkouts — the listing
-/// (`git status` in every store), fetch, pull, commit and push — against
-/// discovery sources copied out of the workspace. `None` for any other action.
+/// (`git status` in every store), fetch, pull, commit and push — or reads
+/// every root's documents — a search — against discovery sources copied out of
+/// the workspace. `None` for any other action.
 ///
 /// None of them touches the workspace, so the daemon runs them on its blocking
 /// pool rather than under the workspace lock.
@@ -112,6 +114,7 @@ pub fn execute_spec_git_action(
     use okena_git::store;
     Some(match action {
         ActionRequest::SpecStores => listing_result(sources, settings),
+        ActionRequest::SpecSearch { query, roots } => search(sources, settings, query, roots),
         ActionRequest::SpecStoreFetch { root } => sync(sources, settings, root, |path| {
             store::fetch(path).map(|()| store::status(path).unwrap_or_default())
         }),
@@ -205,6 +208,82 @@ fn tree_for(
         t.store_id = root.store_id.clone();
     }
     to_result(serde_json::to_value(&t), "spec tree")
+}
+
+/// Search every usable root's documents by name, path and content (QBL-436).
+///
+/// Only roots discovery found are read, and only the documents their trees
+/// list, through the path check a read goes through. A root that is not
+/// usable is skipped rather than failing the search.
+fn search(sources: &Sources, settings: &AppSettings, query: &str, roots: &[String]) -> ActionResult {
+    let filter = SpecSearchFilter {
+        query: query.to_string(),
+        roots: roots.to_vec(),
+    };
+    // The Root choice alone, to tell whether a document is worth opening.
+    let groups = SpecSearchFilter {
+        query: String::new(),
+        ..filter.clone()
+    };
+    let mut result = SpecSearchResult::default();
+    for root in discover::discover(&dirs(settings), sources)
+        .roots
+        .iter()
+        .filter(|r| r.healthy)
+    {
+        let dir = Path::new(&root.path);
+        let t = tree::read_tree(dir);
+        // The order the sidebar lists them in: changes, specs, the archive.
+        let in_change = |c: &okena_core::specs::SpecChange, prefix: &str| -> Vec<(String, SpecDoc)> {
+            c.artifacts
+                .iter()
+                .chain(c.specs.iter())
+                .map(|d| (format!("{prefix}{}/{}", c.name, d.name), d.clone()))
+                .collect()
+        };
+        let docs = t
+            .changes
+            .iter()
+            .flat_map(|c| in_change(c, ""))
+            .chain(t.specs.iter().map(|d| (d.name.clone(), d.clone())))
+            .chain(t.archived.iter().flat_map(|c| in_change(c, "archive/")));
+        for (label, d) in docs {
+            result.total += 1;
+            let names = [label.as_str()];
+            let paths = [d.path.as_str()];
+            let doc = |content| SearchDoc {
+                root_key: &root.key,
+                names: &names,
+                paths: &paths,
+                content,
+            };
+            // Names and paths first, and a document its root has already
+            // ruled out is never opened.
+            let hit = spec_matches(&filter, &doc(""))
+                || (spec_matches(&groups, &doc(""))
+                    && spec_matches(&filter, &doc(&searchable_text(dir, &d.path))));
+            if hit {
+                result.hits.push(SpecHit {
+                    root_key: root.key.clone(),
+                    path: d.path,
+                    label,
+                });
+            }
+        }
+    }
+    to_result(serde_json::to_value(result), "spec search")
+}
+
+/// A listed document's text for searching: empty when it cannot be read as
+/// text or is past what a read would show, so it can still match by name.
+fn searchable_text(root: &Path, path: &str) -> String {
+    let Ok(real) = tree::resolve_document(root, path) else {
+        return String::new();
+    };
+    if real.metadata().is_ok_and(|m| m.len() > MAX_DOC_BYTES) {
+        return String::new();
+    }
+    std::fs::read_to_string(&real).unwrap_or_default()
 }
 
 /// Largest document this action will return, in bytes.
@@ -1412,5 +1491,116 @@ mod tests {
                 + &okena_knowledge::prompts::defaults::partial_body("reporting")
                     .expect("reporting")
         );
+    }
+
+    // ---- searching every root (QBL-436) ----
+
+    /// Two folder roots: the usual tree, and one with a single capability.
+    fn two_roots(sandbox: &Path) -> (AppSettings, String, String) {
+        let plans = sandbox.join("plans");
+        populated_root(&plans);
+        write(
+            &plans.join("openspec/changes/add-login/design.md"),
+            "# Design\nSign in with Google through OAuth.\n",
+        );
+        let billing = sandbox.join("billing");
+        write(&billing.join("openspec/config.yaml"), "schema: spec-driven\n");
+        write(
+            &billing.join("openspec/specs/invoices/spec.md"),
+            "# Invoices\nAn invoice is immutable once sent.\n",
+        );
+        let mut settings = sandboxed(sandbox);
+        settings.active_space_mut().specs.folders = vec![
+            plans.to_string_lossy().into_owned(),
+            billing.to_string_lossy().into_owned(),
+        ];
+        let stores = super::listing(&super::spec_sources(&[], &settings), &settings);
+        // By folder name: discovery reports the path as the filesystem
+        // resolves it, which is not how a temp dir is spelled on every OS.
+        let key = |folder: &str| {
+            stores
+                .roots
+                .iter()
+                .find(|r| Path::new(&r.path).ends_with(folder))
+                .map(|r| r.key.clone())
+                .expect("the folder is a root")
+        };
+        let (plans, billing) = (key("plans"), key("billing"));
+        (settings, plans, billing)
+    }
+
+    fn search(
+        settings: &AppSettings,
+        query: &str,
+        roots: &[&str],
+    ) -> okena_core::doc_search::SpecSearchResult {
+        let roots: Vec<String> = roots.iter().map(|r| (*r).to_string()).collect();
+        let ActionResult::Ok(Some(v)) =
+            super::search(&super::spec_sources(&[], settings), settings, query, &roots)
+        else {
+            panic!("expected search results");
+        };
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn labels(result: &okena_core::doc_search::SpecSearchResult) -> Vec<&str> {
+        result.hits.iter().map(|h| h.label.as_str()).collect()
+    }
+
+    #[test]
+    fn a_spec_search_covers_every_root_by_name_path_and_content() {
+        let sandbox = tmpdir("search");
+        let (settings, _, _) = two_roots(&sandbox);
+
+        // Nothing narrowing: every document of both roots, in sidebar order.
+        let everything = search(&settings, "", &[]);
+        assert_eq!(everything.total, 6);
+        assert_eq!(
+            labels(&everything),
+            [
+                "add-login/proposal.md",
+                "add-login/design.md",
+                "add-login/login",
+                "auth",
+                "archive/2026-01-01-old-thing/proposal.md",
+                "invoices",
+            ]
+        );
+
+        // A word only the text has, whatever its case or padding.
+        assert_eq!(labels(&search(&settings, " OAUTH ", &[])), ["add-login/design.md"]);
+        assert_eq!(labels(&search(&settings, "immutable", &[])), ["invoices"]);
+        // A file name, and a directory through the path.
+        assert_eq!(
+            labels(&search(&settings, "proposal", &[])),
+            ["add-login/proposal.md", "archive/2026-01-01-old-thing/proposal.md"]
+        );
+        assert_eq!(
+            labels(&search(&settings, "changes/archive", &[])),
+            ["archive/2026-01-01-old-thing/proposal.md"]
+        );
+        assert_eq!(search(&settings, "proposal", &[]).total, 6);
+        std::fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn a_spec_root_narrows_a_search_and_text_narrows_within_it() {
+        let sandbox = tmpdir("search-root");
+        let (settings, plans, billing) = two_roots(&sandbox);
+
+        let only_billing = search(&settings, "", &[&billing]);
+        assert_eq!(labels(&only_billing), ["invoices"]);
+        assert!(only_billing.hits.iter().all(|h| h.root_key == billing));
+
+        // "spec" is in a path of both roots; the root choice keeps one.
+        assert_eq!(search(&settings, "spec.md", &[]).hits.len(), 3);
+        assert_eq!(labels(&search(&settings, "spec.md", &[&plans])), ["add-login/login", "auth"]);
+        // Two roots widen back to both.
+        assert_eq!(search(&settings, "spec.md", &[&plans, &billing]).hits.len(), 3);
+
+        // A key discovery never produced names nothing.
+        let outside = format!("path:{}", sandbox.to_string_lossy());
+        assert!(search(&settings, "", &[&outside]).hits.is_empty());
+        std::fs::remove_dir_all(&sandbox).ok();
     }
 }

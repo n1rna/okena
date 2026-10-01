@@ -36,14 +36,15 @@ impl WindowView {
                 window_id: self.window_id,
                 terminals: self.terminals.clone(),
                 active_drag: self.active_drag.clone(),
+                window_focus: self.focus_handle.clone(),
             };
             let pane = cx.new(|cx| HarnessPane::new(section, ctx, cx));
             self.harness_panes.push((section, pane));
         } else if section == HarnessSection::Tasks
             && let Some((_, pane)) = self.harness_panes.iter().find(|(s, _)| *s == section)
         {
-            // Coming back to Tasks: take focus again, so its cmd-f works
-            // without a click first.
+            // Coming back to Tasks: take focus again, so the keyboard is in
+            // the view without a click first.
             pane.update(cx, |pane, _| pane.tasks.focus_on_show = true);
         }
         okena_workspace::harness_state::set_active_harness(self.window_id, Some(section), cx);

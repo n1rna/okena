@@ -409,6 +409,7 @@ Bindings without a `context` are global. Adding a context limits the binding to 
 - `"TerminalPane"` -- only when a terminal pane has focus
 - `"SearchBar"` -- only when the search bar has focus
 - `"Sidebar"` -- only when the sidebar has focus
+- `"!TerminalPane"` -- everywhere except inside a terminal pane (how `FocusIslandSearch` shares `Cmd+F` with the terminal's `Search`)
 
 ### Example: Custom Bindings
 
@@ -475,7 +476,9 @@ Set `enabled` to `false` to disable a specific binding without removing it:
 | `DetachTerminal` | — | Move the focused terminal into a separate window |
 | `Copy` | `Cmd+C` / `Ctrl+Shift+C` | Copy selection |
 | `Paste` | `Cmd+V` / `Ctrl+Shift+V` | Paste from clipboard |
-| `Search` | `Cmd+F` / `Ctrl+F` | Search in terminal |
+| `Search` | `Cmd+F` / `Ctrl+F` (in terminal) | Search in terminal |
+| `FocusIslandSearch` | `Cmd+F` / `Ctrl+F` (outside a terminal) | Put the cursor in the search island on Tasks, Specs, Knowledge and the Projects and Agents overviews, opening it if it is closed |
+| `ToggleOverviewSearch` | `Cmd+Shift+S` / `Ctrl+Shift+S` | Open or close that search island |
 | `ScrollUp` / `ScrollDown` | `Shift+PgUp` / `Shift+PgDn` | Scroll terminal output |
 | `ZoomIn` / `ZoomOut` | `Cmd+=` / `Cmd+-` | Zoom terminal font |
 | `ResetZoom` | `Cmd+0` (in terminal) | Reset terminal zoom |

@@ -55,7 +55,7 @@ actions!(
         NewWindow,
         RestartDaemon,
         SaveDocument,
-        FocusTaskSearch,
+        FocusIslandSearch,
         ToggleOverviewSearch,
         // Spaces (QBL-430). Nine numbered actions rather than one taking an
         // argument: `actions!` generates zero-sized types, and a numbered
@@ -495,7 +495,7 @@ fn create_keybinding(action: &str, keystroke: &str, context: Option<&str>) -> Op
         "SwitchToSpace8" => Some(KeyBinding::new(keystroke, SwitchToSpace8, context)),
         "SwitchToSpace9" => Some(KeyBinding::new(keystroke, SwitchToSpace9, context)),
         "SaveDocument" => Some(KeyBinding::new(keystroke, SaveDocument, context)),
-        "FocusTaskSearch" => Some(KeyBinding::new(keystroke, FocusTaskSearch, context)),
+        "FocusIslandSearch" => Some(KeyBinding::new(keystroke, FocusIslandSearch, context)),
         "ShowThemeSelector" => Some(KeyBinding::new(keystroke, ShowThemeSelector, context)),
         "ShowCommandPalette" => Some(KeyBinding::new(keystroke, ShowCommandPalette, context)),
         "ShowSettings" => Some(KeyBinding::new(keystroke, ShowSettings, context)),
@@ -595,5 +595,103 @@ mod escape_binding_tests {
                  (found {bound} occurrences)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod island_search_dispatch_tests {
+    //! Cmd/Ctrl+F through GPUI's own key dispatch, with the default bindings:
+    //! the island gets it everywhere but in a focused terminal pane, which
+    //! keeps it for its own search (QBL-436).
+
+    use super::{FocusIslandSearch, KeybindingConfig, Search, create_keybinding};
+    use gpui::prelude::*;
+    use gpui::{Context, FocusHandle, TestAppContext, VisualTestContext, Window, div};
+
+    /// The window's root with the context the real one carries, a terminal
+    /// pane inside it, and something else focusable beside that.
+    struct Shell {
+        root: FocusHandle,
+        terminal: FocusHandle,
+        elsewhere: FocusHandle,
+        island: usize,
+        terminal_search: usize,
+    }
+
+    impl Render for Shell {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .track_focus(&self.root)
+                .key_context(crate::views::window::WINDOW_CONTEXT)
+                .on_action(cx.listener(|this, _: &FocusIslandSearch, _, _| this.island += 1))
+                .child(
+                    div()
+                        .track_focus(&self.terminal)
+                        .key_context("TerminalPane")
+                        .on_action(cx.listener(|this, _: &Search, _, _| {
+                            this.terminal_search += 1;
+                        })),
+                )
+                // A harness page: focusable, with no key context of its own.
+                .child(div().track_focus(&self.elsewhere))
+        }
+    }
+
+    fn shell(cx: &mut TestAppContext) -> (gpui::Entity<Shell>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            let config = KeybindingConfig::defaults();
+            let bindings: Vec<_> = ["FocusIslandSearch", "Search"]
+                .into_iter()
+                .flat_map(|action| {
+                    config.bindings[action].iter().filter_map(move |entry| {
+                        create_keybinding(action, &entry.keystroke, entry.context.as_deref())
+                    })
+                })
+                .collect();
+            assert_eq!(bindings.len(), 4, "cmd-f and ctrl-f for each");
+            cx.bind_keys(bindings);
+        });
+        cx.add_window_view(|_, cx| Shell {
+            root: cx.focus_handle(),
+            terminal: cx.focus_handle(),
+            elsewhere: cx.focus_handle(),
+            island: 0,
+            terminal_search: 0,
+        })
+    }
+
+    fn counts(shell: &gpui::Entity<Shell>, cx: &mut VisualTestContext) -> (usize, usize) {
+        shell.read_with(cx, |s, _| (s.island, s.terminal_search))
+    }
+
+    #[gpui::test]
+    fn outside_a_terminal_cmd_f_and_ctrl_f_go_to_the_island(cx: &mut TestAppContext) {
+        let (shell, cx) = shell(cx);
+        // On the window itself, where focus rests when nothing else has it.
+        shell.update_in(cx, |s, window, cx| window.focus(&s.root, cx));
+        cx.simulate_keystrokes("cmd-f");
+        assert_eq!(counts(&shell, cx), (1, 0));
+        cx.simulate_keystrokes("ctrl-f");
+        assert_eq!(counts(&shell, cx), (2, 0));
+
+        // And inside a page that carries no key context of its own.
+        shell.update_in(cx, |s, window, cx| window.focus(&s.elsewhere, cx));
+        cx.simulate_keystrokes("cmd-f");
+        assert_eq!(counts(&shell, cx), (3, 0));
+    }
+
+    #[gpui::test]
+    fn a_focused_terminal_keeps_cmd_f_and_ctrl_f_for_its_own_search(cx: &mut TestAppContext) {
+        let (shell, cx) = shell(cx);
+        shell.update_in(cx, |s, window, cx| window.focus(&s.terminal, cx));
+        cx.simulate_keystrokes("cmd-f");
+        assert_eq!(counts(&shell, cx), (0, 1), "the island must not hear it");
+        cx.simulate_keystrokes("ctrl-f");
+        assert_eq!(counts(&shell, cx), (0, 2));
+
+        // Leaving the terminal hands the key back to the island.
+        shell.update_in(cx, |s, window, cx| window.focus(&s.elsewhere, cx));
+        cx.simulate_keystrokes("cmd-f");
+        assert_eq!(counts(&shell, cx), (1, 2));
     }
 }

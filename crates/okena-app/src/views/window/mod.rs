@@ -163,6 +163,9 @@ pub enum WindowViewEvent {
     RestartLocalBuild,
 }
 
+/// Key context of the window's root element.
+pub(crate) const WINDOW_CONTEXT: &str = "Window";
+
 pub struct WindowView {
     /// Identifies which window-scoped slot on the shared `Workspace` this
     /// view addresses (folder filter, hidden set, widths, collapse, focus
@@ -268,6 +271,8 @@ pub struct WindowView {
     /// Whether the overviews' search island is open, or closed to its pill.
     /// One for both overviews, so switching keeps it as it was.
     overview_search_open: bool,
+    /// Whether the island's filter menu is open. Shut by default.
+    overview_menu_open: bool,
 }
 
 impl WindowView {
@@ -505,6 +510,7 @@ impl WindowView {
             projects_search: overview_bar::OverviewSearch::new(false, cx),
             agents_search: overview_bar::OverviewSearch::new(true, cx),
             overview_search_open: true,
+            overview_menu_open: false,
         };
 
         // Slice 07 cri 7: persist OS bounds back into this window's

@@ -895,6 +895,7 @@ mod draft_tests {
                 window_id: WindowId::Main,
                 terminals: Default::default(),
                 active_drag: Default::default(),
+                window_focus: cx.focus_handle(),
             };
             cx.new(|cx| HarnessPane::new(HarnessSection::Tasks, ctx, cx))
         })

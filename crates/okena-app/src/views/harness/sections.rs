@@ -274,7 +274,7 @@ impl Render for HarnessPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         // A freshly shown Tasks view takes focus, unless something in it
-        // already has it, so its key context is live straight away.
+        // already has it, so the keyboard is in the view straight away.
         if std::mem::take(&mut self.tasks.focus_on_show)
             && !self.tasks.focus.contains_focused(window, cx)
         {
@@ -306,6 +306,8 @@ impl Render for HarnessPane {
                 this.drag_file_sidebar(f32::from(event.position.x), cx);
             }))
             .child(div().flex_1().min_h_0().child(body))
+            // Floats over the bottom of the view it narrows.
+            .children(self.render_island(cx))
             // Over whichever view opened it.
             .children(self.render_context_dialog(cx))
     }

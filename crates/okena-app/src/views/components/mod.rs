@@ -2,6 +2,7 @@
 //!
 //! This module contains reusable components:
 //! - Simple input field
+//! - The search island's drawing, shared by every page that has one
 //! - The add-a-root form Settings and the Roots page share
 //! - Path auto-complete input
 //! - Modal backdrop and content builders
@@ -13,6 +14,7 @@
 pub mod add_root_form;
 pub mod dropdown;
 pub mod file_icon;
+pub(crate) mod island;
 pub mod launch_pickers;
 pub mod list_overlay;
 pub mod modal_backdrop;
