@@ -332,6 +332,21 @@ impl Sidebar {
             || self.folder_rename.is_some()
     }
 
+    /// While a rename is open, hand the key that fired a navigation action
+    /// back to the rename box, and say so.
+    ///
+    /// The sidebar's bindings sit on its own key context, which the rename
+    /// box is inside, and a binding is tried before any key listener. So
+    /// space and the arrows became `SidebarToggleExpand` and never reached the
+    /// box as typing. Declining the action lets the keystroke carry on to it.
+    fn yield_key_to_rename(&self, cx: &mut Context<Self>) -> bool {
+        let renaming = self.is_interactive_mode_active();
+        if renaming {
+            cx.propagate();
+        }
+        renaming
+    }
+
     /// True when this window's sidebar is in the activity-sorted view. Used to
     /// dispatch `build_cursor_items` to the activity cursor list (built by the
     /// render path to match the tiered rows 1:1) instead of the manual
@@ -351,7 +366,7 @@ impl Sidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_interactive_mode_active() {
+        if self.yield_key_to_rename(cx) {
             return;
         }
         let items = self.build_cursor_items(cx);
@@ -373,7 +388,7 @@ impl Sidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_interactive_mode_active() {
+        if self.yield_key_to_rename(cx) {
             return;
         }
         let items = self.build_cursor_items(cx);
@@ -537,7 +552,7 @@ impl Sidebar {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_interactive_mode_active() {
+        if self.yield_key_to_rename(cx) {
             return;
         }
         let items = self.build_cursor_items(cx);

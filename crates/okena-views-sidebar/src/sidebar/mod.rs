@@ -21,6 +21,8 @@ mod worktree;
 mod from_project_test;
 #[cfg(test)]
 mod project_agents_test;
+#[cfg(test)]
+mod window_test;
 
 pub use harness_nav::harness_nav_entries;
 
@@ -285,6 +287,12 @@ pub struct Sidebar {
     /// The space whose menu is open (rename / tasks / delete), and where its
     /// dot was, so the menu appears under it.
     pub(super) space_menu: Option<(String, Point<Pixels>)>,
+    /// The agent whose menu is open (pin / rename), and where it was
+    /// right-clicked.
+    pub(super) agent_menu: Option<(String, Point<Pixels>)>,
+    /// Agents whose sub-agents are folded away under their card, in the
+    /// Agents list. Per sidebar and not persisted, like `collapsed_worktrees`.
+    pub(crate) collapsed_agent_groups: HashSet<String>,
     pub(super) overflow_button_bounds: Bounds<Pixels>,
 }
 
@@ -385,6 +393,8 @@ impl Sidebar {
             space_row_bounds: Bounds::default(),
             space_overflow_menu: None,
             space_menu: None,
+            agent_menu: None,
+            collapsed_agent_groups: HashSet::new(),
             overflow_button_bounds: Bounds::default(),
         }
     }

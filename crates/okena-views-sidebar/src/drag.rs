@@ -103,3 +103,36 @@ impl Render for FolderDragView {
             .child(self.name.clone())
     }
 }
+
+/// Drag payload for arranging an agent in the Agents list.
+///
+/// Only a top-level agent is dragged: its sub-agents come with it.
+#[derive(Clone)]
+pub struct AgentDrag {
+    pub project_id: String,
+    pub name: String,
+    /// Whether it is pinned as the drag starts, so a drop target can tell a
+    /// drop that would change something from one that would not.
+    pub pinned: bool,
+}
+
+/// Drag preview view for agents
+pub struct AgentDragView {
+    pub name: String,
+}
+
+impl Render for AgentDragView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .bg(rgb(0x2d2d2d))
+            .border_1()
+            .border_color(rgb(0x404040))
+            .rounded(px(4.0))
+            .shadow_lg()
+            .text_size(ui_text_md(cx))
+            .text_color(rgb(0xffffff))
+            .child(self.name.clone())
+    }
+}

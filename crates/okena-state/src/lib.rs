@@ -8,6 +8,7 @@
 //! no behavior beyond a few pure helpers.
 
 pub mod agent_links;
+pub mod agent_order;
 pub mod agent_tree;
 mod hooks_config;
 mod toast;

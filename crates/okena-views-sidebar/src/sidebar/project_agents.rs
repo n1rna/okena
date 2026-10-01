@@ -46,7 +46,11 @@ impl Sidebar {
         // task it shares, and a project in another space is not on screen to
         // nest under.
         let in_space: Vec<_> = workspace.projects_in_active_space().cloned().collect();
-        place_sessions(&in_space, window.agent_sort_mode)
+        place_sessions(
+            &in_space,
+            &workspace.data().project_order,
+            window.agent_sort_mode,
+        )
     }
 
     /// The placement plus a row for every session it places.
@@ -73,12 +77,10 @@ impl Sidebar {
                     now,
                 ))
             } else {
-                ProjectAgentRow::Live(self.live_session_row(
-                    p,
-                    role,
-                    workspace,
-                    focused_id.as_deref(),
-                ))
+                let mut row = self.live_session_row(p, role, workspace, focused_id.as_deref());
+                // The pin it has in the Agents list, which placed it here.
+                row.pinned = placement.is_pinned(&p.id);
+                ProjectAgentRow::Live(row)
             };
             rows.insert(p.id.clone(), row);
         }
@@ -145,6 +147,7 @@ impl Sidebar {
             ProjectAgentRow::Closed(r) => (&r.info, r.role, r.focused),
         };
         let closed = matches!(row, ProjectAgentRow::Closed(_));
+        let pinned = matches!(row, ProjectAgentRow::Live(r) if r.pinned);
         let kind_color = role_color(role, &t);
         // The state, coloured as the card colours it; a closed agent says
         // when instead, in the muted colour of history.
@@ -217,6 +220,16 @@ impl Sidebar {
                 )
                 .when(closed, |d| d.text_color(rgb(t.text_secondary))),
             )
+            // Pinned in the Agents list, which is why it leads here too.
+            .when(pinned, |d| {
+                d.child(
+                    svg()
+                        .path("icons/bookmark.svg")
+                        .flex_shrink_0()
+                        .size(px(11.0))
+                        .text_color(rgb(t.text_muted)),
+                )
+            })
             .child(
                 div()
                     .flex_shrink_0()
@@ -228,6 +241,18 @@ impl Sidebar {
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(trailing_color))
                     .child(trailing),
+            )
+            // The Agents list's own menu: pinning from here is the same pin.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let id = id.clone();
+                    move |this, event: &MouseDownEvent, _window, cx| {
+                        this.agent_menu = Some((id.clone(), event.position));
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
             )
             .on_click(cx.listener(move |this, _, _window, cx| {
                 this.focus_project_from_sidebar(id.clone(), true, cx);

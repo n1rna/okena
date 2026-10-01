@@ -16,15 +16,16 @@ use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_ms;
-use okena_workspace::state::AgentSortMode;
 
 use super::{Sidebar, SidebarProjectInfo};
 
 use crate::agent_card::{AgentColor, CardState, agent_color, card_state, subtree_summary};
+use crate::drag::{AgentDrag, AgentDragView};
 use crate::item_widgets::sidebar_rename_input;
+use okena_core::api::ActionRequest;
 use okena_ui::rename_state::is_renaming;
 use okena_workspace::state::AgentRole;
-use okena_workspace::state::agent_tree::{self, AgentNode};
+use okena_workspace::state::agent_order::{self, AgentDrop, OrderedAgent};
 use std::collections::HashMap;
 
 /// Colour for a role's badge.
@@ -43,33 +44,24 @@ pub(super) fn role_color(role: AgentRole, t: &okena_ui::theme::ThemeColors) -> u
     }
 }
 
-/// Reorder `sessions` so each sits under the agent on its task's parent.
+/// The entries of `project_order` that belong to the daemon owning `id`, in
+/// order: the list a `MoveProject` for `id` indexes into.
 ///
-/// The arrangement itself is `okena_state::agent_tree`, which knows nothing
-/// about the sidebar; this only carries the rows through it and copies the
-/// depth back on.
-fn nest_by_ticket(sessions: Vec<SessionRow>) -> Vec<SessionRow> {
-    let nodes: Vec<AgentNode> = sessions
+/// The sidebar's `project_order` is a mirror, with every daemon's entries in
+/// it under a `remote:<connection>:` prefix. The action goes to one daemon and
+/// is applied to that daemon's own order, so an index counted across all of
+/// them would land in the wrong place.
+fn order_of_owner(project_order: &[String], id: &str) -> Vec<String> {
+    let owner = |id: &str| {
+        id.strip_prefix("remote:")
+            .and_then(|rest| rest.split_once(':'))
+            .map(|(connection, _)| connection.to_string())
+    };
+    let wanted = owner(id);
+    project_order
         .iter()
-        .map(|row| AgentNode {
-            id: row.info.id.clone(),
-            task_id: row.task_id.clone(),
-            parent_task_id: row.parent_task_id.clone(),
-        })
-        .collect();
-    let placed = agent_tree::arrange(&nodes);
-
-    let mut by_id: HashMap<String, SessionRow> = sessions
-        .into_iter()
-        .map(|r| (r.info.id.clone(), r))
-        .collect();
-    placed
-        .into_iter()
-        .filter_map(|p| {
-            let mut row = by_id.remove(&p.id)?;
-            row.depth = p.depth;
-            Some(row)
-        })
+        .filter(|entry| owner(entry) == wanted)
+        .cloned()
         .collect()
 }
 
@@ -83,13 +75,13 @@ pub(super) struct SessionRow {
     pub(super) parent_task_id: Option<String>,
     /// How deep the ticket hierarchy puts it. Filled in after sorting.
     pub(super) depth: usize,
+    /// Whether it is in the pinned tier: a pinned top-level agent, or a
+    /// sub-agent of one. Filled in after sorting, like `depth`.
+    pub(super) pinned: bool,
     /// Whether this is the session currently open in the main area.
     pub(super) focused: bool,
     /// Task key for a task session, change name for a spec session.
     pub(super) subtitle: Option<String>,
-    /// Last time anything ran in this session, for activity ordering. `None`
-    /// for a session that has not run anything yet.
-    pub(super) last_activity_at: Option<u64>,
     /// How it is doing: the terminal's state and the agent's report combined.
     pub(super) card: CardState,
     /// What the agent last said it was doing.
@@ -213,9 +205,9 @@ impl Sidebar {
             task_id: p.task_ref.as_ref().map(|t| t.id.external_id.clone()),
             parent_task_id: p.task_ref.as_ref().and_then(|t| t.parent_id.clone()),
             depth: 0,
+            pinned: false,
             focused: focused_id == Some(p.id.as_str()),
             subtitle,
-            last_activity_at: p.last_activity_at,
             card: card_state(running, activity),
             status,
         }
@@ -380,6 +372,17 @@ impl Sidebar {
                             .child(row.info.name.clone())
                             .into_any_element()
                     })
+                    // The pin is the group's, so only its top-level card
+                    // says so.
+                    .when(row.pinned && !nested, |d| {
+                        d.child(
+                            svg()
+                                .path("icons/bookmark.svg")
+                                .flex_shrink_0()
+                                .size(px(11.0))
+                                .text_color(rgb(t.text_muted)),
+                        )
+                    })
                     .children(memory.map(|memory| {
                         div()
                             .flex_shrink_0()
@@ -412,6 +415,34 @@ impl Sidebar {
                     .child(text)
                     .into_any_element()
             }))
+            .debug_selector(|| format!("agent-card-{}", row.info.id))
+            // Picked up to be placed among the pinned agents, or back out of
+            // them. A sub-agent is not: it goes where its parent goes.
+            .when(!nested, |d| {
+                d.on_drag(
+                    AgentDrag {
+                        project_id: row.info.id.clone(),
+                        name: row.info.name.clone(),
+                        pinned: row.pinned,
+                    },
+                    |drag, _position, _window, cx| {
+                        cx.new(|_| AgentDragView {
+                            name: drag.name.clone(),
+                        })
+                    },
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let id = id.clone();
+                    move |this, event: &MouseDownEvent, _window, cx| {
+                        this.agent_menu = Some((id.clone(), event.position));
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }),
+            )
             .on_click(cx.listener(move |this, _, window, cx| {
                 // Second click on the card the user is already on: rename it,
                 // the same gesture a project row takes.
@@ -430,7 +461,9 @@ impl Sidebar {
     /// its stories are one piece of work, and a boundary around them says so
     /// where a few pixels of whitespace only hinted at it. The header counts
     /// the sub-agents that want you, so a collapsed glance still tells you
-    /// whether to look inside.
+    /// whether to look inside — and it is what folds them away: clicking it
+    /// hides the sub-agents under the parent's card, which changes nothing
+    /// about where the group sits or whether it is pinned.
     ///
     /// `rows` is in `agent_tree` order, so a node's descendants follow it with
     /// a greater depth; this consumes them and returns how many rows it used.
@@ -463,6 +496,8 @@ impl Sidebar {
 
         let t = theme(cx);
         let attention = child_states.iter().any(|c| c.wants_attention());
+        let folded = self.collapsed_agent_groups.contains(&root.info.id);
+        let fold_id = root.info.id.clone();
         // A quiet frame: the cards inside carry the family's colour on their
         // accent bars, so the frame itself needs none.
         let group = v_flex()
@@ -480,63 +515,187 @@ impl Sidebar {
             .bg(okena_ui::theme::with_alpha(t.bg_secondary, 0.35))
             .child(card)
             .child(
-                div()
-                    .px(px(6.0))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(if attention { t.warning } else { t.text_muted }))
-                    .child(subtree_summary(&child_states)),
+                h_flex()
+                    .id(SharedString::from(format!("agent-group-fold-{fold_id}")))
+                    .debug_selector(|| format!("agent-fold-{fold_id}"))
+                    .px(px(4.0))
+                    .gap(px(3.0))
+                    .items_center()
+                    .cursor_pointer()
+                    .rounded(px(3.0))
+                    .hover(|s| s.bg(rgb(t.bg_hover)))
+                    .child(
+                        svg()
+                            .path(if folded {
+                                "icons/chevron-right.svg"
+                            } else {
+                                "icons/chevron-down.svg"
+                            })
+                            .flex_shrink_0()
+                            .size(px(10.0))
+                            .text_color(rgb(t.text_muted)),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui_text_ms(cx))
+                            .text_color(rgb(if attention { t.warning } else { t.text_muted }))
+                            .child(subtree_summary(&child_states)),
+                    )
+                    .on_click(cx.listener({
+                        let fold_id = fold_id.clone();
+                        move |this, _, _window, cx| {
+                            this.toggle_agent_group(&fold_id);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    })),
             )
-            .child(
-                v_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap(px(4.0))
-                    .pl(px(6.0))
-                    .children(children),
-            );
+            .when(!folded, |d| {
+                d.child(
+                    v_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap(px(4.0))
+                        .pl(px(6.0))
+                        .children(children),
+                )
+            });
         (group.into_any_element(), used)
     }
 
-    /// The agent sessions in this workspace, ordered by the header's sort.
+    /// The live agent sessions of the space showing, in the order both lists
+    /// draw them: pinned groups first, then the header's sort.
+    pub(super) fn live_agent_order(
+        &self,
+        workspace: &okena_workspace::state::Workspace,
+    ) -> Vec<OrderedAgent> {
+        let live: Vec<&okena_workspace::state::ProjectData> = workspace
+            .projects_in_active_space()
+            // Closed sessions are the history's, behind the header's button.
+            .filter(|p| p.agent_role().is_some() && !p.is_closed())
+            .collect();
+        let sort_mode = workspace
+            .data()
+            .window(self.window_id)
+            .map(|w| w.agent_sort_mode)
+            .unwrap_or_default();
+        agent_order::order_live(&live, &workspace.data().project_order, sort_mode)
+    }
+
+    /// Fold or unfold the sub-agents under the agent `id`.
+    pub(super) fn toggle_agent_group(&mut self, id: &str) {
+        if !self.collapsed_agent_groups.remove(id) {
+            self.collapsed_agent_groups.insert(id.to_string());
+        }
+    }
+
+    /// Place the agent `dragged` at `drop`: pin it there, move it within the
+    /// pinned agents, or unpin it. Used by a drop and by the menu's pin item,
+    /// which is a drop at the end of the pinned tier.
+    ///
+    /// Daemon-owned: the move and the pin are dispatched and mirror back, the
+    /// move first so the agent is already in its place when it becomes pinned.
+    pub(super) fn drop_agent(&mut self, dragged: &str, drop: AgentDrop, cx: &mut Context<Self>) {
+        let plan = {
+            let workspace = self.workspace.read(cx);
+            let roots: Vec<(String, bool)> = self
+                .live_agent_order(workspace)
+                .into_iter()
+                .filter(|agent| agent.depth == 0)
+                .map(|agent| (agent.id, agent.pinned))
+                .collect();
+            let order = order_of_owner(&workspace.data().project_order, dragged);
+            agent_order::plan_drop(dragged, &drop, &roots, &order)
+        };
+        let Some(plan) = plan else { return };
+        if let Some(new_index) = plan.move_to {
+            self.dispatch_action_for_project(
+                dragged,
+                ActionRequest::MoveProject {
+                    project_id: dragged.to_string(),
+                    new_index,
+                },
+                cx,
+            );
+        }
+        if plan.toggle_pinned {
+            self.dispatch_action_for_project(
+                dragged,
+                ActionRequest::ToggleProjectPinned {
+                    project_id: dragged.to_string(),
+                },
+                cx,
+            );
+        }
+    }
+
+    /// A strip of the Agents list an agent can be dropped on to pin it: above
+    /// the first pinned agent, or below the last.
+    fn render_pin_zone(
+        &self,
+        id: &'static str,
+        drop: AgentDrop,
+        invite: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        let active = t.border_active;
+        div()
+            .id(id)
+            .debug_selector(|| id.to_string())
+            .w_full()
+            .h(px(6.0))
+            // With nothing pinned yet there is no tier to aim at, so while an
+            // agent is being carried the strip opens up and says what it is.
+            .when(invite, |d| {
+                d.h(px(26.0))
+                    .mb(px(6.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(okena_ui::theme::with_alpha(t.border, 0.9))
+                    .text_size(ui_text_ms(cx))
+                    .text_color(rgb(t.text_muted))
+                    .child("Drop here to pin")
+            })
+            .drag_over::<AgentDrag>(move |style, _, _, _| {
+                style
+                    .border_color(rgb(active))
+                    .bg(okena_ui::theme::with_alpha(active, 0.25))
+            })
+            .on_drop(cx.listener(move |this, drag: &AgentDrag, _window, cx| {
+                this.drop_agent(&drag.project_id, drop.clone(), cx);
+            }))
+            .into_any_element()
+    }
+
+    /// The agent sessions in this workspace: the pinned ones as arranged,
+    /// then the rest ordered by the header's sort.
     pub(super) fn render_agents_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
         let workspace = self.workspace.read(cx);
 
         let focused_id = self.focus_manager.read(cx).focused_project_id().cloned();
 
-        let mut sessions: Vec<SessionRow> = Vec::new();
-        for p in workspace.projects_in_active_space() {
-            let Some(role) = p.agent_role() else {
-                continue;
-            };
-            // Closed sessions are the history's, behind the header's button.
-            if p.is_closed() {
-                continue;
-            }
-            sessions.push(self.live_session_row(p, role, workspace, focused_id.as_deref()));
-        }
-
-        let sort_mode = workspace
-            .data()
-            .window(self.window_id)
-            .map(|w| w.agent_sort_mode)
-            .unwrap_or_default();
-        match sort_mode {
-            // Most recent first. A session that has never run anything has no
-            // activity stamp and sorts last rather than first, which is where a
-            // just-created-but-idle session belongs.
-            AgentSortMode::Activity => sessions.sort_by(|a, b| {
-                b.last_activity_at
-                    .cmp(&a.last_activity_at)
-                    .then_with(|| a.info.name.cmp(&b.info.name))
-            }),
-            AgentSortMode::Name => sessions.sort_by_key(|r| r.info.name.to_lowercase()),
-        }
-
-        // The tickets' own hierarchy, applied after sorting so the chosen
-        // order survives inside each level. An epic's agent gathers its
-        // stories' agents under it however each was started.
-        sessions = nest_by_ticket(sessions);
+        let by_id: HashMap<&str, &okena_workspace::state::ProjectData> = workspace
+            .projects_in_active_space()
+            .map(|p| (p.id.as_str(), p))
+            .collect();
+        let sessions: Vec<SessionRow> = self
+            .live_agent_order(workspace)
+            .into_iter()
+            .filter_map(|placed| {
+                let p = by_id.get(placed.id.as_str())?;
+                let mut row =
+                    self.live_session_row(p, p.agent_role()?, workspace, focused_id.as_deref());
+                row.depth = placed.depth;
+                row.pinned = placed.pinned;
+                Some(row)
+            })
+            .collect();
 
         // The tab header already says AGENTS, so an empty list says why it is
         // empty rather than showing nothing at all.
@@ -556,19 +715,153 @@ impl Sidebar {
                 .into_any_element();
         }
 
-        let mut groups: Vec<AnyElement> = Vec::new();
+        // Each top-level agent with its sub-agents is one group, and the unit
+        // that is pinned and arranged.
+        let mut pinned: Vec<AnyElement> = Vec::new();
+        let mut rest: Vec<AnyElement> = Vec::new();
+        let mut first_pinned: Option<String> = None;
+        let active = t.border_active;
         let mut i = 0;
         while i < sessions.len() {
+            let root = &sessions[i];
             let (group, used) = self.render_agent_group(&sessions[i..], None, cx);
-            groups.push(group);
             i += used.max(1);
+            if !root.pinned {
+                rest.push(group);
+                continue;
+            }
+            // Dropped on a pinned agent, another lands just above it.
+            let target = root.info.id.clone();
+            first_pinned.get_or_insert_with(|| target.clone());
+            pinned.push(
+                div()
+                    .id(SharedString::from(format!("agent-pinned-{target}")))
+                    .w_full()
+                    .drag_over::<AgentDrag>(move |style, _, _, _| {
+                        style.border_t_2().border_color(rgb(active))
+                    })
+                    .on_drop(cx.listener(move |this, drag: &AgentDrag, _window, cx| {
+                        this.drop_agent(
+                            &drag.project_id,
+                            AgentDrop::BeforePinned(target.clone()),
+                            cx,
+                        );
+                    }))
+                    .child(group)
+                    .into_any_element(),
+            );
         }
+
+        let has_pinned = !pinned.is_empty();
+        let head = self.render_pin_zone(
+            "agent-pin-head",
+            match first_pinned {
+                Some(first) => AgentDrop::BeforePinned(first),
+                None => AgentDrop::EndOfPinned,
+            },
+            !has_pinned && cx.has_active_drag(),
+            cx,
+        );
         v_flex()
             .w_full()
-            .gap(px(6.0))
             .px(px(8.0))
-            .py(px(4.0))
-            .children(groups)
+            .pb(px(4.0))
+            .child(head)
+            .when(has_pinned, |d| {
+                d.child(v_flex().w_full().gap(px(6.0)).children(pinned))
+                    // Below the last pinned agent: still pinned, at the end.
+                    .child(self.render_pin_zone(
+                        "agent-pin-tail",
+                        AgentDrop::EndOfPinned,
+                        false,
+                        cx,
+                    ))
+            })
+            // Let go anywhere among the rest, a pinned agent is unpinned and
+            // the sort places it; an unpinned one has nowhere new to go.
+            .child(
+                v_flex()
+                    .id("agent-unpinned")
+                    .debug_selector(|| "agent-unpinned".to_string())
+                    .w_full()
+                    .gap(px(6.0))
+                    .rounded(px(8.0))
+                    .can_drop(|drag, _, _| {
+                        drag.downcast_ref::<AgentDrag>()
+                            .is_some_and(|drag| drag.pinned)
+                    })
+                    .drag_over::<AgentDrag>(move |style, _, _, _| {
+                        style.bg(okena_ui::theme::with_alpha(active, 0.12))
+                    })
+                    .on_drop(cx.listener(|this, drag: &AgentDrag, _window, cx| {
+                        this.drop_agent(&drag.project_id, AgentDrop::Unpinned, cx);
+                    }))
+                    .children(rest),
+            )
+            .into_any_element()
+    }
+
+    /// The menu a right-click on an agent opens: pin it or unpin it, and
+    /// rename it.
+    pub(super) fn render_agent_menu(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let Some((id, at)) = self.agent_menu.clone() else {
+            return div().into_any_element();
+        };
+        let (name, placed) = {
+            let workspace = self.workspace.read(cx);
+            (
+                workspace.project(&id).map(|p| p.name.clone()),
+                self.live_agent_order(workspace)
+                    .into_iter()
+                    .find(|agent| agent.id == id),
+            )
+        };
+        let Some(name) = name else {
+            return div().into_any_element();
+        };
+        let mut panel = okena_ui::menu::context_menu_panel("agent-menu", &t)
+            .min_w(px(180.0))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.agent_menu = None;
+                cx.notify();
+            }));
+        // Only a live, top-level agent has a place of its own to pin: a
+        // sub-agent goes where its parent goes, and a closed one is history.
+        if let Some(placed) = placed.filter(|agent| agent.depth == 0) {
+            let for_pin = id.clone();
+            let (label, drop) = if placed.pinned {
+                ("Unpin", AgentDrop::Unpinned)
+            } else {
+                ("Pin to top", AgentDrop::EndOfPinned)
+            };
+            panel = panel.child(
+                okena_ui::menu::menu_item("agent-menu-pin", "icons/bookmark.svg", label, &t)
+                    .debug_selector(|| "agent-menu-pin".to_string())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _window, cx| {
+                            this.agent_menu = None;
+                            this.drop_agent(&for_pin, drop.clone(), cx);
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
+        panel = panel.child(
+            okena_ui::menu::menu_item("agent-menu-rename", "icons/edit.svg", "Rename", &t)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        this.agent_menu = None;
+                        this.start_project_rename(id.clone(), name.clone(), window, cx);
+                    }),
+                ),
+        );
+        // Deferred so it paints over the cards it was opened from, which come
+        // later in the sidebar than this does.
+        deferred(anchored().position(at).snap_to_window().child(panel))
+            .with_priority(1)
             .into_any_element()
     }
 
@@ -753,7 +1046,48 @@ impl Sidebar {
 
 #[cfg(test)]
 mod closed_tests {
-    use super::closed_sessions;
+    use super::{closed_sessions, order_of_owner};
+    use okena_workspace::state::agent_order::{AgentDrop, plan_drop};
+
+    #[test]
+    fn a_move_is_indexed_in_the_owning_daemons_own_order() {
+        // The mirror holds two daemons' entries. The local daemon's order is
+        // repo, a, b; the index sent to it must count only those.
+        let mirror: Vec<String> = [
+            "remote:far:x",
+            "remote:local:repo",
+            "remote:far:y",
+            "remote:local:a",
+            "remote:local:b",
+        ]
+        .map(String::from)
+        .to_vec();
+        let local = order_of_owner(&mirror, "remote:local:b");
+        assert_eq!(
+            local,
+            ["remote:local:repo", "remote:local:a", "remote:local:b"]
+        );
+        // Dropping b on the pinned a: index 1 of the daemon's own
+        // [repo, a, b], where a sits — not 3, where it sits in the mirror.
+        let roots = vec![
+            ("remote:local:a".to_string(), true),
+            ("remote:local:b".to_string(), false),
+        ];
+        let plan = plan_drop(
+            "remote:local:b",
+            &AgentDrop::BeforePinned("remote:local:a".into()),
+            &roots,
+            &local,
+        )
+        .unwrap();
+        assert_eq!((plan.move_to, plan.toggle_pinned), (Some(1), true));
+        // Ids with no prefix — a sidebar over its own workspace — are one
+        // owner of their own.
+        assert_eq!(
+            order_of_owner(&["a".to_string(), "remote:far:x".to_string()], "a"),
+            ["a"]
+        );
+    }
     use okena_workspace::state::ProjectData;
 
     fn session(id: &str, closed_at: Option<u64>) -> ProjectData {
