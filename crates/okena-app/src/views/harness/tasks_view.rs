@@ -3,9 +3,12 @@
 //! Every call goes to the daemon, which owns the provider credential. The
 //! client never holds a task-manager token and never talks to Linear directly.
 
-use crate::keybindings::{Cancel, FocusTaskSearch};
+use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms, ui_text_sm};
+use crate::views::components::island::{
+    ISLAND_CLEARANCE, island_bar, island_button, island_count, island_menu, island_search_box,
+};
 use crate::views::components::{SimpleInput, SimpleInputState};
 use gpui::prelude::*;
 use gpui::*;
@@ -22,7 +25,7 @@ use super::new_task_form::TaskHelper;
 use super::task_filter::{
     FacetValue, LABELS_HEADING, Narrowing, STATUS_HEADING, collect_facets, status_name,
 };
-use super::{HarnessPane, TASKS_CONTEXT};
+use super::HarnessPane;
 
 /// Accent colour for a workflow-state category.
 ///
@@ -2118,172 +2121,55 @@ impl HarnessPane {
             .into_any_element()
     }
 
-    /// The list toolbar: how the list is ordered, and what it is narrowed to.
+    /// The Tasks island: the search box, the facets the loaded tasks offer,
+    /// how the list is ordered, and — while anything narrows it — how much of
+    /// it is showing.
     ///
-    /// Always present, because the sort always applies. The Filters half hides
-    /// itself when the loaded tasks have nothing worth filtering by — a
-    /// control that cannot change the list is worse than no control.
-    fn render_filter_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Everything the filter bar along the top of the list used to hold
+    /// (QBL-436). The Filters button hides itself when the loaded tasks have
+    /// nothing worth filtering by — a control that cannot change the list is
+    /// worse than no control — and opens the filter menu above the bar.
+    pub(super) fn render_tasks_island(&self, cx: &mut Context<Self>) -> AnyElement {
         let facets = collect_facets(&self.tasks.tasks);
         let has_facets = !facets.is_empty();
-        let t = theme(cx);
-        let open = self.tasks.filter_open;
         let selected = self.tasks.filter.selected_count();
         // Search counts here where it does not count in the badge: "N of M"
         // and Clear are about the list, the badge about the facet panel.
         let filtering = !self.tasks.filter.is_empty();
-        // The count of what is actually on screen, so the effect of a filter
-        // is legible without counting rows.
-        let shown = self
-            .tasks
-            .tasks
-            .iter()
-            .filter(|task| self.tasks.filter.matches(task))
-            .count();
-        let total = self.tasks.tasks.len();
+        let (shown, total) = self.tasks_shown_of_total();
 
-        let sort = self.tasks.sort;
-        let summary = h_flex()
-            .id("task-filter-summary")
-            .when(has_facets, |d| d.cursor_pointer())
-            .w_full()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(12.0))
-            .py(px(6.0))
-            .border_b_1()
-            .border_color(rgb(t.border))
-            .when(has_facets, |d| d.hover(|s| s.bg(rgb(t.bg_hover))))
-            .children(has_facets.then(|| {
-                div()
-                    .w(px(10.0))
-                    .flex_shrink_0()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(if open { "⌄" } else { "›" })
-                    .into_any_element()
-            }))
-            .children(has_facets.then(|| {
-                div()
-                    .flex_shrink_0()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(if selected > 0 {
-                        t.text_primary
-                    } else {
-                        t.text_muted
-                    }))
-                    .child(if selected > 0 {
-                        format!("Filters · {selected}")
-                    } else {
-                        "Filters".to_string()
-                    })
-                    .into_any_element()
-            }))
+        let bar = island_bar("tasks-island", cx)
             .child(
-                // Takes the slack and gives it up first, so a narrow pane
-                // squeezes the box before Sort or Clear are cut off.
-                h_flex().flex_1().min_w_0().child(
-                    div()
-                        .id("task-search")
-                        .w_full()
-                        .max_w(px(280.0))
-                        .min_w_0()
-                        .overflow_hidden()
-                        .rounded(px(3.0))
-                        .bg(rgb(t.bg_secondary))
-                        .child(SimpleInput::new(&self.tasks.search).text_size(ui_text_ms(cx)))
-                        // Typing a search is not opening the facets.
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_action(cx.listener(|this, _: &Cancel, window, cx| {
-                            this.tasks
-                                .search
-                                .update(cx, |input, cx| input.set_value("", cx));
-                            window.focus(&this.tasks.focus, cx);
-                        })),
-                ),
+                island_search_box("task-search", &self.tasks.search, cx).on_action(cx.listener(
+                    |this, _: &Cancel, window, cx| this.cancel_island_search(window, cx),
+                )),
             )
+            .children(has_facets.then(|| self.island_filters_toggle(selected, cx)))
             .child(
-                // Its own button inside the row: clicking the row opens the
-                // facets, and changing the order is not that.
-                h_flex()
-                    .id("task-sort")
-                    .cursor_pointer()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(4.0))
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(3.0))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
-                    .child("Sort")
-                    .child(div().text_color(rgb(t.text_secondary)).child(sort.label()))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| {
-                            cx.stop_propagation();
-                            this.tasks.sort = this.tasks.sort.next();
-                            cx.notify();
-                        }),
-                    ),
-            )
-            .children(filtering.then(|| {
-                div()
-                    .flex_shrink_0()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(format!("{shown} of {total}"))
-                    .into_any_element()
-            }))
-            .children(filtering.then(|| {
-                div()
-                    .id("task-filter-clear")
-                    .cursor_pointer()
-                    .flex_shrink_0()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded(px(3.0))
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_secondary))
-                    .hover(|s| s.bg(rgb(t.bg_hover)).text_color(rgb(t.text_primary)))
-                    .child("Clear")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _window, cx| {
-                            // Clearing is not also collapsing: you clear to
-                            // pick something else.
-                            cx.stop_propagation();
-                            this.tasks.filter.clear();
-                            this.tasks
-                                .search
-                                .update(cx, |input, cx| input.set_value("", cx));
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element()
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    // Nothing to open when there is nothing to filter by.
-                    if has_facets {
-                        this.tasks.filter_open = !this.tasks.filter_open;
+                island_button("task-sort", format!("Sort: {}", self.tasks.sort.label()), cx)
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.tasks.sort = this.tasks.sort.next();
                         cx.notify();
-                    }
-                }),
-            );
+                    })),
+            )
+            .children(filtering.then(|| island_count(shown, total, cx)))
+            .children(filtering.then(|| {
+                island_button("task-filter-clear", "Clear", cx).on_click(cx.listener(
+                    |this, _, _window, cx| {
+                        // Clearing is not also collapsing: you clear to pick
+                        // something else.
+                        this.tasks.filter.clear();
+                        this.tasks
+                            .search
+                            .update(cx, |input, cx| input.set_value("", cx));
+                        cx.notify();
+                    },
+                ))
+            }))
+            .child(self.island_close_button("tasks-island-close", cx));
 
-        let mut bar = v_flex().w_full().flex_shrink_0().child(summary);
-        if open && has_facets {
-            let mut panel = v_flex()
-                .w_full()
-                .gap(px(8.0))
-                .px(px(12.0))
-                .py(px(8.0))
-                .bg(rgb(t.bg_secondary))
-                .border_b_1()
-                .border_color(rgb(t.border));
+        let menu = (self.island_menu_open && has_facets).then(|| {
+            let mut panel = island_menu("task-facets", cx).w(px(560.0));
             for (axis, values) in &facets.axes {
                 panel = panel.child(self.render_facet_group(
                     axis.label(),
@@ -2310,9 +2196,22 @@ impl HarnessPane {
                     cx,
                 ));
             }
-            bar = bar.child(panel);
-        }
-        Some(bar.into_any_element())
+            panel.into_any_element()
+        });
+
+        self.island_with_menu(menu, bar, cx)
+    }
+
+    /// How many of the loaded tasks the filter lets through, and how many
+    /// there are — so the effect of a filter is legible without counting rows.
+    pub(super) fn tasks_shown_of_total(&self) -> (usize, usize) {
+        let shown = self
+            .tasks
+            .tasks
+            .iter()
+            .filter(|task| self.tasks.filter.matches(task))
+            .count();
+        (shown, self.tasks.tasks.len())
     }
 
     /// One heading and its values as togglable chips.
@@ -2430,6 +2329,8 @@ impl HarnessPane {
             .id("tasks-list")
             .flex_1()
             .min_h_0()
+            // So the last rows scroll clear of the island floating over them.
+            .pb(px(ISLAND_CLEARANCE))
             .overflow_y_scroll();
 
         // Above both sections: a draft is not a task yet, so it belongs in
@@ -2493,9 +2394,6 @@ impl HarnessPane {
             .w(relative(share))
             .min_w_0()
             .h_full()
-            // Above the scroll, not inside it: a filter that scrolls away
-            // from the rows it is narrowing leaves them looking unexplained.
-            .children(self.render_filter_bar(cx))
             .child(body)
             .into_any_element()
     }
@@ -4385,13 +4283,6 @@ impl HarnessPane {
         v_flex()
             .size_full()
             .track_focus(&self.tasks.focus)
-            .key_context(TASKS_CONTEXT)
-            .on_action(cx.listener(|this, _: &FocusTaskSearch, window, cx| {
-                this.tasks.search.update(cx, |input, cx| {
-                    input.focus(window, cx);
-                    input.select_all(cx);
-                });
-            }))
             // Capture, so it runs before a child takes focus for itself, and
             // only when focus is outside the view: a click here must not pull
             // the cursor out of the search box or a form field.

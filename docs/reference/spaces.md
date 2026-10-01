@@ -128,14 +128,14 @@ spaces in the way. Deleting a space never removes a connection.
 ### Filters are a hard scope
 
 A space's filters are chosen from what its connection reports: the groupings
-(team, project, iteration), labels and status. They combine the way the Tasks
-filter bar's do — **any** of the values picked within one filter, **all** of the
-filters together.
+(team, project, iteration), labels and status. They combine the way the
+filters in the Tasks search island do — **any** of the values picked within one
+filter, **all** of the filters together.
 
 The scope is applied by the daemon before any task reaches a client
-(`TaskScope::apply` in `okena_core::tasks`). The Tasks filter bar therefore
+(`TaskScope::apply` in `okena_core::tasks`). The Tasks island therefore
 narrows *inside* a list that never held the rest, which is what makes "the
-filter bar cannot show anything outside the scope" true for the Tasks view, the
+filters cannot show anything outside the scope" true for the Tasks view, the
 CLI and an agent over MCP alike.
 
 A space's connection and its filters can be edited at any time; Tasks follows

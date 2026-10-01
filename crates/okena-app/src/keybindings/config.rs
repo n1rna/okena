@@ -4,6 +4,10 @@ use std::path::PathBuf;
 
 use super::types::{KeybindingConflict, KeybindingEntry};
 
+/// Key context for a binding that holds everywhere but inside a terminal
+/// pane, which has a binding of its own for the same key.
+pub(crate) const OUTSIDE_TERMINAL_CONTEXT: &str = "!TerminalPane";
+
 /// Complete keybinding configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KeybindingConfig {
@@ -125,12 +129,14 @@ impl KeybindingConfig {
             ],
         );
         bindings.insert(
-            "FocusTaskSearch".to_string(),
+            "FocusIslandSearch".to_string(),
             vec![
-                // Scoped to the Tasks view, so a terminal's cmd-f still
-                // opens terminal search.
-                KeybindingEntry::new("cmd-f", Some(crate::views::harness::TASKS_CONTEXT)),
-                KeybindingEntry::new("ctrl-f", Some(crate::views::harness::TASKS_CONTEXT)),
+                // Everywhere but inside a terminal pane, whose cmd-f is its
+                // own search. Said as a context rather than left global: a
+                // binding with no context ranks with the deepest one, so it
+                // would contend with the terminal's instead of yielding to it.
+                KeybindingEntry::new("cmd-f", Some(OUTSIDE_TERMINAL_CONTEXT)),
+                KeybindingEntry::new("ctrl-f", Some(OUTSIDE_TERMINAL_CONTEXT)),
             ],
         );
         bindings.insert(
@@ -706,10 +712,11 @@ mod tests {
         }
     }
 
-    /// Both want cmd-f. Each must stay in its own context, or one of them
-    /// takes the key everywhere.
+    /// Both want cmd-f: the island everywhere but in a terminal pane, the
+    /// terminal's own search inside one. The two contexts must never both
+    /// hold, or which one gets the key is down to registration order.
     #[test]
-    fn task_search_and_terminal_search_share_cmd_f_in_their_own_contexts() {
+    fn island_search_and_terminal_search_share_cmd_f_in_contexts_that_never_overlap() {
         let config = KeybindingConfig::defaults();
         let contexts = |action: &str| -> Vec<(String, Option<String>)> {
             config.bindings[action]
@@ -717,11 +724,11 @@ mod tests {
                 .map(|e| (e.keystroke.clone(), e.context.clone()))
                 .collect()
         };
-        let tasks = Some(crate::views::harness::TASKS_CONTEXT.to_string());
+        let outside = Some(super::OUTSIDE_TERMINAL_CONTEXT.to_string());
         let terminal = Some("TerminalPane".to_string());
         assert_eq!(
-            contexts("FocusTaskSearch"),
-            [("cmd-f".into(), tasks.clone()), ("ctrl-f".into(), tasks)]
+            contexts("FocusIslandSearch"),
+            [("cmd-f".into(), outside.clone()), ("ctrl-f".into(), outside)]
         );
         assert_eq!(
             contexts("Search"),
@@ -730,6 +737,8 @@ mod tests {
                 ("ctrl-f".into(), terminal)
             ]
         );
+        assert_eq!(super::OUTSIDE_TERMINAL_CONTEXT, "!TerminalPane");
+        assert!(config.detect_conflicts().is_empty());
     }
 
     #[test]

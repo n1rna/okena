@@ -4,7 +4,7 @@ use super::types::ActionDescription;
 use super::{
     AddTab, Cancel, CheckForUpdates, ClearFocus, CloseSearch, CloseTerminal, Copy, CreateWorktree,
     DetachTerminal, EqualizeLayout, ExportTerminalBuffer, FocusActiveProject, FocusDown, FocusLeft,
-    FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusSidebar, FocusTaskSearch, FocusUp,
+    FocusNextTerminal, FocusPrevTerminal, FocusRight, FocusIslandSearch, FocusSidebar, FocusUp,
     FullscreenNextTerminal, FullscreenPrevTerminal, InstallUpdate, JumpToNextFailedCommand,
     JumpToNextPrompt, JumpToPreviousFailedCommand, JumpToPreviousPrompt, MinimizeTerminal,
     NewProject, NewWindow, NextSpace, OpenSettingsFile, Paste, PreviousSpace, Quit, ResetZoom,
@@ -523,15 +523,6 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         },
     );
     map.insert(
-        "FocusTaskSearch",
-        ActionDescription {
-            name: "Search Tasks",
-            description: "Put the cursor in the Tasks view's search box",
-            category: "Harness",
-            factory: || Box::new(FocusTaskSearch),
-        },
-    );
-    map.insert(
         "ShowProfileManager",
         ActionDescription {
             name: "Profile Manager",
@@ -712,10 +703,19 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
     map.insert(
         "ToggleOverviewSearch",
         ActionDescription {
-            name: "Toggle Overview Search",
-            description: "Open or close the search island on the Agents and Projects overviews",
+            name: "Toggle Search Island",
+            description: "Open or close the search island on Tasks, Specs, Knowledge and the Agents and Projects overviews",
             category: "Layout",
             factory: || Box::new(ToggleOverviewSearch),
+        },
+    );
+    map.insert(
+        "FocusIslandSearch",
+        ActionDescription {
+            name: "Search This Page",
+            description: "Put the cursor in the search island on Tasks, Specs, Knowledge and the Agents and Projects overviews, opening it first if it is closed. A focused terminal keeps the key for its own search",
+            category: "Layout",
+            factory: || Box::new(FocusIslandSearch),
         },
     );
     map.insert(

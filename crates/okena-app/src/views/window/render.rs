@@ -8,7 +8,7 @@ use crate::keybindings::{
     SwitchToSpace4, SwitchToSpace5, SwitchToSpace6, SwitchToSpace7, SwitchToSpace8,
     SwitchToSpace9,
     ShowPairingDialog, ShowProfileManager, ShowProjectSwitcher, ShowSessionManager, ShowSettings,
-    ShowThemeSelector, StartAllServices, StopAllServices, ToggleOverviewSearch, TogglePaneSwitcher,
+    ShowThemeSelector, StartAllServices, StopAllServices, ToggleOverviewSearch, TogglePaneSwitcher, FocusIslandSearch,
     ToggleProjectLayout, ToggleProjectVisibility, ToggleSidebar, ToggleSidebarAutoHide,
 };
 use crate::settings::{open_settings_file, settings_entity};
@@ -22,7 +22,7 @@ use crate::workspace::requests::{OverlayRequest, ProjectOverlay, ProjectOverlayK
 use gpui::prelude::*;
 use gpui::*;
 
-use super::WindowView;
+use super::{WINDOW_CONTEXT, WindowView};
 
 impl WindowView {
     pub(super) fn handle_app_menu_action(
@@ -801,6 +801,10 @@ impl Render for WindowView {
             .flex_col()
             .bg(rgb(t.bg_primary))
             .track_focus(&focus_handle)
+            // A context of its own, so a binding that is scoped by what it is
+            // *not* in — the island's `!TerminalPane` — has something to
+            // match when nothing below the window carries one.
+            .key_context(WINDOW_CONTEXT)
             .on_action(cx.listener(
                 |this, _: &okena_views_terminal::actions::Cancel, _window, cx| {
                     if this.pane_move.read(cx).source().is_some() {
@@ -1082,9 +1086,13 @@ impl Render for WindowView {
             // Toggle this window's project grid between columns and rows.
             // Per-window setting persisted on WindowState; sizing percentages
             // carry over unchanged across the flip.
-            // Open or close the overviews' search island.
+            // Open or close the page's search island.
             .on_action(cx.listener(|this, _: &ToggleOverviewSearch, window, cx| {
                 this.toggle_overview_search(window, cx);
+            }))
+            // Cmd/Ctrl+F outside a terminal: the cursor goes to the island.
+            .on_action(cx.listener(|this, _: &FocusIslandSearch, window, cx| {
+                this.focus_island_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleProjectLayout, _window, cx| {
                 let window_id = this.window_id;

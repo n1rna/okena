@@ -217,8 +217,7 @@ used by OpenSpec stores, is described in
     changes). `+` beside the ROOTS heading opens the **Roots page**.
   - **Entry list:** the open root's entries grouped by kind, with docs and
     templates nested by folder — so `briefs` and `partials` are directories
-    holding one row per file — and a filter over titles, names, paths,
-    descriptions and tags.
+    holding one row per file.
     Markdown entries render formatted, and a skill lists its supporting files.
     A template one of your roots holds a copy of is marked `override` when
     that copy is what a launch reads, and `default` when a copy exists but
@@ -231,13 +230,28 @@ used by OpenSpec stores, is described in
     the roots: reorder them and the highlight moves, delete the winning copy
     and it moves to the next. A doc or an agent has no list — nothing
     overrides them.
+  - **Search island:** a bar floating at the bottom of the view with a search
+    box and a **Filters** button. The button opens a menu holding two filters,
+    **Root** and **Kind** (doc, skill, agent, template, partial, brief), and
+    shows how many values are picked. `Cmd+F` (`Ctrl+F`) puts the cursor in
+    the box. The text is
+    matched, trimmed and without case, against every file's title, name, path
+    — so a folder name matches — and content, in **every** root, not just the
+    open one. Values within a filter widen (either root), and the filters
+    narrow each other and the text. While anything narrows the view the entry
+    list gives way to the matches, listed under the root each is in, with
+    "N of M"; clicking one opens it in its root. **Clear**, or `Esc` in the
+    box, brings the entry list back. The daemon does the matching
+    (`knowledge_search`), since a client holds only file names until a file
+    is opened. The Specs view has the same island with the **Root** filter
+    (`spec_search`).
   - **Editing:** an opened file can be edited and saved with `cmd-s`
     (`ctrl-s`). A Markdown file toggles between **Edit** (the source) and
     **Preview**; any other file opens straight in the editor. A file with
     unsaved edits is marked `●` in the list and keeps its edits while another
     file is open. **Revert** drops them and reloads the file. The Specs view
     edits spec documents the same way.
-  - **Files:** `+` beside the filter creates an entry. Pick the kind and a
+  - **Files:** `+` beside the ENTRIES heading creates an entry. Pick the kind and a
     name (`ci/pipeline` makes folders), and it opens in the editor, starting
     from the kind's frontmatter. The open file's **Rename** moves it, and the
     open document follows with any unsaved edits. **Delete…** asks first, then

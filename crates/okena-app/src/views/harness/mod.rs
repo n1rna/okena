@@ -7,9 +7,11 @@
 
 mod context_dialog;
 mod doc_agents;
+mod doc_search;
 mod editor;
 mod file_ops;
 mod file_sidebar;
+mod island;
 mod knowledge_draft;
 mod knowledge_override;
 mod knowledge_view;
@@ -36,10 +38,6 @@ use std::rc::Rc;
 
 pub use editor::EDITOR_CONTEXT;
 
-/// Key context around the Tasks view. `FocusTaskSearch` is bound in it, so
-/// `cmd-f` means "search tasks" there and keeps meaning terminal search in a
-/// terminal pane.
-pub const TASKS_CONTEXT: &str = "HarnessTasks";
 pub use okena_core::harness::HarnessSection;
 pub(crate) use tasks_view::{notify_task_auth_changed, provider_label};
 
@@ -124,15 +122,11 @@ pub(crate) struct TasksState {
     pub(crate) strategy: std::collections::HashMap<String, tasks_view::StartStrategy>,
     /// What the list is narrowed to. Empty means everything.
     pub(crate) filter: task_filter::TaskFilter,
-    /// Whether the facet panel is open. Shut by default: the filters are a
-    /// tool you reach for, and a permanent wall of chips above the list would
-    /// cost every reader space to show nothing most of the time.
-    pub(crate) filter_open: bool,
-    /// The filter bar's search box. Its text is mirrored into `filter`, so
-    /// the one `matches` test covers it.
+    /// The island's search box. Its text is mirrored into `filter`, so the
+    /// one `matches` test covers it.
     pub(crate) search: Entity<SimpleInputState>,
-    /// Tracked by the Tasks view's root, so its key context — and with it
-    /// `cmd-f` — is on the dispatch path whenever the view is in use.
+    /// Tracked by the Tasks view's root: where the keyboard rests while the
+    /// view is in use, and where the island hands it back to.
     pub(crate) focus: FocusHandle,
     /// Set when the view is shown, so the next render takes focus for it.
     pub(crate) focus_on_show: bool,
@@ -363,6 +357,20 @@ pub struct HarnessPane {
     pub(crate) context_dialog: Option<context_dialog::ContextTarget>,
     /// The Roots page the sidebar's `+` opens, for this pane's section.
     pub(crate) roots: roots_page::RootsPage,
+    /// What the Specs island is narrowed to, and what the daemon found.
+    pub(crate) spec_search: doc_search::DocSearch,
+    /// What the Knowledge island is narrowed to, and what the daemon found.
+    pub(crate) knowledge_search: doc_search::DocSearch,
+    /// Whether this page's search island is open, or closed to its pill.
+    /// Never saved: a restart opens it.
+    pub(crate) island_open: bool,
+    /// Whether the island's filter menu is open. Shut by default: the filters
+    /// are a tool you reach for, and a permanent wall of chips would cost
+    /// every reader space to show nothing most of the time.
+    pub(crate) island_menu_open: bool,
+    /// The window's own focus, which the island hands the keyboard back to
+    /// when it gives it up — so the window's shortcuts keep working.
+    pub(crate) window_focus: FocusHandle,
 }
 
 /// Everything a harness pane needs from its window.
@@ -378,6 +386,8 @@ pub struct PaneContext {
     pub window_id: WindowId,
     pub terminals: TerminalsRegistry,
     pub active_drag: Rc<RefCell<Option<okena_views_terminal::layout::split_pane::DragState>>>,
+    /// The window's root focus handle.
+    pub window_focus: FocusHandle,
 }
 
 impl HarnessPane {
@@ -451,6 +461,8 @@ impl HarnessPane {
         let spec_files = file_ops::FileOps::new(cx);
         let knowledge_files = file_ops::FileOps::new(cx);
         let roots = roots_page::RootsPage::new(section, cx);
+        let spec_search = doc_search::DocSearch::new(HarnessSection::Specs, cx);
+        let knowledge_search = doc_search::DocSearch::new(HarnessSection::Knowledge, cx);
         let mut pane = Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -490,7 +502,6 @@ impl HarnessPane {
                 queued_starts: Vec::new(),
                 strategy: std::collections::HashMap::new(),
                 filter: task_filter::TaskFilter::default(),
-                filter_open: false,
                 search: task_search,
                 focus: cx.focus_handle(),
                 focus_on_show: section == HarnessSection::Tasks,
@@ -528,6 +539,11 @@ impl HarnessPane {
             knowledge_files,
             context_dialog: None,
             roots,
+            spec_search,
+            knowledge_search,
+            island_open: true,
+            island_menu_open: false,
+            window_focus: ctx.window_focus,
         };
         match section {
             HarnessSection::Tasks => {

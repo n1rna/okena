@@ -82,6 +82,12 @@ impl OverviewFilter {
         self.search = text.to_string();
     }
 
+    /// How many chips are picked, for the "Filters · 3" on the island's
+    /// button. The text is not one of them.
+    pub fn selected_count(&self) -> usize {
+        self.states.len() + self.roles.len()
+    }
+
     /// Empty the text and the chips alike: there is one Clear.
     pub fn clear(&mut self) {
         self.search.clear();
