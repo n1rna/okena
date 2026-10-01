@@ -161,7 +161,10 @@ fn tool_definitions() -> Value {
             "name": "okena_list_projects",
             "description":
                 "List okena's projects with their paths, branches and worktrees, \
-                 including the other worktrees created for the same task.",
+                 including the other worktrees created for the same task. Each \
+                 has a `kind`: `repo` is a project work can be started in \
+                 (`okena_start_work`), `worktree` a checkout cut from one, \
+                 `session` an agent's session.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -398,8 +401,12 @@ fn tool_definitions() -> Value {
                 "Start an agent on one or more tasks, each in worktrees of its own. \
                  Use this after deciding how the work splits: one call per \
                  group of tasks that can be built and tested together. Every \
-                 task in the group gets its own worktree in each repo, on its \
-                 own branch, and the agent is told which worktree is whose.",
+                 task in the group gets its own worktree in each of `projects`, \
+                 on its own branch, and the agent is told which worktree is in \
+                 which project and whose. The agent is listed under you. \
+                 It either starts or fails: on an error nothing is left \
+                 behind, and the message says what to change. A task an agent \
+                 is already working on is not started a second time.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -411,6 +418,18 @@ fn tool_definitions() -> Value {
                             "Provider ids or keys of the tasks in this group. The \
                              session is named after the first."
                     },
+                    "projects": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description":
+                            "The projects this group's work belongs in, each by \
+                             name, id or path — the `repo` entries of \
+                             `okena_list_projects`. Where the tasks' changes go, \
+                             not where you run: work out which project each task \
+                             is about first. Name several when one task needs \
+                             changes in more than one. May be left out only when \
+                             you work in exactly one project yourself."
+                    },
                     "note": {
                         "type": "string",
                         "description":
@@ -421,7 +440,9 @@ fn tool_definitions() -> Value {
                     "agent": {
                         "type": "string",
                         "description":
-                            "Agent to launch. Omit for okena's configured default."
+                            "The agent CLI to launch: `claude`, `copilot` or \
+                             `codex`. Not a model or a role. Leave it out to run \
+                             the one okena is configured with."
                     }
                 },
                 "required": ["tasks"],
@@ -786,6 +807,7 @@ fn list_projects() -> Result<Value, String> {
                 "name": p.name,
                 "path": p.path,
                 "branch": p.git_status.as_ref().and_then(|g| g.branch.clone()),
+                "kind": project_kind(p),
                 "is_worktree": p.worktree_info.is_some(),
                 "worktree_ids": p.worktree_ids,
                 "task": p.task_ref,
@@ -979,9 +1001,56 @@ fn list_subtasks(args: &Value) -> Result<Value, String> {
 /// be tested apart and hands both to one agent. okena gives each of them
 /// worktrees of its own on its own branch, names the session after the first,
 /// links it to all of them, and tells the agent which worktree is whose.
+///
+/// The new session is recorded as started by this one, which makes the start
+/// all or nothing on the daemon's side: see `TaskStartWork::started_by`.
 fn start_work(args: &Value) -> Result<Value, String> {
-    let tasks: Vec<String> = args
-        .get("tasks")
+    let tasks = string_list(args, "tasks");
+    let (primary, rest) = tasks
+        .split_first()
+        .ok_or("`tasks` needs at least one sub-task key")?;
+
+    let session = current_session()?;
+    let provider = session_provider(&session)?;
+    let token = super::ensure_token()?;
+    let state = super::commands::fetch_state(&token)?;
+    let project_ids = start_projects(
+        &string_list(args, "projects"),
+        &session.project,
+        &state.projects,
+    )?;
+
+    let request = start_request(args, &provider, &tasks, &project_ids, &session.project.id);
+    let started = action(&request).map_err(|e| start_error(&e, &state.projects))?;
+    Ok(json!({ "started": started, "task": primary, "also": rest }))
+}
+
+/// The start the daemon is asked for: `tasks` in `project_ids`, made by the
+/// session `started_by`.
+fn start_request(
+    args: &Value,
+    provider: &str,
+    tasks: &[String],
+    project_ids: &[String],
+    started_by: &str,
+) -> Value {
+    json!({
+        "action": "task_start_work",
+        "provider": provider,
+        "task_external_id": tasks.first(),
+        "project_ids": project_ids,
+        "agent_command": str_arg(args, "agent"),
+        // Only what the agent itself wrote. That the group also covers other
+        // sub-tasks is okena's to say, in its `group-note` partial.
+        "note": str_arg(args, "note"),
+        "also": tasks.get(1..).unwrap_or_default(),
+        "started_by": started_by,
+    })
+}
+
+/// A list-of-strings argument, without blanks.
+fn string_list(args: &Value, key: &str) -> Vec<String> {
+    args.get(key)
         .and_then(|v| v.as_array())
         .map(|a| {
             a.iter()
@@ -991,57 +1060,133 @@ fn start_work(args: &Value) -> Result<Value, String> {
                 .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default();
-    let (primary, rest) = tasks
-        .split_first()
-        .ok_or("`tasks` needs at least one sub-task key")?;
-
-    let session = current_session()?;
-    let provider = session
-        .project
-        .task_ref
-        .as_ref()
-        .map(|t| t.id.provider.clone())
-        .unwrap_or_else(|| "linear".to_string());
-    // The repos this session was given. A sub-agent works in the same ones —
-    // it is a share of this task, not a different project.
-    let project_ids = sibling_repo_ids(&session)?;
-
-    // Only what the agent itself wrote. That the group also covers other
-    // sub-tasks is okena's to say, in its `group-note` partial.
-    let note = args
-        .get("note")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
         .unwrap_or_default()
-        .to_string();
-
-    let token = super::ensure_token()?;
-    let response = super::api_action(
-        &token,
-        &json!({
-            "action": "task_start_work",
-            "provider": provider,
-            "task_external_id": primary,
-            "project_ids": project_ids,
-            "agent_command": args.get("agent").and_then(|a| a.as_str()),
-            "note": (!note.is_empty()).then_some(note),
-            "also": rest,
-        })
-        .to_string(),
-    )?;
-    Ok(json!({ "started": response, "task": primary, "also": rest }))
 }
 
-/// The repositories the current session works in.
+/// What a project is to an agent choosing where work goes.
+fn project_kind(p: &okena_core::api::ApiProject) -> &'static str {
+    if p.worktree_info.is_some() {
+        "worktree"
+    } else if p.task_ref.is_some()
+        || p.agent_purpose.is_some()
+        || p.custom_session.is_some()
+        || p.spec_change.is_some()
+        || p.knowledge_root.is_some()
+        || p.project_scan.is_some()
+        || p.task_draft.is_some()
+    {
+        "session"
+    } else {
+        "repo"
+    }
+}
+
+/// The projects work can be started in, as `name (path)`, for an error to list.
+fn startable_projects(projects: &[okena_core::api::ApiProject]) -> String {
+    let listed: Vec<String> = projects
+        .iter()
+        .filter(|p| project_kind(p) == "repo")
+        .map(|p| format!("{} ({})", p.name, p.path))
+        .collect();
+    if listed.is_empty() {
+        "okena has no projects yet".to_string()
+    } else {
+        format!("Projects okena has: {}", listed.join(", "))
+    }
+}
+
+/// The ids of the projects a start works in.
 ///
-/// Read off the session's own workspace rather than asked for, so a
-/// coordinating agent does not have to know okena's project ids to start a
-/// sub-agent beside itself.
-fn sibling_repo_ids(session: &Session) -> Result<Vec<String>, String> {
-    let token = super::ensure_token()?;
-    let state = super::commands::fetch_state(&token)?;
-    repo_ids_of(&session.project, &state.projects)
+/// The ones `asked` for, each by id, name or path. A coordinator runs wherever
+/// it was started, which says nothing about where a task's changes belong, so
+/// its own projects are only the answer when there is exactly one — handing
+/// every sub-agent a worktree in all of them was never what was meant.
+fn start_projects(
+    asked: &[String],
+    session: &okena_core::api::ApiProject,
+    projects: &[okena_core::api::ApiProject],
+) -> Result<Vec<String>, String> {
+    if asked.is_empty() {
+        return match repo_ids_of(session, projects) {
+            Ok(ids) if ids.len() == 1 => Ok(ids),
+            Ok(ids) => {
+                let names: Vec<&str> = ids
+                    .iter()
+                    .map(|id| {
+                        projects
+                            .iter()
+                            .find(|p| &p.id == id)
+                            .map_or(id.as_str(), |p| p.name.as_str())
+                    })
+                    .collect();
+                Err(format!(
+                    "this session works in several projects ({}). Pass `projects` to say \
+                     which of them this group's work belongs in. {}",
+                    names.join(", "),
+                    startable_projects(projects)
+                ))
+            }
+            Err(e) => Err(format!(
+                "{e}. Pass `projects` to say where this group's work belongs. {}",
+                startable_projects(projects)
+            )),
+        };
+    }
+    let mut ids: Vec<String> = Vec::new();
+    for name in asked {
+        let found = find_project(name, projects).ok_or_else(|| {
+            format!(
+                "okena has no project `{name}`. {}",
+                startable_projects(projects)
+            )
+        })?;
+        if !ids.contains(&found.id) {
+            ids.push(found.id.clone());
+        }
+    }
+    Ok(ids)
+}
+
+/// The project `name` means: an id, else a name, else a path. A repository
+/// wins over a worktree or a session that happens to share the name.
+fn find_project<'a>(
+    name: &str,
+    projects: &'a [okena_core::api::ApiProject],
+) -> Option<&'a okena_core::api::ApiProject> {
+    let path = name.trim_end_matches('/');
+    let matches = |p: &&okena_core::api::ApiProject| {
+        p.name.eq_ignore_ascii_case(name) || p.path.trim_end_matches('/') == path
+    };
+    projects
+        .iter()
+        .find(|p| p.id == name)
+        .or_else(|| {
+            projects
+                .iter()
+                .filter(|p| project_kind(p) == "repo")
+                .find(matches)
+        })
+        .or_else(|| projects.iter().find(matches))
+}
+
+/// A failed start as the agent should read it: the daemon's own words rather
+/// than the HTTP envelope they came in, and the projects there are to choose
+/// from when the answer is to name different ones.
+fn start_error(error: &str, projects: &[okena_core::api::ApiProject]) -> String {
+    let message = error
+        .find('{')
+        .and_then(|at| serde_json::from_str::<Value>(&error[at..]).ok())
+        .and_then(|body| {
+            body.get("error")
+                .and_then(|e| e.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| error.to_string());
+    if message.contains("`projects`") || message.starts_with("project not found") {
+        format!("{message}. {}", startable_projects(projects))
+    } else {
+        message
+    }
 }
 
 /// Which repos `session` works in, among `projects`.
@@ -1093,7 +1238,7 @@ fn repo_ids_of(
 
 #[cfg(test)]
 mod repo_ids_tests {
-    use super::repo_ids_of;
+    use super::{project_kind, repo_ids_of, start_error, start_projects, start_request};
     use okena_core::api::ApiProject;
     use serde_json::json;
 
@@ -1159,6 +1304,207 @@ mod repo_ids_tests {
         );
         let bare = project(json!({ "id": "s1", "task_ref": task("u1") }));
         assert!(repo_ids_of(&bare, &[]).unwrap_err().contains("no worktrees"));
+    }
+
+    // ---- where `okena_start_work` starts (QBL-439) ----
+
+    fn repo(id: &str, path: &str) -> ApiProject {
+        project(json!({ "id": id, "name": id, "path": path }))
+    }
+
+    /// Three repositories, a coordinator started in a plain `Default`
+    /// directory, and a worktree and session of an agent it started earlier.
+    fn workspace() -> Vec<ApiProject> {
+        vec![
+            repo("Default", "/home/me"),
+            repo("okena", "/p/okena"),
+            repo("web", "/p/web"),
+            repo("infra", "/p/infra"),
+            project(json!({
+                "id": "coord", "name": "QBL-1", "path": "/home/me",
+                "task_ref": task("u1"), "repo_ids": ["Default"],
+            })),
+            project(json!({
+                "id": "wt9", "name": "web", "path": "/p/web-wt/b",
+                "worktree_info": { "parent_project_id": "web", "branch_name": "b" },
+                "task_ref": task("u9"),
+            })),
+            project(json!({
+                "id": "s9", "name": "okena", "path": "/p/web-wt/b", "task_ref": task("u9"),
+            })),
+        ]
+    }
+
+    fn asked(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn a_project_is_a_repo_a_worktree_or_a_session() {
+        let all = workspace();
+        let kinds: Vec<&str> = all.iter().map(project_kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                "repo", "repo", "repo", "repo", "session", "worktree", "session"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_projects_asked_for_are_where_the_work_starts_not_where_the_coordinator_runs() {
+        let all = workspace();
+        let coordinator = &all[4];
+        // By name, by path (with a trailing slash), by id — and in any case.
+        assert_eq!(
+            start_projects(&asked(&["OKENA", "/p/infra/"]), coordinator, &all).unwrap(),
+            ["okena", "infra"]
+        );
+        // One task in two projects; naming one twice does not double it.
+        assert_eq!(
+            start_projects(&asked(&["web", "okena", "/p/web"]), coordinator, &all).unwrap(),
+            ["web", "okena"]
+        );
+    }
+
+    #[test]
+    fn a_repository_wins_over_a_worktree_or_session_of_the_same_name() {
+        // `web` is also a worktree's name, and `okena` a session's.
+        let mut all = workspace();
+        all.reverse();
+        let coordinator = all[2].clone();
+        assert_eq!(
+            start_projects(&asked(&["web", "okena"]), &coordinator, &all).unwrap(),
+            ["web", "okena"]
+        );
+    }
+
+    #[test]
+    fn a_project_okena_does_not_have_is_refused_with_the_ones_it_has() {
+        let all = workspace();
+        let e = start_projects(&asked(&["okena", "nope"]), &all[4], &all).unwrap_err();
+        assert_eq!(
+            e,
+            "okena has no project `nope`. Projects okena has: Default (/home/me), \
+             okena (/p/okena), web (/p/web), infra (/p/infra)"
+        );
+    }
+
+    #[test]
+    fn with_no_projects_named_a_session_in_one_project_starts_there() {
+        let all = workspace();
+        assert_eq!(start_projects(&[], &all[4], &all).unwrap(), ["Default"]);
+    }
+
+    #[test]
+    fn with_no_projects_named_a_session_in_several_is_asked_which() {
+        // Starting in all of them gave every sub-agent a worktree in every
+        // project the coordinator was given.
+        let mut all = workspace();
+        all[4].repo_ids = vec!["okena".into(), "web".into()];
+        let e = start_projects(&[], &all[4], &all).unwrap_err();
+        assert!(
+            e.starts_with("this session works in several projects (okena, web). Pass `projects`"),
+            "{e}"
+        );
+        assert!(e.contains("infra (/p/infra)"), "{e}");
+    }
+
+    #[test]
+    fn a_session_with_no_project_of_its_own_can_still_start_work_by_naming_one() {
+        // A free-form session started at the projects root: linked to nothing.
+        let all = workspace();
+        let loose = project(json!({ "id": "free", "custom_session": "coordinate" }));
+        assert_eq!(
+            start_projects(&asked(&["web"]), &loose, &all).unwrap(),
+            ["web"]
+        );
+        let e = start_projects(&[], &loose, &all).unwrap_err();
+        assert!(e.contains("Pass `projects`"), "{e}");
+        assert!(e.contains("okena (/p/okena)"), "{e}");
+    }
+
+    #[test]
+    fn a_start_is_sent_as_the_asking_sessions_own() {
+        use okena_core::api::ActionRequest;
+        let request = start_request(
+            &json!({ "tasks": ["QBL-2", "QBL-3"], "note": " both touch the sidebar ", "agent": "" }),
+            "linear",
+            &asked(&["QBL-2", "QBL-3"]),
+            &asked(&["okena", "web"]),
+            "coord",
+        );
+        let ActionRequest::TaskStartWork {
+            task_external_id,
+            also,
+            project_ids,
+            started_by,
+            note,
+            agent_command,
+            coordinate,
+            hand_picked,
+            ..
+        } = serde_json::from_value(request).expect("the daemon reads it")
+        else {
+            panic!("expected a start");
+        };
+        assert_eq!(task_external_id, "QBL-2");
+        assert_eq!(also, ["QBL-3"]);
+        assert_eq!(project_ids, ["okena", "web"]);
+        // What makes the new session the coordinator's, and the start strict.
+        assert_eq!(started_by.as_deref(), Some("coord"));
+        assert_eq!(note.as_deref(), Some("both touch the sidebar"));
+        // A blank `agent` is no choice: the configured one runs.
+        assert_eq!(agent_command, None);
+        assert!(!coordinate && !hand_picked);
+    }
+
+    #[test]
+    fn the_start_tool_takes_projects() {
+        let tools = super::tool_definitions();
+        let start = tools
+            .as_array()
+            .expect("a list of tools")
+            .iter()
+            .find(|t| t["name"] == "okena_start_work")
+            .expect("the start tool");
+        let props = &start["inputSchema"]["properties"];
+        assert_eq!(props["projects"]["type"], "array");
+        assert_eq!(props["projects"]["items"]["type"], "string");
+        // Still only the tasks are required: a session in one project needs
+        // name none.
+        assert_eq!(start["inputSchema"]["required"], json!(["tasks"]));
+    }
+
+    #[test]
+    fn a_failed_start_reads_as_the_daemons_words_with_the_projects_to_choose_from() {
+        let all = workspace();
+        let refused = start_error(
+            "Server returned 400 Bad Request: {\"error\":\"QBL-1 was not started: `Default` \
+             (/home/me) is not a git repository, so no worktree can be cut in it. Pass the \
+             repositories this work belongs in as `projects`\"}",
+            &all,
+        );
+        assert_eq!(
+            refused,
+            "QBL-1 was not started: `Default` (/home/me) is not a git repository, so no \
+             worktree can be cut in it. Pass the repositories this work belongs in as \
+             `projects`. Projects okena has: Default (/home/me), okena (/p/okena), \
+             web (/p/web), infra (/p/infra)"
+        );
+        // Nothing to do with projects: the daemon's words and no more.
+        assert_eq!(
+            start_error(
+                "Server returned 400 Bad Request: {\"error\":\"QBL-1 already has an agent\"}",
+                &all
+            ),
+            "QBL-1 already has an agent"
+        );
+        // Not the daemon's JSON at all: passed through.
+        assert_eq!(
+            start_error("Request failed: timed out", &all),
+            "Request failed: timed out"
+        );
     }
 }
 

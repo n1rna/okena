@@ -819,6 +819,7 @@ mod action_timeout_tests {
             branches: Default::default(),
             hand_picked: false,
             context: Vec::new(),
+            started_by: None,
         }
     }
 

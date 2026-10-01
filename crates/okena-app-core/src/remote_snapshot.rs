@@ -84,6 +84,7 @@ pub fn build_api_project(
         task_ref: p.task_ref.clone(),
         also_tasks: p.also_tasks.clone(),
         repo_ids: p.repo_ids.clone(),
+        started_by: p.started_by.clone(),
         spec_change: p.spec_change.clone(),
         knowledge_root: p.knowledge_root.clone(),
         project_scan: p.project_scan.clone(),

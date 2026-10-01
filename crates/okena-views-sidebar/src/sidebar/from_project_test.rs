@@ -26,6 +26,7 @@ fn make_project(id: &str) -> ProjectData {
         task_ref: None,
         also_tasks: Vec::new(),
         repo_ids: Vec::new(),
+        started_by: None,
         spec_change: None,
         knowledge_root: None,
         project_scan: None,

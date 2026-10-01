@@ -1175,9 +1175,11 @@ pub fn execute_action(
             branches,
             hand_picked,
             context,
+            started_by,
         } => tasks::start_work(
             ws,
             window_id,
+            focus_manager,
             tasks::StartWork {
                 provider,
                 task_external_id,
@@ -1193,6 +1195,7 @@ pub fn execute_action(
                 branches,
                 hand_picked,
                 context,
+                started_by,
             },
             backend,
             terminals,
@@ -2070,6 +2073,7 @@ mod reconnect_shell_tests {
             task_ref: None,
             also_tasks: Vec::new(),
             repo_ids: Vec::new(),
+            started_by: None,
             spec_change: None,
             knowledge_root: None,
             project_scan: None,

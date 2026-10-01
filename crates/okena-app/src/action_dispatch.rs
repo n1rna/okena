@@ -986,6 +986,7 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             branches,
             hand_picked,
             context,
+            started_by,
         } => ActionRequest::TaskStartWork {
             provider,
             task_external_id,
@@ -1004,6 +1005,8 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             branches,
             hand_picked,
             context: strip_context_refs(context, s),
+            // The starting session is an okena-side id too.
+            started_by: started_by.map(|id| s(&id)),
         },
         ActionRequest::AgentRegisterAsset {
             project_id,
