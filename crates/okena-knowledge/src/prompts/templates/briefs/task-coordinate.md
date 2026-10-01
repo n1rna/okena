@@ -26,7 +26,9 @@ Two sub-tasks belong to different agents when each can be built, run and checked
 
 Say what you decided and why, in a sentence per group, before you start anything.
 
-Then start one agent per group with `okena_start_work`, passing the sub-task keys in that group. Give each a short note saying what its group is for and what the neighbouring groups are handling, so it does not go looking for work that is somebody else's.
+Then start one agent per group with `okena_start_work`, passing the sub-task keys in that group. Its agent gets worktrees in the project you work in. When you work in several, or a group's changes belong in another one, pass `projects` to say which: `okena_list_projects` lists them, and the ones of kind `repo` are where work can start. A group that needs changes in several projects gets all of them in the one call, and its agent a worktree in each. Give each a short note saying what its group is for and what the neighbouring groups are handling, so it does not go looking for work that is somebody else's.
+
+A start either brings the agent up or fails and leaves nothing behind. When one fails, the error says what to change: change it and start that group again. Do not start a sub-task a second time once it has an agent.
 
 Do not do the sub-tasks yourself. After the agents are started, your job is to answer their questions and to keep the boundaries you drew — if two of them turn out to be entangled after all, say so rather than letting them both edit the same file. When you redraw a boundary, note it on the sub-tasks involved with `okena_comment_task`, so the tasks say what the agents were told.
 

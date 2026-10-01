@@ -1175,9 +1175,11 @@ pub fn execute_action(
             branches,
             hand_picked,
             context,
+            started_by,
         } => tasks::start_work(
             ws,
             window_id,
+            focus_manager,
             tasks::StartWork {
                 provider,
                 task_external_id,
@@ -1193,6 +1195,7 @@ pub fn execute_action(
                 branches,
                 hand_picked,
                 context,
+                started_by,
             },
             backend,
             terminals,

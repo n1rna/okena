@@ -621,6 +621,8 @@ pub(super) struct StartWork {
     pub(super) hand_picked: bool,
     /// Map entries, specs and knowledge picked for the agents, as refs.
     pub(super) context: Vec<okena_core::context::ContextRef>,
+    /// The agent session making this start, when an agent is.
+    pub(super) started_by: Option<String>,
 }
 
 /// Start work on a task across one or more projects.
@@ -634,10 +636,47 @@ pub(super) struct StartWork {
 /// Order matters: worktrees are created first and links written second, so a
 /// failure part-way leaves usable checkouts rather than links pointing at
 /// nothing.
+///
+/// A start an agent makes (`started_by`) is held to more, because nobody is
+/// watching it: it either gives the new agent a worktree in every project and
+/// starts it, or fails having left nothing. See [`check_sub_agent_start`].
+#[allow(clippy::too_many_arguments)]
 pub(super) fn start_work(
     ws: &mut Workspace,
     window_id: WindowId,
+    focus_manager: &mut FocusManager,
     req: StartWork,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    let p = match resolve(&req.provider) {
+        Ok(p) => p,
+        Err(e) => return ActionResult::Err(e),
+    };
+    start_work_with(
+        ws,
+        window_id,
+        focus_manager,
+        req,
+        &*p,
+        backend,
+        terminals,
+        settings,
+        cx,
+    )
+}
+
+/// [`start_work`] against a provider already resolved, so the tests can hand
+/// it tasks without a network.
+#[allow(clippy::too_many_arguments)]
+fn start_work_with(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    focus_manager: &mut FocusManager,
+    req: StartWork,
+    p: &dyn TaskProvider,
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
@@ -658,7 +697,10 @@ pub(super) fn start_work(
         branches,
         hand_picked,
         context: context_refs,
+        started_by,
     } = req;
+    // Named twice, a project would be cut two worktrees on one branch.
+    let project_ids = unique(project_ids);
     if project_ids.is_empty() {
         return ActionResult::Err("pick at least one project to work in".into());
     }
@@ -674,11 +716,6 @@ pub(super) fn start_work(
         super::context::resolve_for_launch(&ws.data.projects, settings, &context_refs);
     let scope = super::context::scope_projects(&project_ids, &context_items);
 
-    let p = match resolve(&provider) {
-        Ok(p) => p,
-        Err(e) => return ActionResult::Err(e),
-    };
-
     // Re-fetch rather than trusting a branch name the client supplied: the
     // client's list may be minutes old, and the branch name is what every
     // worktree — and the provider's branch-to-issue linking — is keyed on.
@@ -687,9 +724,15 @@ pub(super) fn start_work(
     // workspace lock, because the rest of this function creates worktrees.
     // Moving it onto the blocking pool means splitting start_work into a fetch
     // and an apply step; it is one round trip, so that waits until it shows.
-    let task = match fetch_task(&*p, &provider, &task_external_id) {
+    // An agent is told which task could not be read: the provider's own
+    // words ("Entity not found") name nothing it passed.
+    let unread = |key: &str, e: String| match started_by {
+        Some(_) => not_started(key, &format!("it could not be read — {e}")),
+        None => e,
+    };
+    let task = match fetch_task(p, &provider, &task_external_id) {
         Ok(task) => task,
-        Err(e) => return ActionResult::Err(e),
+        Err(e) => return ActionResult::Err(unread(&task_external_id, e)),
     };
 
     // A coordinator over tasks the user picked has no worktree: every branch
@@ -733,9 +776,9 @@ pub(super) fn start_work(
     // not only the one it is named after.
     let mut also_tasks = Vec::new();
     for key in &also {
-        match fetch_task(&*p, &provider, key) {
+        match fetch_task(p, &provider, key) {
             Ok(t) => also_tasks.push(t),
-            Err(e) => return ActionResult::Err(e),
+            Err(e) => return ActionResult::Err(unread(key, e)),
         }
     }
     let also_refs: Vec<okena_core::tasks::TaskRef> = also_tasks
@@ -758,7 +801,7 @@ pub(super) fn start_work(
         for key in &siblings {
             let sibling_branch = match named(branches.get(key)) {
                 Some(b) => b,
-                None => match fetch_task(&*p, &provider, key) {
+                None => match fetch_task(p, &provider, key) {
                     Ok(t) => p.branch_name(&t),
                     Err(e) => return ActionResult::Err(e),
                 },
@@ -838,14 +881,45 @@ pub(super) fn start_work(
     }
     let several = work.len() > 1;
 
+    // ── A start an agent makes: settled before anything is created ───────────
+    let strict = started_by.is_some();
+    let (agent_command, reusable) = match started_by.as_deref() {
+        Some(starter) => {
+            if let Some(f) = failed.first() {
+                let who = f.get("task").and_then(|v| v.as_str()).unwrap_or_default();
+                return ActionResult::Err(not_started(
+                    &task.display_key,
+                    &format!("could not derive a branch name for {who}"),
+                ));
+            }
+            let command = match sub_agent_command(settings, agent_command.as_deref()) {
+                Ok(command) => command,
+                Err(e) => return ActionResult::Err(not_started(&task.display_key, &e)),
+            };
+            match check_sub_agent_start(ws, starter, &work, &project_ids, settings) {
+                Ok(reusable) => (Some(command), reusable),
+                Err(e) => return ActionResult::Err(not_started(&task.display_key, &e)),
+            }
+        }
+        None => (agent_command, Vec::new()),
+    };
+
     // ── Worktrees, one per task per assigned project ─────────────────────────
     let mut created: Vec<serde_json::Value> = Vec::new();
+    // Worktrees an earlier start left for these tasks, used again.
+    let mut reused: Vec<serde_json::Value> = Vec::new();
+    // What this start cut, so a start that cannot finish can take it back.
+    let mut cut: Vec<CutWorktree> = Vec::new();
     // Projects that were never candidates: not a checkout, so nothing to cut.
     let mut skipped: Vec<serde_json::Value> = Vec::new();
 
-    for (work_task, work_branch) in &work {
+    'cutting: for (work_task, work_branch) in &work {
         let work_ref = okena_core::tasks::TaskRef::from(work_task);
         for project_id in &project_ids {
+            // The first failure ends a start that is all or nothing.
+            if strict && !failed.is_empty() {
+                break 'cutting;
+            }
             let project_name = ws
                 .project(project_id)
                 .map(|p| p.name.clone())
@@ -874,15 +948,32 @@ pub(super) fn start_work(
                 continue;
             }
 
+            if let Some(found) = reusable
+                .iter()
+                .find(|r| r.task_key == work_task.display_key && &r.repo_id == project_id)
+            {
+                reused.push(serde_json::json!({
+                    "task": work_task.display_key,
+                    "branch": work_branch,
+                    "project": project_name,
+                    "project_id": found.worktree_id,
+                    "path": found.path,
+                }));
+                continue;
+            }
+
+            // New work by definition: for a person, an existing branch
+            // surfaces as a create error rather than silently attaching to
+            // someone else's work. An agent starting a task again gets the
+            // branch the task already has — the name is derived from the
+            // task, so it is that task's, kept when its worktree was removed.
+            let new_branch = !(strict && has_local_branch(&project_path, work_branch));
             let result = super::project::create_worktree(
                 ws,
                 window_id,
                 project_id.clone(),
                 work_branch.clone(),
-                // New work by definition. An existing branch surfaces as a
-                // create error rather than silently attaching to someone
-                // else's work.
-                true,
+                new_branch,
                 // Never the agent. A worktree copies its repo's layout, so an
                 // agent set as the worktree's shell started once per terminal
                 // in that layout — four identical agents for a four-pane repo
@@ -906,6 +997,12 @@ pub(super) fn start_work(
                             // Its own task only: this checkout holds that
                             // task's branch, whichever session works in it.
                             link_task(ws, &new_id, &work_ref, &[]);
+                            cut.push(CutWorktree {
+                                project_id: Some(new_id.clone()),
+                                repo_path: project_path.clone(),
+                                branch: work_branch.clone(),
+                                new_branch,
+                            });
                             created.push(serde_json::json!({
                                 "task": work_task.display_key,
                                 "branch": work_branch,
@@ -926,26 +1023,41 @@ pub(super) fn start_work(
                     "project": label,
                     "error": "worktree creation returned no project",
                 })),
-                ActionResult::Err(e) => failed.push(serde_json::json!({
-                    "task": work_task.display_key,
-                    "project": label,
-                    "error": e,
-                })),
+                ActionResult::Err(e) => {
+                    // `git worktree add -b` makes the branch before the
+                    // checkout, so one that failed there left it behind.
+                    if strict && new_branch {
+                        cut.push(CutWorktree {
+                            project_id: None,
+                            repo_path: project_path.clone(),
+                            branch: work_branch.clone(),
+                            new_branch,
+                        });
+                    }
+                    failed.push(serde_json::json!({
+                        "task": work_task.display_key,
+                        "project": label,
+                        "error": e,
+                    }));
+                }
             }
         }
     }
 
+    if strict && !failed.is_empty() {
+        let left = undo_start(ws, focus_manager, None, &cut, settings, cx);
+        ws.notify_data(cx);
+        return ActionResult::Err(not_started_undone(
+            &task.display_key,
+            &failures(&failed),
+            &left,
+        ));
+    }
     if no_worktrees_is_fatal(lone_coordinator, &created, &failed) {
-        let detail = failed
-            .iter()
-            .filter_map(|f| {
-                let name = f.get("project")?.as_str()?;
-                let err = f.get("error")?.as_str()?;
-                Some(format!("{name}: {err}"))
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        return ActionResult::Err(format!("no worktrees were created — {detail}"));
+        return ActionResult::Err(format!(
+            "no worktrees were created — {}",
+            failures(&failed)
+        ));
     }
 
     // ── Agent session ────────────────────────────────────────────────────────
@@ -962,6 +1074,7 @@ pub(super) fn start_work(
     let worktrees_of = |key: Option<&str>| -> Vec<(String, String)> {
         created
             .iter()
+            .chain(&reused)
             .filter(|c| key.is_none() || c.get("task").and_then(|v| v.as_str()) == key)
             .filter_map(|c| {
                 let name = c.get("project")?.as_str()?.to_string();
@@ -1009,9 +1122,9 @@ pub(super) fn start_work(
     // Nothing was cut and nothing failed: every project was a plain directory.
     // The session is then the only thing this start produces, so it must exist
     // — otherwise the call reports success having done nothing at all.
-    let nothing_to_cut = created.is_empty() && !skipped.is_empty();
+    let nothing_to_cut = worktrees.is_empty() && !skipped.is_empty();
     let wants_session =
-        lone_coordinator || shell.is_some() || created.len() > 1 || nothing_to_cut;
+        lone_coordinator || shell.is_some() || worktrees.len() > 1 || nothing_to_cut;
     let root = if lone_coordinator {
         let paths: Vec<String> = given.iter().map(|(_, path)| path.clone()).collect();
         coordinator_root(agent_root, &paths, settings)
@@ -1056,6 +1169,8 @@ pub(super) fn start_work(
                     // The repositories, not their worktrees: the stores a
                     // repository follows are what its lookups may see.
                     p.context_projects = scope.clone();
+                    // An agent started it: that makes it that agent's.
+                    p.started_by = started_by.clone();
                 }
                 // Set before spawning: the terminal reads the project's default
                 // shell as it starts.
@@ -1072,8 +1187,29 @@ pub(super) fn start_work(
                     settings,
                     cx,
                 );
-                if let ActionResult::Err(e) = result {
+                if let ActionResult::Err(e) = &result {
                     log::warn!("[tasks] agent session terminal failed to spawn: {e}");
+                }
+                // A session an agent started is only worth keeping with its
+                // agent running: nobody is there to start it by hand.
+                if strict {
+                    let stopped = match &result {
+                        ActionResult::Err(e) => Some(e.clone()),
+                        ActionResult::Ok(_) if !agent_pane_runs(ws, &session_id) => {
+                            Some("its terminal did not start".to_string())
+                        }
+                        ActionResult::Ok(_) => None,
+                    };
+                    if let Some(why) = stopped {
+                        let left =
+                            undo_start(ws, focus_manager, Some(&session_id), &cut, settings, cx);
+                        ws.notify_data(cx);
+                        return ActionResult::Err(not_started_undone(
+                            &task.display_key,
+                            &format!("the agent could not be started: {why}"),
+                            &left,
+                        ));
+                    }
                 }
                 agent_session = Some(serde_json::json!({
                     "project_id": session_id,
@@ -1090,6 +1226,18 @@ pub(super) fn start_work(
         }
     }
 
+    // Worktrees with no agent session are what a person may want; an agent
+    // asked for an agent.
+    if strict && agent_session.is_none() {
+        let why = match failures(&failed) {
+            why if why.is_empty() => "there is no directory to run its session in".to_string(),
+            why => why,
+        };
+        let left = undo_start(ws, focus_manager, None, &cut, settings, cx);
+        ws.notify_data(cx);
+        return ActionResult::Err(not_started_undone(&task.display_key, &why, &left));
+    }
+
     ws.notify_data(cx);
 
     let branches: Vec<serde_json::Value> = work
@@ -1102,11 +1250,303 @@ pub(super) fn start_work(
         "branch": (!branch.is_empty()).then_some(branch),
         "branches": branches,
         "created": created,
+        // Left by an earlier start of the same task, and worked in again.
+        "reused": reused,
         // Reported, not silent: the caller sees why there is no worktree.
         "skipped": skipped,
         "failed": failed,
         "agent_session": agent_session,
     })))
+}
+
+/// `ids` without repeats, in the order first given.
+fn unique(ids: Vec<String>) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::with_capacity(ids.len());
+    for id in ids {
+        if !seen.contains(&id) {
+            seen.push(id);
+        }
+    }
+    seen
+}
+
+/// Every failure as `name: error`, one phrase.
+fn failures(failed: &[serde_json::Value]) -> String {
+    failed
+        .iter()
+        .filter_map(|f| {
+            let name = f.get("project")?.as_str()?;
+            let err = f.get("error")?.as_str()?;
+            Some(format!("{name}: {err}"))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// A worktree this start cut, with what taking it back needs.
+struct CutWorktree {
+    /// The worktree's own project, or `None` for one that could not be cut:
+    /// only its branch may be there.
+    project_id: Option<String>,
+    /// Where the project it was cut from is, to delete the branch from.
+    repo_path: String,
+    branch: String,
+    /// Whether the start created the branch, or found it there.
+    new_branch: bool,
+}
+
+/// A worktree an earlier start left for a task, found for this one.
+struct ReusableWorktree {
+    task_key: String,
+    /// The project it was cut from.
+    repo_id: String,
+    worktree_id: String,
+    path: String,
+}
+
+/// What a start an agent makes is refused with, when nothing was created.
+fn not_started(key: &str, why: &str) -> String {
+    format!("{key} was not started: {why}")
+}
+
+/// What it is refused with after creating something, which was taken back.
+fn not_started_undone(key: &str, why: &str, left: &[String]) -> String {
+    match left {
+        [] => format!("{key} was not started: {why}. What the start had created was removed."),
+        left => format!(
+            "{key} was not started: {why}. Not everything the start had created could be \
+             removed — still there: {}",
+            left.join("; ")
+        ),
+    }
+}
+
+/// The agent a start an agent makes launches.
+///
+/// What an agent passes as `agent` is its own guess at a name, and a command
+/// that does not exist still gets a terminal — which exits at once and leaves
+/// a session with nothing in it. So it is held to what okena can launch: the
+/// configured agent, or one it knows.
+fn sub_agent_command(settings: &AppSettings, asked: Option<&str>) -> Result<String, String> {
+    let known = okena_core::agents::AGENT_COMMANDS;
+    let configured = settings
+        .harness
+        .agent_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    let Some(asked) = asked.map(str::trim).filter(|a| !a.is_empty()) else {
+        return configured.map(str::to_string).ok_or_else(|| {
+            format!(
+                "no agent is configured to start. Set one in Settings → Harness, or pass \
+                 `agent`: {}",
+                known.join(", ")
+            )
+        });
+    };
+    let name = okena_core::agents::command_name(asked);
+    // The configured agent by its bare name runs as configured, path and all.
+    if let Some(configured) = configured
+        && okena_core::agents::command_name(configured) == name
+        && !asked.contains(['/', '\\'])
+    {
+        return Ok(configured.to_string());
+    }
+    if known.contains(&name.as_str()) {
+        return Ok(asked.to_string());
+    }
+    let default = match configured {
+        Some(configured) => format!(" to run the configured one (`{configured}`)"),
+        None => String::new(),
+    };
+    Err(format!(
+        "`{asked}` is not an agent okena can start. Leave `agent` out{default}, or pass one \
+         of: {}",
+        known.join(", ")
+    ))
+}
+
+/// Settle a start an agent makes before it creates anything, and find the
+/// worktrees an earlier start left for its tasks.
+///
+/// Refused here, with nothing to take back: a session that is not okena's
+/// asking, a project that is no repository — the agent would be left with no
+/// worktree, at the projects root beside every other one — and a task an agent
+/// is already working on, which a second start would only duplicate.
+fn check_sub_agent_start(
+    ws: &Workspace,
+    starter: &str,
+    work: &[(okena_core::tasks::Task, String)],
+    project_ids: &[String],
+    settings: &AppSettings,
+) -> Result<Vec<ReusableWorktree>, String> {
+    if ws.project(starter).is_none() {
+        return Err(format!(
+            "the session asking for it (`{starter}`) is not one okena has"
+        ));
+    }
+
+    for id in project_ids {
+        let Some(project) = ws.project(id) else {
+            continue;
+        };
+        if project.worktree_info.is_some() || project.is_any_agent_session() {
+            return Err(format!(
+                "`{}` is a worktree or an agent session, not a project to cut worktrees in. \
+                 Pass the repository itself in `projects`",
+                project.name
+            ));
+        }
+        if worktree_skip_reason(&project.path).is_some() {
+            return Err(format!(
+                "`{}` ({}) is not a git repository, so no worktree can be cut in it. Pass \
+                 the repositories this work belongs in as `projects`",
+                project.name, project.path
+            ));
+        }
+    }
+
+    for (task, _) in work {
+        if let Some(busy) = ws
+            .data
+            .projects
+            .iter()
+            .find(|s| is_agent_on(s, starter, &task.id.external_id))
+        {
+            return Err(format!(
+                "{} already has an agent working on it: session `{}` in {}. It was not \
+                 started a second time",
+                task.display_key, busy.name, busy.path
+            ));
+        }
+    }
+
+    let mut reusable = Vec::new();
+    for (task, branch) in work {
+        for id in project_ids {
+            let Some(project) = ws.project(id) else {
+                continue;
+            };
+            let path = worktree_path_for(&project.path, branch, settings);
+            let at = Workspace::physical_path_identity(std::path::Path::new(&path));
+            let Some(taken) = ws.data.projects.iter().find(|other| {
+                Workspace::physical_path_identity(std::path::Path::new(&other.path)) == at
+            }) else {
+                continue;
+            };
+            let its_worktree = taken
+                .worktree_info
+                .as_ref()
+                .is_some_and(|w| &w.parent_project_id == id && &w.branch_name == branch);
+            if !its_worktree {
+                return Err(format!(
+                    "{}'s worktree in `{}` would go at {path}, which project `{}` already uses",
+                    task.display_key, project.name, taken.name
+                ));
+            }
+            reusable.push(ReusableWorktree {
+                task_key: task.display_key.clone(),
+                repo_id: id.clone(),
+                worktree_id: taken.id.clone(),
+                path,
+            });
+        }
+    }
+    Ok(reusable)
+}
+
+/// Whether `session` is an agent doing the task `external_id`, other than the
+/// one asking.
+///
+/// A coordinator over picked tasks is linked to every one of them and works on
+/// none: it is what `repo_ids` marks, having no worktree. One an agent started
+/// is always doing its tasks, whatever it was given.
+fn is_agent_on(
+    session: &crate::workspace::state::ProjectData,
+    starter: &str,
+    external_id: &str,
+) -> bool {
+    session.id != starter
+        && session.is_agent_session()
+        && !session.is_closed()
+        && session.works_on(external_id)
+        && session.purpose() == Some(okena_core::harness::AgentPurpose::Work)
+        && (session.repo_ids.is_empty() || session.started_by.is_some())
+}
+
+/// Whether the repository at `repo_path` has the local branch `branch`.
+fn has_local_branch(repo_path: &str, branch: &str) -> bool {
+    okena_git::list_branches_classified(std::path::Path::new(repo_path))
+        .local
+        .iter()
+        .any(|b| b == branch)
+}
+
+/// Whether a session's agent pane has a terminal behind it.
+fn agent_pane_runs(ws: &Workspace, session_id: &str) -> bool {
+    use crate::workspace::state::LayoutNode;
+    let Some(layout) = ws.project(session_id).and_then(|p| p.layout.as_ref()) else {
+        return false;
+    };
+    layout
+        .agent_terminal_path()
+        .and_then(|path| layout.get_at_path(&path))
+        .is_some_and(|node| {
+            matches!(
+                node,
+                LayoutNode::Terminal {
+                    terminal_id: Some(_),
+                    ..
+                }
+            )
+        })
+}
+
+/// Take back what a start had created when it could not finish: its session,
+/// then each worktree it cut and the branch cut with it.
+///
+/// Safe because nothing has run in them yet — the agent is the last thing a
+/// start brings up, and it is what did not come up. A worktree found from an
+/// earlier start is not in `cut` and stays. Returns what could not be removed.
+fn undo_start(
+    ws: &mut Workspace,
+    focus_manager: &mut FocusManager,
+    session_id: Option<&str>,
+    cut: &[CutWorktree],
+    settings: &AppSettings,
+    cx: &mut impl WorkspaceCx,
+) -> Vec<String> {
+    if let Some(session_id) = session_id {
+        ws.delete_project(focus_manager, session_id, &settings.hooks, cx);
+    }
+    let mut left = Vec::new();
+    for worktree in cut {
+        if let Some(project_id) = &worktree.project_id {
+            let path = ws
+                .project(project_id)
+                .map(|p| p.path.clone())
+                .unwrap_or_default();
+            // Forced: nothing in it is anyone's work yet.
+            if let Err(e) =
+                ws.remove_worktree_project(focus_manager, project_id, true, &settings.hooks, cx)
+            {
+                left.push(format!("worktree {path} ({e})"));
+                continue;
+            }
+        }
+        // Only a branch the start made, and only if it is there: a worktree
+        // that was never cut may have left none.
+        if worktree.new_branch
+            && has_local_branch(&worktree.repo_path, &worktree.branch)
+            && let Err(e) = okena_git::force_delete_local_branch(
+                std::path::Path::new(&worktree.repo_path),
+                &worktree.branch,
+            )
+        {
+            left.push(format!("branch {} ({e})", worktree.branch));
+        }
+    }
+    left
 }
 
 /// Why this project cannot be given a worktree, if it cannot.
@@ -1365,6 +1805,10 @@ fn link_task(
 }
 
 #[cfg(test)]
+#[path = "start_work_tests.rs"]
+mod start_work_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1502,6 +1946,7 @@ mod tests {
             branches: Default::default(),
             hand_picked: false,
             context: Vec::new(),
+            started_by: None,
         };
         assert!(execute_task_provider_action(&start).is_none());
         assert!(

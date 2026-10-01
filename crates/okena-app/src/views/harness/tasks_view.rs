@@ -1641,6 +1641,8 @@ impl HarnessPane {
                         siblings: extras.siblings,
                         branches: extras.branches,
                         hand_picked: extras.hand_picked,
+                        // A person started this, not an agent.
+                        started_by: None,
                     })
                     .and_then(|v| v.ok_or_else(|| "Missing start-work result".to_string()))
             })
