@@ -1,4 +1,4 @@
-//! Searching Knowledge and Specs across every root (QBL-436).
+//! Searching the Library across every origin (QBL-436, QBL-440).
 //!
 //! The rules and the shapes that cross the wire. A client cannot see the
 //! files, so the daemon reads them and runs these matchers; they live here so
@@ -10,10 +10,14 @@
 //! - **Text** is trimmed and compared without case against a file's names, its
 //!   path — which is how a directory name matches — and its content. Blank
 //!   text matches everything.
-//! - **Within a group, OR.** Two roots means "either".
-//! - **Across groups, AND.** A root *and* a kind *and* text means all three.
+//! - **Within a group, OR.** Two origins means "either".
+//! - **Across groups, AND.** An origin *and* a type *and* a kind *and* text
+//!   means all four.
+//!
+//! What a search returns is `okena_core::library::LibrarySearchResult`.
 
 use crate::knowledge::KnowledgeKind;
+use crate::library::OriginType;
 use serde::{Deserialize, Serialize};
 
 /// What a knowledge file is, as the Kind filter offers it.
@@ -106,95 +110,51 @@ fn root_allows(selected: &[String], root_key: &str) -> bool {
     selected.is_empty() || selected.iter().any(|r| r == root_key)
 }
 
-/// What the Knowledge island is narrowed to. `Default` is everything.
+/// What the Library island is narrowed to. `Default` is everything.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct KnowledgeSearchFilter {
+pub struct LibrarySearchFilter {
     pub query: String,
-    /// Root keys. Empty is every root.
+    /// Origin keys. Empty is every origin.
     pub roots: Vec<String>,
-    /// Empty is every kind.
+    /// Origin types. Empty is every type.
+    pub types: Vec<OriginType>,
+    /// What a knowledge file is. Empty is no opinion; anything chosen leaves
+    /// out every file that is not a knowledge file, since only those have a
+    /// kind.
     pub kinds: Vec<KnowledgeFacet>,
 }
 
-impl KnowledgeSearchFilter {
+impl LibrarySearchFilter {
     /// Whether anything narrows the list.
     pub fn is_active(&self) -> bool {
-        !self.query.trim().is_empty() || !self.roots.is_empty() || !self.kinds.is_empty()
+        !self.query.trim().is_empty()
+            || !self.roots.is_empty()
+            || !self.types.is_empty()
+            || !self.kinds.is_empty()
+    }
+
+    /// The same choices without the text: what tells whether a file is worth
+    /// opening to read its content.
+    pub fn without_text(&self) -> Self {
+        Self {
+            query: String::new(),
+            ..self.clone()
+        }
     }
 }
 
-/// Whether a knowledge file of `facet` survives `filter`.
-pub fn knowledge_matches(
-    filter: &KnowledgeSearchFilter,
-    facet: KnowledgeFacet,
+/// Whether a file in an origin of `origin_type` survives `filter`. `facet` is
+/// what the file is when it is a knowledge file, and `None` otherwise.
+pub fn library_matches(
+    filter: &LibrarySearchFilter,
+    origin_type: OriginType,
+    facet: Option<KnowledgeFacet>,
     doc: &SearchDoc,
 ) -> bool {
     root_allows(&filter.roots, doc.root_key)
-        && (filter.kinds.is_empty() || filter.kinds.contains(&facet))
+        && (filter.types.is_empty() || filter.types.contains(&origin_type))
+        && (filter.kinds.is_empty() || facet.is_some_and(|f| filter.kinds.contains(&f)))
         && text_matches(&filter.query, doc)
-}
-
-/// What the Specs island is narrowed to. `Default` is everything.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SpecSearchFilter {
-    pub query: String,
-    /// Root keys. Empty is every root.
-    pub roots: Vec<String>,
-}
-
-impl SpecSearchFilter {
-    /// Whether anything narrows the list.
-    pub fn is_active(&self) -> bool {
-        !self.query.trim().is_empty() || !self.roots.is_empty()
-    }
-}
-
-/// Whether a spec document survives `filter`.
-pub fn spec_matches(filter: &SpecSearchFilter, doc: &SearchDoc) -> bool {
-    root_allows(&filter.roots, doc.root_key) && text_matches(&filter.query, doc)
-}
-
-/// One knowledge file a search found.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KnowledgeHit {
-    pub root_key: String,
-    /// Relative to the root, as `KnowledgeTree` gives it.
-    pub path: String,
-    pub title: String,
-    pub facet: KnowledgeFacet,
-}
-
-/// What a `KnowledgeSearch` found.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KnowledgeSearchResult {
-    /// In root order, then by kind and path, as the trees list them.
-    #[serde(default)]
-    pub hits: Vec<KnowledgeHit>,
-    /// How many files every healthy root holds, for "N of M".
-    #[serde(default)]
-    pub total: usize,
-}
-
-/// One spec document a search found.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpecHit {
-    pub root_key: String,
-    /// Relative to the root, as `SpecsTree` gives it.
-    pub path: String,
-    /// What to show: a capability id, or a change's name and its file.
-    pub label: String,
-}
-
-/// What a `SpecSearch` found.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpecSearchResult {
-    /// In root order, then changes, specs and the archive, as the trees list
-    /// them.
-    #[serde(default)]
-    pub hits: Vec<SpecHit>,
-    /// How many documents every healthy root holds, for "N of M".
-    #[serde(default)]
-    pub total: usize,
 }
 
 #[cfg(test)]
@@ -302,78 +262,112 @@ mod tests {
         );
     }
 
+    const KNOWLEDGE: OriginType = OriginType::Knowledge;
+    const DOC: Option<KnowledgeFacet> = Some(KnowledgeFacet::Doc);
+
     #[test]
-    fn an_empty_knowledge_filter_keeps_everything() {
-        let f = KnowledgeSearchFilter::default();
+    fn an_empty_filter_keeps_everything_of_every_type() {
+        let f = LibrarySearchFilter::default();
         assert!(!f.is_active());
-        assert!(knowledge_matches(&f, KnowledgeFacet::Doc, &pipeline()));
+        assert!(library_matches(&f, KNOWLEDGE, DOC, &pipeline()));
+        assert!(library_matches(&f, OriginType::Spec, None, &proposal()));
+        assert!(library_matches(&f, OriginType::Freeform, None, &pipeline()));
     }
 
     #[test]
     fn blank_text_alone_is_not_a_filter() {
-        let f = KnowledgeSearchFilter {
+        let f = LibrarySearchFilter {
             query: "   ".into(),
             ..Default::default()
         };
         assert!(!f.is_active());
-        let s = SpecSearchFilter {
-            query: " ".into(),
-            ..Default::default()
-        };
-        assert!(!s.is_active());
     }
 
     #[test]
     fn kinds_widen_among_themselves() {
-        let f = KnowledgeSearchFilter {
+        let f = LibrarySearchFilter {
             kinds: vec![KnowledgeFacet::Partial, KnowledgeFacet::Brief],
             ..Default::default()
         };
         assert!(f.is_active());
-        assert!(knowledge_matches(&f, KnowledgeFacet::Partial, &pipeline()));
-        assert!(knowledge_matches(&f, KnowledgeFacet::Brief, &pipeline()));
-        assert!(!knowledge_matches(
-            &f,
-            KnowledgeFacet::Template,
-            &pipeline()
-        ));
-        assert!(!knowledge_matches(&f, KnowledgeFacet::Skill, &pipeline()));
+        let of = |facet| library_matches(&f, KNOWLEDGE, Some(facet), &pipeline());
+        assert!(of(KnowledgeFacet::Partial));
+        assert!(of(KnowledgeFacet::Brief));
+        assert!(!of(KnowledgeFacet::Template));
+        assert!(!of(KnowledgeFacet::Skill));
+    }
+
+    #[test]
+    fn choosing_a_kind_leaves_out_files_that_have_none() {
+        // Only knowledge files have a kind, so "docs" means knowledge docs: a
+        // spec or a freeform file is not one of them.
+        let f = LibrarySearchFilter {
+            kinds: vec![KnowledgeFacet::Doc],
+            ..Default::default()
+        };
+        assert!(library_matches(&f, KNOWLEDGE, DOC, &pipeline()));
+        assert!(!library_matches(&f, OriginType::Spec, None, &proposal()));
+        assert!(!library_matches(&f, OriginType::Freeform, None, &pipeline()));
+    }
+
+    #[test]
+    fn types_widen_among_themselves_and_narrow_the_rest() {
+        let f = LibrarySearchFilter {
+            types: vec![OriginType::Spec, OriginType::Freeform],
+            ..Default::default()
+        };
+        assert!(f.is_active());
+        assert!(library_matches(&f, OriginType::Spec, None, &proposal()));
+        assert!(library_matches(&f, OriginType::Freeform, None, &pipeline()));
+        assert!(!library_matches(&f, KNOWLEDGE, DOC, &pipeline()));
     }
 
     #[test]
     fn roots_widen_among_themselves() {
-        let f = KnowledgeSearchFilter {
+        let f = LibrarySearchFilter {
             roots: vec!["store:acme".into(), "path:/repo".into()],
             ..Default::default()
         };
-        assert!(knowledge_matches(&f, KnowledgeFacet::Doc, &pipeline()));
+        assert!(library_matches(&f, KNOWLEDGE, DOC, &pipeline()));
         let elsewhere = doc("store:other", &["Release pipeline"], &["docs/p.md"], "");
-        assert!(!knowledge_matches(&f, KnowledgeFacet::Doc, &elsewhere));
+        assert!(!library_matches(&f, KNOWLEDGE, DOC, &elsewhere));
     }
 
     #[test]
-    fn root_kind_and_text_narrow_each_other() {
-        let f = KnowledgeSearchFilter {
+    fn root_type_kind_and_text_narrow_each_other() {
+        let f = LibrarySearchFilter {
             query: "smoke".into(),
             roots: vec!["store:acme".into()],
+            types: vec![OriginType::Knowledge],
             kinds: vec![KnowledgeFacet::Doc],
         };
-        assert!(knowledge_matches(&f, KnowledgeFacet::Doc, &pipeline()));
-        // Each group alone can refuse what the other two accept.
-        assert!(!knowledge_matches(&f, KnowledgeFacet::Skill, &pipeline()));
+        assert!(library_matches(&f, KNOWLEDGE, DOC, &pipeline()));
+        // Each group alone can refuse what the others accept.
+        assert!(!library_matches(
+            &f,
+            KNOWLEDGE,
+            Some(KnowledgeFacet::Skill),
+            &pipeline()
+        ));
+        assert!(!library_matches(&f, OriginType::Freeform, DOC, &pipeline()));
         let other_root = SearchDoc {
             root_key: "store:other",
             ..pipeline()
         };
-        assert!(!knowledge_matches(&f, KnowledgeFacet::Doc, &other_root));
-        let other_text = KnowledgeSearchFilter {
+        assert!(!library_matches(&f, KNOWLEDGE, DOC, &other_root));
+        let other_text = LibrarySearchFilter {
             query: "kubernetes".into(),
             ..f.clone()
         };
-        assert!(!knowledge_matches(
-            &other_text,
-            KnowledgeFacet::Doc,
-            &pipeline()
+        assert!(!library_matches(&other_text, KNOWLEDGE, DOC, &pipeline()));
+        // Without its text the filter still holds its other choices, which is
+        // what decides whether a file is opened at all.
+        assert!(library_matches(&other_text.without_text(), KNOWLEDGE, DOC, &pipeline()));
+        assert!(!library_matches(
+            &other_text.without_text(),
+            KNOWLEDGE,
+            DOC,
+            &other_root
         ));
     }
 
@@ -388,57 +382,43 @@ mod tests {
 
     #[test]
     fn a_spec_matches_by_name_path_and_content() {
-        let by = |query: &str| SpecSearchFilter {
+        let by = |query: &str| LibrarySearchFilter {
             query: query.into(),
             ..Default::default()
         };
-        assert!(spec_matches(&by("Proposal"), &proposal()));
-        assert!(spec_matches(&by("changes/add-login"), &proposal()));
-        assert!(spec_matches(&by(" google "), &proposal()));
-        assert!(!spec_matches(&by("archive"), &proposal()));
-    }
-
-    #[test]
-    fn a_spec_root_narrows_and_text_narrows_within_it() {
-        let mut f = SpecSearchFilter {
-            roots: vec!["path:/repo".into()],
-            ..Default::default()
-        };
-        assert!(f.is_active());
-        assert!(spec_matches(&f, &proposal()));
-        let elsewhere = SearchDoc {
-            root_key: "store:acme",
-            ..proposal()
-        };
-        assert!(!spec_matches(&f, &elsewhere));
-
-        f.query = "google".into();
-        assert!(spec_matches(&f, &proposal()));
-        f.query = "github".into();
-        assert!(!spec_matches(&f, &proposal()));
-    }
-
-    #[test]
-    fn an_empty_spec_filter_keeps_everything() {
-        let f = SpecSearchFilter::default();
-        assert!(!f.is_active());
-        assert!(spec_matches(&f, &proposal()));
+        let spec = |f: &LibrarySearchFilter| library_matches(f, OriginType::Spec, None, &proposal());
+        assert!(spec(&by("Proposal")));
+        assert!(spec(&by("changes/add-login")));
+        assert!(spec(&by(" google ")));
+        assert!(!spec(&by("archive")));
     }
 
     #[test]
     fn results_survive_the_wire() {
-        let result = KnowledgeSearchResult {
-            hits: vec![KnowledgeHit {
-                root_key: "store:acme".into(),
-                path: "templates/partials/context.md".into(),
-                title: "context".into(),
-                facet: KnowledgeFacet::Partial,
-            }],
+        use crate::library::{LibraryHit, LibrarySearchResult};
+        let result = LibrarySearchResult {
+            hits: vec![
+                LibraryHit {
+                    root_key: "knowledge:store:acme".into(),
+                    origin_type: OriginType::Knowledge,
+                    path: "templates/partials/context.md".into(),
+                    label: "context".into(),
+                    facet: Some(KnowledgeFacet::Partial),
+                },
+                LibraryHit {
+                    root_key: "freeform:path:/notes".into(),
+                    origin_type: OriginType::Freeform,
+                    path: "workflows/release.md".into(),
+                    label: "Release".into(),
+                    facet: None,
+                },
+            ],
             total: 12,
         };
         let json = serde_json::to_string(&result).expect("encode");
         assert!(json.contains("\"facet\":\"partial\""), "{json}");
-        let back: KnowledgeSearchResult = serde_json::from_str(&json).expect("decode");
+        assert!(json.contains("\"type\":\"freeform\""), "{json}");
+        let back: LibrarySearchResult = serde_json::from_str(&json).expect("decode");
         assert_eq!(back, result);
     }
 }

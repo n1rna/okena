@@ -140,14 +140,14 @@ fn brief_file(source: &serde_json::Value) -> Option<(SharedString, SharedString)
     Some((SharedString::from(root.to_string()), SharedString::from(path.to_string())))
 }
 
-/// Open a brief's own file in Harness → Knowledge.
+/// Open a brief's own file in the Library.
 pub(crate) fn open_brief(
     broker: &Entity<okena_workspace::request_broker::RequestBroker>,
     root: &SharedString,
     path: &SharedString,
     cx: &mut App,
 ) {
-    let request = okena_workspace::requests::WorkbenchRequest::OpenKnowledgeDoc {
+    let request = okena_workspace::requests::WorkbenchRequest::OpenLibraryDoc {
         root_key: root.to_string(),
         path: path.to_string(),
     };

@@ -1,11 +1,18 @@
-//! Adding a knowledge or specs root: one form, wherever you add one.
+//! Adding a Library origin: one form, wherever you add one.
 //!
-//! Roots have always been added in Settings → Knowledge and Settings → Specs.
-//! QBL-429 adds a second place — the Roots page the sidebars' `+` opens — and
-//! those forms stay. So the questions, the wording, the validation and the
-//! action each choice sends live here, and both places render this rather than
-//! their own copy: adding a root means the same thing and asks the same things
-//! wherever you do it, and a change to one is a change to both.
+//! Origins are added in two places — Settings → Library, and the Origins page
+//! the Library's sidebar `+` opens (QBL-429). So the questions, the wording,
+//! the validation and the action each choice sends live here, and both places
+//! render this rather than their own copy: adding an origin means the same
+//! thing and asks the same things wherever you do it, and a change to one is a
+//! change to both.
+//!
+//! The form asks two things: what **type** of origin it is
+//! (`okena_core::library::OriginType` — knowledge, spec or freeform), and
+//! which of the three ways to add it. The type is a choice on the form rather
+//! than a form per type because the three ways are the same for every type
+//! (QBL-440); it only changes a few words, which boxes are asked for, and
+//! where the origin is recorded.
 //!
 //! What stays with the caller is what genuinely differs: who holds the busy
 //! flag, where the notice and the error are shown, and what else is on the
@@ -18,31 +25,11 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
+use okena_core::library::OriginType;
 use std::rc::Rc;
 
-/// Which section's roots are being added to.
-///
-/// Knowledge and specs roots are different things in different registries, but
-/// they are added the same three ways, so the kind is a parameter rather than
-/// two near-identical forms.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RootKind {
-    Knowledge,
-    Specs,
-}
-
-impl RootKind {
-    fn thing(self) -> &'static str {
-        match self {
-            RootKind::Knowledge => "knowledge",
-            RootKind::Specs => "specs",
-        }
-    }
-}
-
-/// The three ways to add a root. Knowledge and Specs offer the same choices
-/// under the same labels, so the words live here rather than in each page
-/// (QBL-415).
+/// The three ways to add an origin. Every type offers the same choices under
+/// the same labels, so the words live here rather than in each page (QBL-415).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AddMode {
     Clone,
@@ -54,11 +41,14 @@ impl AddMode {
     /// In the order they are offered: cloning is what most teams do.
     pub const ALL: [AddMode; 3] = [AddMode::Clone, AddMode::Register, AddMode::Create];
 
-    pub fn label(self) -> &'static str {
-        match self {
-            AddMode::Clone => "Clone a repository",
-            AddMode::Register => "Add an existing folder",
-            AddMode::Create => "Create a new store",
+    /// What the choice is called for an origin of `origin_type`. A freeform
+    /// origin is a folder, not a store.
+    pub fn label(self, origin_type: OriginType) -> &'static str {
+        match (self, origin_type) {
+            (AddMode::Clone, _) => "Clone a repository",
+            (AddMode::Register, _) => "Add an existing folder",
+            (AddMode::Create, OriginType::Freeform) => "Create a new folder",
+            (AddMode::Create, _) => "Create a new store",
         }
     }
 
@@ -71,21 +61,53 @@ impl AddMode {
     }
 }
 
+/// What each box suggests, for an origin of one type.
+struct Placeholders {
+    clone_url: &'static str,
+    folder: &'static str,
+    setup_id: &'static str,
+    setup_path: &'static str,
+}
+
+fn placeholders(origin_type: OriginType) -> Placeholders {
+    match origin_type {
+        OriginType::Knowledge => Placeholders {
+            clone_url: "e.g. git@github.com:acme/eng-knowledge.git",
+            folder: "e.g. ~/knowledge/eng-knowledge",
+            setup_id: "e.g. acme-eng",
+            setup_path: "e.g. ~/knowledge/acme-eng",
+        },
+        OriginType::Spec => Placeholders {
+            clone_url: "e.g. git@github.com:acme/team-plans.git",
+            folder: "e.g. ~/openspec/team-plans",
+            setup_id: "e.g. team-plans",
+            setup_path: "e.g. ~/openspec/team-plans",
+        },
+        OriginType::Freeform => Placeholders {
+            clone_url: "e.g. git@github.com:acme/runbooks.git",
+            folder: "e.g. ~/notes/runbooks",
+            setup_id: "e.g. Runbooks",
+            setup_path: "e.g. ~/library/runbooks",
+        },
+    }
+}
+
 /// The form's state: which choice is showing, and every box it can ask for.
 ///
 /// All the boxes exist whichever choice is showing, so switching choices and
 /// switching back does not lose what was typed.
 pub struct AddRootForm {
-    kind: RootKind,
+    origin_type: OriginType,
     pub mode: AddMode,
     pub init_git: bool,
     clone_url: Entity<SimpleInputState>,
     clone_path: Entity<SimpleInputState>,
     register_path: Entity<SimpleInputState>,
-    /// Specs only: a plain OpenSpec root has no identity to take an id from.
+    /// Spec only: a plain OpenSpec root has no identity to take an id from.
     register_id: Entity<SimpleInputState>,
+    /// The new store's id; for a freeform origin, the title its README gets.
     setup_id: Entity<SimpleInputState>,
-    /// Knowledge only: specs stores carry no display name.
+    /// Knowledge only: spec stores carry no display name.
     setup_name: Entity<SimpleInputState>,
     setup_path: Entity<SimpleInputState>,
     setup_remote: Entity<SimpleInputState>,
@@ -96,53 +118,48 @@ fn input<V: 'static>(cx: &mut Context<V>, placeholder: &'static str) -> Entity<S
 }
 
 impl AddRootForm {
-    pub fn new<V: 'static>(kind: RootKind, cx: &mut Context<V>) -> Self {
-        let knowledge = kind == RootKind::Knowledge;
+    pub fn new<V: 'static>(origin_type: OriginType, cx: &mut Context<V>) -> Self {
+        let hints = placeholders(origin_type);
         Self {
-            kind,
+            origin_type,
             mode: AddMode::Clone,
             init_git: true,
-            clone_url: input(
-                cx,
-                if knowledge {
-                    "e.g. git@github.com:acme/eng-knowledge.git"
-                } else {
-                    "e.g. git@github.com:acme/team-plans.git"
-                },
-            ),
+            clone_url: input(cx, hints.clone_url),
             clone_path: input(cx, "Leave blank to use the clone folder in Settings"),
-            register_path: input(
-                cx,
-                if knowledge {
-                    "e.g. ~/knowledge/eng-knowledge"
-                } else {
-                    "e.g. ~/openspec/team-plans"
-                },
-            ),
+            register_path: input(cx, hints.folder),
             register_id: input(cx, "Taken from the store's identity"),
-            setup_id: input(cx, if knowledge { "e.g. acme-eng" } else { "e.g. team-plans" }),
+            setup_id: input(cx, hints.setup_id),
             setup_name: input(cx, "e.g. Acme Engineering"),
-            setup_path: input(
-                cx,
-                if knowledge {
-                    "e.g. ~/knowledge/acme-eng"
-                } else {
-                    "e.g. ~/openspec/team-plans"
-                },
-            ),
-            setup_remote: input(
-                cx,
-                if knowledge {
-                    "e.g. git@github.com:acme/eng-knowledge.git"
-                } else {
-                    "e.g. git@github.com:acme/team-plans.git"
-                },
-            ),
+            setup_path: input(cx, hints.setup_path),
+            setup_remote: input(cx, hints.clone_url),
         }
     }
 
-    pub fn kind(&self) -> RootKind {
-        self.kind
+    /// The type of origin the form is adding.
+    pub fn origin_type(&self) -> OriginType {
+        self.origin_type
+    }
+
+    /// Add an origin of another type. What was typed stays: a URL or a folder
+    /// is the same thing whichever type you turn out to want.
+    pub fn set_origin_type(&mut self, origin_type: OriginType, cx: &mut App) {
+        if self.origin_type == origin_type {
+            return;
+        }
+        self.origin_type = origin_type;
+        let hints = placeholders(origin_type);
+        for (field, hint) in [
+            (&self.clone_url, hints.clone_url),
+            (&self.register_path, hints.folder),
+            (&self.setup_id, hints.setup_id),
+            (&self.setup_path, hints.setup_path),
+            (&self.setup_remote, hints.clone_url),
+        ] {
+            field.update(cx, |input, cx| {
+                input.set_placeholder(hint);
+                cx.notify();
+            });
+        }
     }
 
     fn value(&self, field: &Entity<SimpleInputState>, cx: &App) -> String {
@@ -168,61 +185,99 @@ impl AddRootForm {
 
     /// The action this form submits, or the one line saying what is still
     /// missing.
-    ///
-    /// Pure apart from reading the boxes, so the rule "a new store needs an id
-    /// and a folder" is a thing that can be tested rather than a branch buried
-    /// in a click handler.
     pub fn request(&self, cx: &App) -> Result<ActionRequest, String> {
-        let some = |v: String| (!v.is_empty()).then_some(v);
-        match (self.kind, self.mode) {
-            (_, AddMode::Clone) => {
-                let url = self.value(&self.clone_url, cx);
-                if url.is_empty() {
-                    return Err("Enter the repository URL to clone.".into());
-                }
-                let path = some(self.value(&self.clone_path, cx));
-                Ok(match self.kind {
-                    RootKind::Knowledge => ActionRequest::KnowledgeStoreClone { url, path },
-                    RootKind::Specs => ActionRequest::SpecStoreClone { url, path },
-                })
+        build_request(
+            self.origin_type,
+            self.mode,
+            self.init_git,
+            &Typed {
+                clone_url: self.value(&self.clone_url, cx),
+                clone_path: self.value(&self.clone_path, cx),
+                register_path: self.value(&self.register_path, cx),
+                register_id: self.value(&self.register_id, cx),
+                setup_id: self.value(&self.setup_id, cx),
+                setup_name: self.value(&self.setup_name, cx),
+                setup_path: self.value(&self.setup_path, cx),
+                setup_remote: self.value(&self.setup_remote, cx),
+            },
+        )
+    }
+}
+
+/// What the boxes hold, trimmed.
+#[derive(Clone, Debug, Default)]
+pub struct Typed {
+    pub clone_url: String,
+    pub clone_path: String,
+    pub register_path: String,
+    pub register_id: String,
+    pub setup_id: String,
+    pub setup_name: String,
+    pub setup_path: String,
+    pub setup_remote: String,
+}
+
+/// The action that adds an origin of `origin_type` the way `mode` says, from
+/// what was typed — or the one line saying what is still missing.
+///
+/// Apart from the boxes so the rules — "a new store needs an id and a folder",
+/// "a freeform origin needs only a folder" — are things that can be tested
+/// rather than branches buried in a click handler. The same three actions go
+/// out for every type; the type rides along on them.
+pub fn build_request(
+    origin_type: OriginType,
+    mode: AddMode,
+    init_git: bool,
+    typed: &Typed,
+) -> Result<ActionRequest, String> {
+    let some = |v: &str| (!v.is_empty()).then(|| v.to_string());
+    match mode {
+        AddMode::Clone => {
+            if typed.clone_url.is_empty() {
+                return Err("Enter the repository URL to clone.".into());
             }
-            (_, AddMode::Register) => {
-                let path = self.value(&self.register_path, cx);
-                if path.is_empty() {
-                    return Err("Choose the store checkout's folder.".into());
+            Ok(ActionRequest::LibraryStoreClone {
+                origin_type,
+                url: typed.clone_url.clone(),
+                path: some(&typed.clone_path),
+            })
+        }
+        AddMode::Register => {
+            if typed.register_path.is_empty() {
+                return Err(match origin_type {
+                    OriginType::Freeform => "Choose the folder to add.",
+                    _ => "Choose the store checkout's folder.",
                 }
-                Ok(match self.kind {
-                    RootKind::Knowledge => ActionRequest::KnowledgeStoreRegister { path },
-                    RootKind::Specs => ActionRequest::SpecStoreRegister {
-                        path,
-                        id: some(self.value(&self.register_id, cx)),
-                    },
-                })
+                .into());
             }
-            (_, AddMode::Create) => {
-                let id = self.value(&self.setup_id, cx);
-                let path = self.value(&self.setup_path, cx);
-                if id.is_empty() || path.is_empty() {
-                    return Err("A new store needs an id and a folder.".into());
+            Ok(ActionRequest::LibraryStoreRegister {
+                origin_type,
+                path: typed.register_path.clone(),
+                // Only a plain OpenSpec root is given an id here.
+                id: some(&typed.register_id).filter(|_| origin_type == OriginType::Spec),
+            })
+        }
+        AddMode::Create => {
+            // A freeform origin has no id: it is a folder, and what is typed
+            // as its name only titles its README.
+            let needs_id = origin_type != OriginType::Freeform;
+            if typed.setup_path.is_empty() || (needs_id && typed.setup_id.is_empty()) {
+                return Err(if needs_id {
+                    "A new store needs an id and a folder."
+                } else {
+                    "A new origin needs a folder."
                 }
-                let remote = some(self.value(&self.setup_remote, cx));
-                Ok(match self.kind {
-                    RootKind::Knowledge => ActionRequest::KnowledgeStoreSetup {
-                        id,
-                        path,
-                        name: some(self.value(&self.setup_name, cx)),
-                        description: None,
-                        remote,
-                        init_git: self.init_git,
-                    },
-                    RootKind::Specs => ActionRequest::SpecStoreSetup {
-                        id,
-                        path,
-                        remote,
-                        init_git: self.init_git,
-                    },
-                })
+                .into());
             }
+            Ok(ActionRequest::LibraryStoreSetup {
+                origin_type,
+                id: typed.setup_id.clone(),
+                path: typed.setup_path.clone(),
+                name: some(&typed.setup_name).filter(|_| origin_type == OriginType::Knowledge),
+                description: None,
+                remote: some(&typed.setup_remote).filter(|_| needs_id),
+                init_git,
+            })
         }
     }
 }
@@ -232,12 +287,12 @@ impl AddRootForm {
 /// Here rather than at each call site because the interesting cases are about
 /// what the daemon reported — an identity it had to write, a checkout already
 /// registered — and both places have to say the same thing about them.
-pub fn describe(kind: RootKind, mode: AddMode, v: &serde_json::Value) -> String {
+pub fn describe(origin_type: OriginType, mode: AddMode, v: &serde_json::Value) -> String {
     let id = v["id"].as_str().unwrap_or("store");
     let root = v["root"].as_str().unwrap_or("");
     let flag = |key: &str| v[key].as_bool() == Some(true);
-    match (kind, mode) {
-        (RootKind::Knowledge, AddMode::Clone) => {
+    match (origin_type, mode) {
+        (OriginType::Knowledge, AddMode::Clone) => {
             if flag("identity_missing") {
                 format!(
                     "Cloned '{id}' into {root}. It has no .okena-knowledge/store.yaml yet — commit one so every clone agrees on its id."
@@ -246,7 +301,7 @@ pub fn describe(kind: RootKind, mode: AddMode, v: &serde_json::Value) -> String 
                 format!("Cloned '{id}' into {root}.")
             }
         }
-        (RootKind::Specs, AddMode::Clone) => {
+        (OriginType::Spec, AddMode::Clone) => {
             let root = v["root"].as_str().unwrap_or("the destination");
             if flag("metadata_created") {
                 format!(
@@ -256,7 +311,7 @@ pub fn describe(kind: RootKind, mode: AddMode, v: &serde_json::Value) -> String 
                 format!("Cloned store '{id}' into {root}.")
             }
         }
-        (RootKind::Knowledge, AddMode::Register) => {
+        (OriginType::Knowledge, AddMode::Register) => {
             if flag("already_registered") {
                 format!("'{id}' was already added from that folder.")
             } else if flag("identity_missing") {
@@ -267,7 +322,7 @@ pub fn describe(kind: RootKind, mode: AddMode, v: &serde_json::Value) -> String 
                 format!("Added store '{id}'.")
             }
         }
-        (RootKind::Specs, AddMode::Register) => {
+        (OriginType::Spec, AddMode::Register) => {
             if flag("metadata_created") {
                 format!(
                     "Registered '{id}'. okena wrote .openspec-store/store.yaml — commit it so every clone carries the same id."
@@ -278,17 +333,37 @@ pub fn describe(kind: RootKind, mode: AddMode, v: &serde_json::Value) -> String 
                 format!("Registered store '{id}'.")
             }
         }
-        (kind, AddMode::Create) => {
+        // A freeform origin is its folder: there is no id to report, and
+        // nothing was written into it.
+        (OriginType::Freeform, AddMode::Clone) => {
+            format!("Cloned into {root} and added it as a freeform origin.")
+        }
+        (OriginType::Freeform, AddMode::Register) => {
+            if flag("already_registered") {
+                format!("{root} was already a freeform origin.")
+            } else {
+                format!("Added {root} as a freeform origin.")
+            }
+        }
+        (OriginType::Freeform, AddMode::Create) => {
             let committed = if flag("committed") {
                 " with an initial commit"
             } else {
                 ""
             };
-            let then = match kind {
-                RootKind::Knowledge => "Push it where your team can clone it.",
-                RootKind::Specs => {
+            format!("Created {root}{committed}, with a README to start from.")
+        }
+        (origin_type, AddMode::Create) => {
+            let committed = if flag("committed") {
+                " with an initial commit"
+            } else {
+                ""
+            };
+            let then = match origin_type {
+                OriginType::Spec => {
                     "Push it where teammates can clone it; each registers their own checkout."
                 }
+                _ => "Push it where your team can clone it.",
             };
             format!("Created store '{id}' at {root}{committed}. {then}")
         }
@@ -297,8 +372,8 @@ pub fn describe(kind: RootKind, mode: AddMode, v: &serde_json::Value) -> String 
 
 // ─── Rendering ──────────────────────────────────────────────────────────────
 
-/// One pill in a row of choices — the add-root modes, and the git toggle that
-/// looks like them.
+/// One pill in a row of choices — the origin types, the ways to add one, and
+/// the git toggle that looks like them.
 fn pill(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,
@@ -400,8 +475,8 @@ pub struct AddRootChrome {
     pub busy: bool,
 }
 
-/// The whole form: the three choices, the boxes the chosen one needs, and its
-/// submit button.
+/// The whole form: the origin's type, the three ways to add it, the boxes the
+/// chosen way needs, and its submit button.
 ///
 /// The callbacks are `&mut App` closures rather than anything view-shaped, so
 /// this renders inside the settings panel and inside a harness pane without
@@ -410,6 +485,7 @@ pub fn render_add_root(
     form: &AddRootForm,
     chrome: AddRootChrome,
     cx: &App,
+    on_type: impl Fn(&OriginType, &mut Window, &mut App) + 'static,
     on_mode: impl Fn(&AddMode, &mut Window, &mut App) + 'static,
     on_init_git: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     on_submit: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -417,16 +493,44 @@ pub fn render_add_root(
     let t = theme(cx);
     let prefix = chrome.id_prefix;
     let busy = chrome.busy;
-    let knowledge = form.kind == RootKind::Knowledge;
+    let origin_type = form.origin_type;
+    let knowledge = origin_type == OriginType::Knowledge;
+    let freeform = origin_type == OriginType::Freeform;
+    let on_type = Rc::new(on_type);
     let on_mode = Rc::new(on_mode);
     let on_submit = Rc::new(on_submit);
+
+    // What is being added comes first: it decides what the rest asks.
+    let types = v_flex()
+        .gap(px(5.0))
+        .child(
+            h_flex().gap(px(6.0)).flex_wrap().children(OriginType::all().map(|ty| {
+                let on_type = on_type.clone();
+                pill(
+                    format!("{prefix}-type-{}", ty.slug()),
+                    ty.label(),
+                    origin_type == ty,
+                    false,
+                    &t,
+                    cx,
+                    move |_, window, app| on_type(&ty, window, app),
+                )
+            })),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .text_size(ui_text_ms(cx))
+                .text_color(rgb(t.text_muted))
+                .child(origin_type.blurb()),
+        );
 
     let tabs = h_flex().gap(px(6.0)).flex_wrap().children(
         AddMode::ALL.map(|mode| {
             let on_mode = on_mode.clone();
             pill(
                 format!("{prefix}-mode-{}", mode.slug()),
-                mode.label(),
+                mode.label(origin_type),
                 form.mode == mode,
                 false,
                 &t,
@@ -470,16 +574,20 @@ pub fn render_add_root(
             .gap(px(10.0))
             .child(field_row(
                 "Folder",
-                if knowledge {
-                    "The top of the checkout, with docs/, skills/, agents/ or templates/ in it."
-                } else {
-                    "The top of the checkout, with an openspec/ tree in it."
+                match origin_type {
+                    OriginType::Knowledge => {
+                        "The top of the checkout, with docs/, skills/, agents/ or templates/ in it."
+                    }
+                    OriginType::Spec => "The top of the checkout, with an openspec/ tree in it.",
+                    OriginType::Freeform => {
+                        "Any folder of markdown. Every .md file under it is listed."
+                    }
                 },
                 &form.register_path,
                 &t,
                 cx,
             ))
-            .when(!knowledge, |d| {
+            .when(origin_type == OriginType::Spec, |d| {
                 d.child(field_row(
                     "Store id (optional)",
                     "Only for a plain OpenSpec root; a store brings its own id.",
@@ -492,11 +600,15 @@ pub fn render_add_root(
         AddMode::Create => v_flex()
             .gap(px(10.0))
             .child(field_row(
-                "Store id",
-                if knowledge {
-                    "Kebab-case. Projects follow it with `stores: [acme-eng]` in .okena/knowledge.yaml."
-                } else {
-                    "Kebab-case. Repos point at it with `store: team-plans` in openspec/config.yaml."
+                if freeform { "Name (optional)" } else { "Store id" },
+                match origin_type {
+                    OriginType::Knowledge => {
+                        "Kebab-case. Projects follow it with `stores: [acme-eng]` in .okena/knowledge.yaml."
+                    }
+                    OriginType::Spec => {
+                        "Kebab-case. Repos point at it with `store: team-plans` in openspec/config.yaml."
+                    }
+                    OriginType::Freeform => "The heading of the README the folder starts with.",
                 },
                 &form.setup_id,
                 &t,
@@ -512,13 +624,17 @@ pub fn render_add_root(
                 &t,
                 cx,
             ))
-            .child(field_row(
-                "Remote (optional)",
-                "",
-                &form.setup_remote,
-                &t,
-                cx,
-            ))
+            // A store records its clone source in its identity; a folder
+            // has no identity to record one in.
+            .when(!freeform, |d| {
+                d.child(field_row(
+                    "Remote (optional)",
+                    "",
+                    &form.setup_remote,
+                    &t,
+                    cx,
+                ))
+            })
             .child(h_flex().child(pill(
                 format!("{prefix}-init-git"),
                 if form.init_git {
@@ -532,32 +648,41 @@ pub fn render_add_root(
                 cx,
                 on_init_git,
             )))
-            .child(submit(if busy { "Creating…" } else { "Create store" })),
+            .child(submit(if busy {
+                "Creating…"
+            } else if freeform {
+                "Create folder"
+            } else {
+                "Create store"
+            })),
     };
 
     v_flex()
         .px(px(12.0))
         .py(px(10.0))
         .gap(px(12.0))
+        .child(types)
         .child(tabs)
         .child(body)
 }
 
 /// One line naming what a failed add was trying to do, for an error banner.
-pub fn failed_to(kind: RootKind, mode: AddMode) -> String {
+pub fn failed_to(origin_type: OriginType, mode: AddMode) -> String {
     let verb = match mode {
         AddMode::Clone => "clone",
         AddMode::Register => "add",
         AddMode::Create => "create",
     };
-    format!("Could not {verb} the {} root", kind.thing())
+    format!("Could not {verb} the {} origin", origin_type.slug())
 }
 
 #[cfg(test)]
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{AddMode, RootKind, describe};
+    use super::{AddMode, Typed, build_request, describe};
+    use okena_core::api::ActionRequest;
+    use okena_core::library::OriginType;
     use serde_json::json;
 
     #[test]
@@ -565,7 +690,7 @@ mod tests {
         // The cases worth saying anything about are the ones where the daemon
         // had to do something the user did not ask for, or nothing at all.
         let cloned = describe(
-            RootKind::Knowledge,
+            OriginType::Knowledge,
             AddMode::Clone,
             &json!({"id": "acme-eng", "root": "/k/acme", "identity_missing": true}),
         );
@@ -573,7 +698,7 @@ mod tests {
         assert!(cloned.contains("store.yaml"), "{cloned}");
         assert_eq!(
             describe(
-                RootKind::Knowledge,
+                OriginType::Knowledge,
                 AddMode::Clone,
                 &json!({"id": "acme-eng", "root": "/k/acme"})
             ),
@@ -582,23 +707,23 @@ mod tests {
 
         assert_eq!(
             describe(
-                RootKind::Knowledge,
+                OriginType::Knowledge,
                 AddMode::Register,
                 &json!({"id": "acme-eng", "already_registered": true})
             ),
             "'acme-eng' was already added from that folder."
         );
-        // A specs store okena had to write an identity into says so, and says
+        // A spec store okena had to write an identity into says so, and says
         // it before "already registered": the commit is the actionable part.
         let specs = describe(
-            RootKind::Specs,
+            OriginType::Spec,
             AddMode::Register,
             &json!({"id": "team-plans", "metadata_created": true, "already_registered": true}),
         );
         assert!(specs.contains("okena wrote .openspec-store/store.yaml"), "{specs}");
 
         let created = describe(
-            RootKind::Specs,
+            OriginType::Spec,
             AddMode::Create,
             &json!({"id": "team-plans", "root": "/o/tp", "committed": true}),
         );
@@ -609,7 +734,7 @@ mod tests {
         );
         assert!(
             !describe(
-                RootKind::Knowledge,
+                OriginType::Knowledge,
                 AddMode::Create,
                 &json!({"id": "acme", "root": "/k/a"})
             )
@@ -619,15 +744,122 @@ mod tests {
     }
 
     #[test]
+    fn a_freeform_origin_is_reported_by_its_folder_since_it_has_no_id() {
+        assert_eq!(
+            describe(OriginType::Freeform, AddMode::Register, &json!({"root": "/notes"})),
+            "Added /notes as a freeform origin."
+        );
+        assert_eq!(
+            describe(
+                OriginType::Freeform,
+                AddMode::Register,
+                &json!({"root": "/notes", "already_registered": true})
+            ),
+            "/notes was already a freeform origin."
+        );
+        assert_eq!(
+            describe(
+                OriginType::Freeform,
+                AddMode::Create,
+                &json!({"root": "/notes", "committed": true})
+            ),
+            "Created /notes with an initial commit, with a README to start from."
+        );
+        assert!(
+            describe(OriginType::Freeform, AddMode::Clone, &json!({"root": "/c/runbooks"}))
+                .contains("/c/runbooks")
+        );
+    }
+
+    #[test]
+    fn every_type_is_added_by_the_same_three_actions_carrying_its_type() {
+        let typed = Typed {
+            clone_url: "git@example.com:acme/x.git".into(),
+            register_path: "~/x".into(),
+            register_id: "plans".into(),
+            setup_id: "acme".into(),
+            setup_name: "Acme".into(),
+            setup_path: "~/new".into(),
+            setup_remote: "git@example.com:acme/new.git".into(),
+            ..Default::default()
+        };
+        for origin_type in OriginType::all() {
+            assert!(matches!(
+                build_request(origin_type, AddMode::Clone, true, &typed),
+                Ok(ActionRequest::LibraryStoreClone { origin_type: t, path: None, .. })
+                    if t == origin_type
+            ));
+            let Ok(ActionRequest::LibraryStoreRegister { origin_type: t, id, .. }) =
+                build_request(origin_type, AddMode::Register, true, &typed)
+            else {
+                panic!("expected a register");
+            };
+            assert_eq!(t, origin_type);
+            // Only a plain OpenSpec root is handed an id.
+            assert_eq!(id.is_some(), origin_type == OriginType::Spec, "{origin_type:?}");
+
+            let Ok(ActionRequest::LibraryStoreSetup {
+                origin_type: t,
+                name,
+                remote,
+                init_git,
+                ..
+            }) = build_request(origin_type, AddMode::Create, false, &typed)
+            else {
+                panic!("expected a setup");
+            };
+            assert_eq!(t, origin_type);
+            assert!(!init_git);
+            assert_eq!(name.is_some(), origin_type == OriginType::Knowledge);
+            assert_eq!(remote.is_some(), origin_type != OriginType::Freeform);
+        }
+    }
+
+    #[test]
+    fn what_is_missing_is_said_before_anything_is_sent() {
+        let empty = Typed::default();
+        for origin_type in OriginType::all() {
+            for mode in AddMode::ALL {
+                assert!(
+                    build_request(origin_type, mode, true, &empty).is_err(),
+                    "{origin_type:?} {mode:?}"
+                );
+            }
+        }
+        // A store needs an id and a folder; a freeform origin only a folder.
+        let folder_only = Typed {
+            setup_path: "~/new".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_request(OriginType::Knowledge, AddMode::Create, true, &folder_only)
+                .unwrap_err(),
+            "A new store needs an id and a folder."
+        );
+        assert!(build_request(OriginType::Freeform, AddMode::Create, true, &folder_only).is_ok());
+    }
+
+    #[test]
+    fn creating_is_called_a_folder_for_freeform_and_a_store_otherwise() {
+        assert_eq!(AddMode::Create.label(OriginType::Freeform), "Create a new folder");
+        assert_eq!(AddMode::Create.label(OriginType::Spec), "Create a new store");
+        assert_eq!(AddMode::Clone.label(OriginType::Freeform), "Clone a repository");
+    }
+
+    #[test]
     fn a_failed_add_names_what_it_was_doing() {
         use super::failed_to;
         assert_eq!(
-            failed_to(RootKind::Knowledge, AddMode::Clone),
-            "Could not clone the knowledge root"
+            failed_to(OriginType::Knowledge, AddMode::Clone),
+            "Could not clone the knowledge origin"
         );
         assert_eq!(
-            failed_to(RootKind::Specs, AddMode::Create),
-            "Could not create the specs root"
+            failed_to(OriginType::Spec, AddMode::Create),
+            "Could not create the spec origin"
+        );
+        assert_eq!(
+            failed_to(OriginType::Freeform, AddMode::Register),
+            "Could not add the freeform origin"
         );
     }
 }

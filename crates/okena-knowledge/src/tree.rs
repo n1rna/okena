@@ -376,7 +376,7 @@ fn first_heading(body: &str) -> Option<String> {
 
 /// `{name}` placeholders in a template body, sorted and unique.
 ///
-/// The renderer's own reading, so what the Knowledge view lists and what
+/// The renderer's own reading, so what the Library lists and what
 /// okena fills cannot disagree. `{name|partial}` lists `name`; `{>partial}` is
 /// an include, not something the template asks to be filled.
 fn placeholders(body: &str) -> Vec<String> {

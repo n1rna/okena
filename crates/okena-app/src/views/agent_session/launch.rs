@@ -1,7 +1,7 @@
 //! The agents okena offers to start, and how each looks on a launcher.
 //!
 //! One list for every place that starts an agent. There were three copies of
-//! it — the Tasks view, the Specs view and the New agent dialog each had their
+//! it — the Tasks view, the Library and the New agent dialog each had their
 //! own — which is how a new agent ends up startable from one place and missing
 //! from the next.
 

@@ -27,7 +27,7 @@ pub(super) const MANIFEST_FILE: &str = "project-map.yaml";
 pub(super) enum ChipTarget {
     /// The project's `project-map.yaml`.
     Manifest,
-    /// Knowledge on a store the project follows, by root key.
+    /// The Library on a store the project follows, by its Library key.
     Store(String),
     /// Another project's info panel, by its daemon id.
     Project(String),
@@ -200,7 +200,7 @@ impl ProjectInfoPanel {
                             store
                                 .reason
                                 .clone()
-                                .or_else(|| Some(format!("Open {} in Knowledge.", store.name))),
+                                .or_else(|| Some(format!("Open {} in the Library.", store.name))),
                             store.root_key.clone().map(ChipTarget::Store),
                             cx,
                         )
@@ -358,7 +358,7 @@ impl ProjectInfoPanel {
     fn open_chip(&mut self, target: ChipTarget, cx: &mut Context<Self>) {
         match target {
             ChipTarget::Manifest => self.open_manifest(cx),
-            ChipTarget::Store(root_key) => self.open_knowledge_root(root_key, cx),
+            ChipTarget::Store(root_key) => self.open_library_root(root_key, cx),
             ChipTarget::Project(daemon_id) => self.open_project_info(daemon_id, cx),
         }
     }

@@ -1,10 +1,10 @@
 use okena_core::theme::ThemeMode;
-// A space's Specs and Knowledge roots. They live in `okena-core` so the wire
+// A space's Library origins. They live in `okena-core` so the wire
 // and the CLI can name them too; re-exported here because `settings::` is
 // where every caller already looks for them.
 pub use okena_core::spaces::{
-    DEFAULT_KNOWLEDGE_CLONE_DIR, DEFAULT_SPEC_CLONE_DIR, KnowledgeConfig, SpaceData,
-    SpecDiscoveryConfig,
+    DEFAULT_FREEFORM_CLONE_DIR, DEFAULT_KNOWLEDGE_CLONE_DIR, DEFAULT_SPEC_CLONE_DIR,
+    FreeformConfig, KnowledgeConfig, LibraryConfig, SpaceData, SpecDiscoveryConfig,
 };
 pub use okena_core::types::{DiffViewMode, StatusBarStyle};
 use okena_terminal::session_backend::SessionBackend;
@@ -113,9 +113,10 @@ pub struct HarnessConfig {
     #[serde(default = "default_true")]
     pub agent_mcp_injection: bool,
 
-    // The three fields below named the *one* task backend, the *one* set of
-    // Specs roots and the *one* set of Knowledge roots a profile had before
-    // spaces. Each space owns its own now ([`AppSettings::spaces`]), so these
+    // The fields below named the *one* task backend, the *one* set of Specs
+    // roots and the *one* set of Knowledge roots a profile had before spaces.
+    // Each space owns its own now ([`AppSettings::spaces`], under `library`
+    // since QBL-440), so these
     // are read once to build the Default space and never written again —
     // `skip_serializing` is what makes them disappear on the next save instead
     // of lingering as a second, silently ignored source of truth.
@@ -125,16 +126,17 @@ pub struct HarnessConfig {
     pub legacy_task_provider: Option<String>,
 
     /// Legacy single spec repository, superseded by `specs` before spaces
-    /// existed. Folded into the Default space's spec folders.
+    /// existed. Folded into the Default space's `library.spec.folders`.
     #[serde(default, rename = "spec_repo", skip_serializing)]
     pub legacy_spec_repo: Option<String>,
 
     /// Legacy: where the Specs view found OpenSpec roots. Becomes the Default
-    /// space's `specs`.
+    /// space's `library.spec`.
     #[serde(default, rename = "specs", skip_serializing)]
     pub legacy_specs: Option<SpecDiscoveryConfig>,
 
-    /// Legacy: knowledge discovery. Becomes the Default space's `knowledge`.
+    /// Legacy: knowledge discovery. Becomes the Default space's
+    /// `library.knowledge`.
     #[serde(default, rename = "knowledge", skip_serializing)]
     pub legacy_knowledge: Option<KnowledgeConfig>,
 
@@ -508,7 +510,7 @@ impl Default for SidebarSettings {
     }
 }
 
-/// Default width of the Knowledge and Specs file sidebar, in pixels — the
+/// Default width of the Library's file sidebar, in pixels — the
 /// width both views were fixed at before it could be dragged.
 pub const DEFAULT_HARNESS_FILES_WIDTH: f32 = 280.0;
 
@@ -516,7 +518,7 @@ fn default_harness_files_width() -> f32 {
     DEFAULT_HARNESS_FILES_WIDTH
 }
 
-/// The file sidebar shared by the Knowledge and Specs views: whether it is
+/// The Library's file sidebar: whether it is
 /// open, and how wide.
 ///
 /// One setting for both, not one each: they are the same sidebar over
@@ -579,7 +581,7 @@ fn default_status_bar_metrics_graph() -> bool {
 }
 
 /// Current settings schema version - increment when making breaking changes
-pub const SETTINGS_VERSION: u32 = 5;
+pub const SETTINGS_VERSION: u32 = 6;
 
 /// App settings (persisted separately from workspace)
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -615,7 +617,7 @@ pub struct AppSettings {
     #[serde(default)]
     pub sidebar: SidebarSettings,
 
-    /// The Knowledge and Specs file sidebar's open state and width.
+    /// The Library file sidebar's open state and width.
     #[serde(default)]
     pub harness_files: HarnessFilesSettings,
     /// Whether to show border around focused terminal
@@ -865,11 +867,7 @@ pub struct AppSettings {
 /// test, say. It is a plain Default space, so reading through it behaves the
 /// way a profile with no spaces file always did rather than panicking.
 static FALLBACK_SPACE: std::sync::LazyLock<SpaceData> = std::sync::LazyLock::new(|| {
-    SpaceData::default_space(
-        Some(default_task_provider()),
-        SpecDiscoveryConfig::default(),
-        KnowledgeConfig::default(),
-    )
+    SpaceData::default_space(Some(default_task_provider()), LibraryConfig::default())
 });
 
 impl AppSettings {
@@ -880,8 +878,11 @@ impl AppSettings {
     /// Also the migration. A profile written before spaces has no list at all,
     /// so one is built from the legacy `harness` fields — the same task
     /// backend, the same Specs roots (legacy `spec_repo` folded in), the same
-    /// Knowledge settings. Everything that profile had is in Default and
-    /// nothing moves, which is the whole promise of the update.
+    /// Knowledge settings, now as the Default space's `library`. Everything
+    /// that profile had is in Default and nothing moves, which is the whole
+    /// promise of the update. (A profile written with spaces but before the
+    /// Library is carried over where a space is read:
+    /// `okena_core::spaces::SpaceData`.)
     pub fn ensure_spaces(&mut self) {
         if self.spaces.is_empty() {
             let mut specs = self.harness.legacy_specs.take().unwrap_or_default();
@@ -892,7 +893,11 @@ impl AppSettings {
                 specs.folders.insert(0, repo.trim().to_string());
             }
             specs.folders.retain(|f| !f.trim().is_empty());
-            let knowledge = self.harness.legacy_knowledge.take().unwrap_or_default();
+            let library = LibraryConfig {
+                knowledge: self.harness.legacy_knowledge.take().unwrap_or_default(),
+                spec: specs,
+                freeform: FreeformConfig::default(),
+            };
             let connection = self
                 .harness
                 .legacy_task_provider
@@ -901,7 +906,7 @@ impl AppSettings {
                 .filter(|p| !p.is_empty())
                 .or_else(|| Some(default_task_provider()));
             self.spaces
-                .push(SpaceData::default_space(connection, specs, knowledge));
+                .push(SpaceData::default_space(connection, library));
         }
 
         // Default is always there, and always first: Cmd+1 goes to it.
@@ -913,11 +918,7 @@ impl AppSettings {
             }
             None => self.spaces.insert(
                 0,
-                SpaceData::default_space(
-                    Some(default_task_provider()),
-                    SpecDiscoveryConfig::default(),
-                    KnowledgeConfig::default(),
-                ),
+                SpaceData::default_space(Some(default_task_provider()), LibraryConfig::default()),
             ),
         }
 
@@ -976,8 +977,7 @@ impl Default for AppSettings {
             version: SETTINGS_VERSION,
             spaces: vec![SpaceData::default_space(
                 Some(default_task_provider()),
-                SpecDiscoveryConfig::default(),
-                KnowledgeConfig::default(),
+                LibraryConfig::default(),
             )],
             active_space: default_active_space(),
             custom_theme_id: None,
@@ -1315,6 +1315,17 @@ fn migrate_settings(mut settings: AppSettings) -> AppSettings {
         log::info!("Migrating settings from v4 to v5 (spaces)");
         settings.version = 5;
     }
+
+    // v5 -> v6: the Library (QBL-440). Each space's `specs` and `knowledge`
+    // become its `library.spec` and `library.knowledge`. The fold happened
+    // where the space was read (`okena_core::spaces::SpaceData`), so the
+    // values are already in place; this bumps the version so the file is
+    // written back at once and the two old keys stop being a second source
+    // of truth.
+    if settings.version == 5 {
+        log::info!("Migrating settings from v5 to v6 (library)");
+        settings.version = 6;
+    }
     settings.ensure_spaces();
 
     // Ensure version is current
@@ -1651,12 +1662,12 @@ mod tests {
         // user who never arranged anything gets no key written at all.
         // The order belongs to a space now (QBL-430), so it round-trips there.
         let mut arranged = AppSettings::default();
-        arranged.active_space_mut().knowledge.order =
+        arranged.active_space_mut().library.knowledge.order =
             vec!["path:/repo/.okena/knowledge".into(), "store:acme-eng".into()];
         let written = serde_json::to_string(&arranged).expect("serialize");
         let read_back: AppSettings = serde_json::from_str(&written).expect("deserialize");
         assert_eq!(
-            read_back.active_space().knowledge.order,
+            read_back.active_space().library.knowledge.order,
             ["path:/repo/.okena/knowledge", "store:acme-eng"],
             "the order a restart reads back is the order that was saved"
         );
@@ -1672,8 +1683,8 @@ mod tests {
             serde_json::from_str(r#"{"harness":{"knowledge":{"clone_dir":"~/k"}}}"#)
                 .expect("an older file still loads");
         old.ensure_spaces();
-        assert!(old.active_space().knowledge.order.is_empty());
-        assert_eq!(old.active_space().knowledge.clone_dir.as_deref(), Some("~/k"));
+        assert!(old.active_space().library.knowledge.order.is_empty());
+        assert_eq!(old.active_space().library.knowledge.clone_dir.as_deref(), Some("~/k"));
     }
 
     #[test]
@@ -1695,7 +1706,7 @@ mod tests {
         // The block is read into the Default space now (QBL-430), which is
         // where knowledge settings live.
         loaded.ensure_spaces();
-        let knowledge = &loaded.active_space().knowledge;
+        let knowledge = &loaded.active_space().library.knowledge;
         assert!(!knowledge.projects);
         assert_eq!(knowledge.clone_dir.as_deref(), Some("~/k"));
 
@@ -1725,10 +1736,10 @@ mod tests {
         assert!(d.is_default());
         assert_eq!(d.name, "Default");
         assert_eq!(d.connection.as_deref(), Some("azure_devops"));
-        assert_eq!(d.specs.folders, ["~/specs"]);
-        assert!(!d.specs.registry);
-        assert!(!d.knowledge.projects);
-        assert_eq!(d.knowledge.clone_dir.as_deref(), Some("~/k"));
+        assert_eq!(d.library.spec.folders, ["~/specs"]);
+        assert!(!d.library.spec.registry);
+        assert!(!d.library.knowledge.projects);
+        assert_eq!(d.library.knowledge.clone_dir.as_deref(), Some("~/k"));
         assert!(d.tasks.is_empty(), "Default keeps no filters");
         assert_eq!(migrated.active_space, "default");
     }
@@ -1740,7 +1751,7 @@ mod tests {
             "harness": { "spec_repo": "~/legacy", "specs": { "folders": ["~/specs"] } }
         }"#;
         let migrated = migrate_settings(serde_json::from_str(json).expect("loads"));
-        assert_eq!(migrated.active_space().specs.folders, ["~/legacy", "~/specs"]);
+        assert_eq!(migrated.active_space().library.spec.folders, ["~/legacy", "~/specs"]);
     }
 
     #[test]
@@ -1761,7 +1772,63 @@ mod tests {
         // And it round-trips without gaining a space.
         let back: AppSettings = serde_json::from_str(&saved).expect("reload");
         assert_eq!(back.spaces.len(), 1);
-        assert_eq!(back.active_space().specs.folders, ["~/legacy", "~/s"]);
+        assert_eq!(back.active_space().library.spec.folders, ["~/legacy", "~/s"]);
+    }
+
+    #[test]
+    fn a_settings_file_with_spaces_from_before_the_library_keeps_every_root() {
+        // QBL-440's acceptance case: a profile saved with spaces, each
+        // holding `specs` and `knowledge`, opens with the same roots, the same
+        // order and the same switches under `library` — in every space, not
+        // only the active one.
+        let json = r#"{
+            "version": 5,
+            "active_space": "client-a",
+            "spaces": [
+                { "id": "default", "name": "Default", "connection": "linear",
+                  "specs": { "registry": true, "projects": true, "folders": ["~/specs"] },
+                  "knowledge": { "projects": true,
+                                 "order": ["store:acme-eng", "path:/repo/.okena/knowledge"] } },
+                { "id": "client-a", "name": "Client A",
+                  "specs": { "registry": false, "projects": true,
+                             "folders": ["~/client-a/specs"], "config_dir": "~/.cfg/openspec" },
+                  "knowledge": { "projects": false, "stores": ["client-eng"],
+                                 "order": ["store:client-eng"], "clone_dir": "~/client-a/k" } }
+            ]
+        }"#;
+        let migrated = migrate_settings(serde_json::from_str(json).expect("loads"));
+        assert_eq!(migrated.spaces.len(), 2);
+        assert_eq!(migrated.active_space, "client-a");
+
+        let default = migrated.space("default").expect("default");
+        assert_eq!(default.library.spec.folders, ["~/specs"]);
+        assert!(default.library.spec.registry);
+        assert_eq!(
+            default.library.knowledge.order,
+            ["store:acme-eng", "path:/repo/.okena/knowledge"]
+        );
+        assert!(default.library.knowledge.stores.is_none(), "Default still follows every store");
+
+        let client = migrated.active_space();
+        assert!(!client.library.spec.registry);
+        assert_eq!(client.library.spec.folders, ["~/client-a/specs"]);
+        assert_eq!(client.library.spec.config_dir.as_deref(), Some("~/.cfg/openspec"));
+        assert!(!client.library.knowledge.projects);
+        assert_eq!(
+            client.library.knowledge.stores.as_deref(),
+            Some(&["client-eng".to_string()][..])
+        );
+        assert_eq!(client.library.knowledge.order, ["store:client-eng"]);
+        assert_eq!(client.library.knowledge.clone_dir.as_deref(), Some("~/client-a/k"));
+
+        // Saved again there is one key per space, and it reads back the same.
+        let saved = serde_json::to_value(&migrated).expect("serialize");
+        for space in saved["spaces"].as_array().expect("spaces") {
+            assert!(space.get("specs").is_none() && space.get("knowledge").is_none(), "{space}");
+            assert!(space.get("library").is_some(), "{space}");
+        }
+        let back: AppSettings = serde_json::from_value(saved).expect("reload");
+        assert_eq!(back.spaces, migrated.spaces);
     }
 
     #[test]
@@ -1822,7 +1889,7 @@ mod tests {
         let mut client = SpaceData::new("client-a", "Client A");
         client.connection = Some("linear-2".into());
         client.tasks.toggle_group(okena_core::tasks::GroupAxis::Project, "alpha");
-        client.specs.folders = vec!["~/client-a/specs".into()];
+        client.library.spec.folders = vec!["~/client-a/specs".into()];
         settings.spaces.push(client);
         settings.active_space = "client-a".into();
 
@@ -1832,7 +1899,7 @@ mod tests {
         let space = back.active_space();
         assert_eq!(space.connection.as_deref(), Some("linear-2"));
         assert_eq!(space.tasks.selected_count(), 1);
-        assert_eq!(space.specs.folders, ["~/client-a/specs"]);
+        assert_eq!(space.library.spec.folders, ["~/client-a/specs"]);
     }
 
     #[test]

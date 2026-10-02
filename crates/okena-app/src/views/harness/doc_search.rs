@@ -1,11 +1,11 @@
-//! Searching Specs and Knowledge from the island (QBL-436).
+//! Searching the Library from the island (QBL-436, QBL-440).
 //!
-//! The sidebar shows one root's tree; a search is across all of them, by
-//! name, path and content. The client has only file names until a file is
+//! The sidebar shows one origin's tree; a search is across all of them, of
+//! every type, by name, path and content. The client has only file names until a file is
 //! opened, so the daemon does the matching (`okena_core::doc_search` holds the
 //! rules) and this holds what the island is narrowed to, what came back, and
 //! the two things drawn from them: the island's chips, and the flat list of
-//! matches by root that stands in for the tree while anything narrows it.
+//! matches by origin that stands in for the tree while anything narrows it.
 
 use crate::keybindings::Cancel;
 use crate::theme::{theme, with_alpha};
@@ -19,12 +19,13 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui_component::h_flex;
 use okena_core::api::ActionRequest;
-use okena_core::doc_search::{KnowledgeFacet, KnowledgeSearchResult, SpecSearchResult};
+use okena_core::doc_search::KnowledgeFacet;
+use okena_core::library::{LibrarySearchResult, OriginType};
 use okena_ui::simple_input::InputChangedEvent;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use super::{HarnessPane, HarnessSection};
+use super::HarnessPane;
 
 /// How long typing must pause before the daemon is asked. A search reads
 /// files; one per keystroke of a word would be several thrown away.
@@ -35,16 +36,22 @@ const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 pub(crate) struct DocFilter {
     /// The search box's text, as typed.
     query: String,
-    /// Selected root keys.
+    /// Selected origin keys.
     roots: BTreeSet<String>,
-    /// Selected kinds. Knowledge only: Specs never selects one.
+    /// Selected origin types.
+    types: BTreeSet<OriginType>,
+    /// Selected kinds. Only knowledge files have one, so choosing any leaves
+    /// out every file that is not a knowledge file.
     kinds: BTreeSet<KnowledgeFacet>,
 }
 
 impl DocFilter {
     /// Whether anything narrows the page. Blank text does not.
     pub(crate) fn is_active(&self) -> bool {
-        !self.query.trim().is_empty() || !self.roots.is_empty() || !self.kinds.is_empty()
+        !self.query.trim().is_empty()
+            || !self.roots.is_empty()
+            || !self.types.is_empty()
+            || !self.kinds.is_empty()
     }
 
     pub(super) fn set_query(&mut self, text: &str) {
@@ -61,6 +68,16 @@ impl DocFilter {
         }
     }
 
+    pub(super) fn type_selected(&self, origin_type: OriginType) -> bool {
+        self.types.contains(&origin_type)
+    }
+
+    pub(super) fn toggle_type(&mut self, origin_type: OriginType) {
+        if !self.types.remove(&origin_type) {
+            self.types.insert(origin_type);
+        }
+    }
+
     pub(super) fn kind_selected(&self, kind: KnowledgeFacet) -> bool {
         self.kinds.contains(&kind)
     }
@@ -74,7 +91,7 @@ impl DocFilter {
     /// How many values are picked, for the "Filters · 3" on the button. The
     /// text is not one of them.
     pub(super) fn selected_count(&self) -> usize {
-        self.roots.len() + self.kinds.len()
+        self.roots.len() + self.types.len() + self.kinds.len()
     }
 
     /// Empty the chips and the text alike: there is one Clear.
@@ -82,30 +99,25 @@ impl DocFilter {
         *self = Self::default();
     }
 
-    /// Drop selected roots that are no longer on offer, so a root that was
-    /// unregistered does not leave a filter matching nothing behind. The text
-    /// and kinds are left alone.
+    /// Drop selected origins that are no longer on offer, so one that was
+    /// removed does not leave a filter matching nothing behind. The text,
+    /// types and kinds are left alone.
     pub(super) fn prune(&mut self, known_roots: &[&str]) {
         self.roots.retain(|key| known_roots.contains(&key.as_str()));
     }
 
     /// What to ask the daemon — `None` when nothing narrows the page, which
     /// is when the sidebar shows its tree and there is nothing to ask.
-    pub(super) fn request(&self, section: HarnessSection) -> Option<ActionRequest> {
+    pub(super) fn request(&self) -> Option<ActionRequest> {
         if !self.is_active() {
             return None;
         }
-        let query = self.query.trim().to_string();
-        let roots = self.roots.iter().cloned().collect();
-        match section {
-            HarnessSection::Specs => Some(ActionRequest::SpecSearch { query, roots }),
-            HarnessSection::Knowledge => Some(ActionRequest::KnowledgeSearch {
-                query,
-                roots,
-                kinds: self.kinds.iter().copied().collect(),
-            }),
-            HarnessSection::Tasks | HarnessSection::Testing => None,
-        }
+        Some(ActionRequest::LibrarySearch {
+            query: self.query.trim().to_string(),
+            roots: self.roots.iter().cloned().collect(),
+            types: self.types.iter().copied().collect(),
+            kinds: self.kinds.iter().copied().collect(),
+        })
     }
 }
 
@@ -116,7 +128,7 @@ pub(crate) struct Hit {
     /// Relative to the root: what opening it takes.
     pub(crate) path: String,
     pub(crate) label: String,
-    /// What it is, on Knowledge.
+    /// What it is, when it is a knowledge file.
     pub(crate) kind: Option<KnowledgeFacet>,
 }
 
@@ -127,26 +139,8 @@ pub(crate) struct Found {
     pub(crate) total: usize,
 }
 
-impl From<KnowledgeSearchResult> for Found {
-    fn from(result: KnowledgeSearchResult) -> Self {
-        Self {
-            total: result.total,
-            hits: result
-                .hits
-                .into_iter()
-                .map(|h| Hit {
-                    root_key: h.root_key,
-                    path: h.path,
-                    label: h.title,
-                    kind: Some(h.facet),
-                })
-                .collect(),
-        }
-    }
-}
-
-impl From<SpecSearchResult> for Found {
-    fn from(result: SpecSearchResult) -> Self {
+impl From<LibrarySearchResult> for Found {
+    fn from(result: LibrarySearchResult) -> Self {
         Self {
             total: result.total,
             hits: result
@@ -156,7 +150,7 @@ impl From<SpecSearchResult> for Found {
                     root_key: h.root_key,
                     path: h.path,
                     label: h.label,
-                    kind: None,
+                    kind: h.facet,
                 })
                 .collect(),
         }
@@ -181,10 +175,10 @@ impl DocSearchState {
     /// The filter changed: what to ask, and the generation the answer must
     /// carry. `None` when nothing narrows the page any more — the results are
     /// dropped, and any answer still on its way with them.
-    pub(super) fn begin(&mut self, section: HarnessSection) -> Option<(u64, ActionRequest)> {
+    pub(super) fn begin(&mut self) -> Option<(u64, ActionRequest)> {
         self.generation += 1;
         self.error = None;
-        match self.filter.request(section) {
+        match self.filter.request() {
             Some(request) => Some((self.generation, request)),
             None => {
                 self.found = None;
@@ -222,28 +216,22 @@ impl DocSearchState {
     }
 }
 
-/// One page's search box and what it is narrowed to. Never saved: a restart
-/// starts empty.
+/// The Library's search box and what it is narrowed to. Never saved: a
+/// restart starts empty.
 pub(crate) struct DocSearch {
     pub(crate) input: Entity<SimpleInputState>,
     pub(crate) state: DocSearchState,
 }
 
 impl DocSearch {
-    pub(crate) fn new(section: HarnessSection, cx: &mut Context<HarnessPane>) -> Self {
-        let placeholder = match section {
-            HarnessSection::Specs => "Search specs",
-            _ => "Search knowledge",
-        };
-        let input = cx.new(|cx| SimpleInputState::new(cx).placeholder(placeholder));
+    pub(crate) fn new(cx: &mut Context<HarnessPane>) -> Self {
+        let input = cx.new(|cx| SimpleInputState::new(cx).placeholder("Search the library"));
         cx.subscribe(
             &input,
             move |this: &mut HarnessPane, input, _: &InputChangedEvent, cx| {
                 let text = input.read(cx).value().to_string();
-                if let Some(search) = this.doc_search_mut(section) {
-                    search.state.filter.set_query(&text);
-                }
-                this.run_doc_search(section, true, cx);
+                this.search.state.filter.set_query(&text);
+                this.run_doc_search(true, cx);
             },
         )
         .detach();
@@ -254,9 +242,9 @@ impl DocSearch {
     }
 }
 
-/// Hits under the root each was found in, in the order the sidebar lists the
-/// roots. A root nothing was found in is left out; a hit whose root is not
-/// listed any more keeps its place at the end, under its key.
+/// Hits under the origin each was found in, in the order the sidebar lists
+/// the origins. An origin nothing was found in is left out; a hit whose origin
+/// is not listed any more keeps its place at the end, under its key.
 pub(crate) fn group_hits<'a>(
     hits: &'a [Hit],
     roots: &[(String, String)],
@@ -284,69 +272,48 @@ pub(crate) fn group_hits<'a>(
 #[derive(Clone)]
 enum Chip {
     Root(String),
+    Type(OriginType),
     Kind(KnowledgeFacet),
 }
 
 impl HarnessPane {
-    pub(super) fn doc_search(&self, section: HarnessSection) -> Option<&DocSearch> {
-        match section {
-            HarnessSection::Specs => Some(&self.spec_search),
-            HarnessSection::Knowledge => Some(&self.knowledge_search),
-            HarnessSection::Tasks | HarnessSection::Testing => None,
-        }
-    }
-
-    pub(super) fn doc_search_mut(&mut self, section: HarnessSection) -> Option<&mut DocSearch> {
-        match section {
-            HarnessSection::Specs => Some(&mut self.spec_search),
-            HarnessSection::Knowledge => Some(&mut self.knowledge_search),
-            HarnessSection::Tasks | HarnessSection::Testing => None,
-        }
-    }
-
-    /// Whether `section`'s island is narrowing it, which is when the sidebar
+    /// Whether the island is narrowing the Library, which is when the sidebar
     /// shows matches instead of its tree.
-    pub(super) fn doc_search_active(&self, section: HarnessSection) -> bool {
-        self.doc_search(section)
-            .is_some_and(|s| s.state.filter.is_active())
+    pub(super) fn doc_search_active(&self) -> bool {
+        self.search.state.filter.is_active()
     }
 
-    /// The roots a search covers, as `(key, name)` in sidebar order: the
+    /// The origins a search covers, as `(key, name)` in sidebar order: the
     /// usable ones, which are the ones the daemon reads.
-    pub(super) fn doc_search_roots(&self, section: HarnessSection) -> Vec<(String, String)> {
-        match section {
-            HarnessSection::Specs => self
-                .specs
-                .stores
-                .iter()
-                .flat_map(|s| &s.roots)
-                .filter(|r| r.healthy)
-                .map(|r| (r.key.clone(), r.name.clone()))
-                .collect(),
-            HarnessSection::Knowledge => self
-                .knowledge
-                .stores
-                .iter()
-                .flat_map(|s| &s.roots)
-                .filter(|r| r.healthy)
-                .map(|r| (r.key.clone(), r.name.clone()))
-                .collect(),
-            HarnessSection::Tasks | HarnessSection::Testing => Vec::new(),
-        }
+    pub(super) fn doc_search_roots(&self) -> Vec<(String, String)> {
+        self.library
+            .origins
+            .iter()
+            .flat_map(|o| &o.origins)
+            .filter(|o| o.healthy)
+            .map(|o| (o.key.clone(), o.name.clone()))
+            .collect()
+    }
+
+    /// The origin types a search can be narrowed to: those that have a usable
+    /// origin, in the order the sidebar groups them.
+    fn doc_search_types(&self) -> Vec<OriginType> {
+        OriginType::all()
+            .into_iter()
+            .filter(|t| {
+                self.library
+                    .origins
+                    .iter()
+                    .flat_map(|o| &o.origins)
+                    .any(|o| o.healthy && o.origin_type == *t)
+            })
+            .collect()
     }
 
     /// The filter changed: ask the daemon what it leaves, or go back to the
     /// tree when it leaves everything. `typing` waits for a pause first.
-    pub(super) fn run_doc_search(
-        &mut self,
-        section: HarnessSection,
-        typing: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(search) = self.doc_search_mut(section) else {
-            return;
-        };
-        let Some((generation, request)) = search.state.begin(section) else {
+    pub(super) fn run_doc_search(&mut self, typing: bool, cx: &mut Context<Self>) {
+        let Some((generation, request)) = self.search.state.begin() else {
             cx.notify();
             return;
         };
@@ -360,10 +327,8 @@ impl HarnessPane {
         cx.spawn(async move |this, cx| {
             if typing {
                 cx.background_executor().timer(SEARCH_DEBOUNCE).await;
-                let current = this.update(cx, |this, _| {
-                    this.doc_search(section)
-                        .is_some_and(|s| s.state.is_current(generation))
-                });
+                let current =
+                    this.update(cx, |this, _| this.search.state.is_current(generation));
                 if !matches!(current, Ok(true)) {
                     return;
                 }
@@ -372,20 +337,13 @@ impl HarnessPane {
                 let value = client
                     .post_action(request)?
                     .ok_or_else(|| "Missing search results".to_string())?;
-                match section {
-                    HarnessSection::Specs => serde_json::from_value::<SpecSearchResult>(value)
-                        .map(Found::from)
-                        .map_err(|e| format!("Unexpected search results: {e}")),
-                    _ => serde_json::from_value::<KnowledgeSearchResult>(value)
-                        .map(Found::from)
-                        .map_err(|e| format!("Unexpected search results: {e}")),
-                }
+                serde_json::from_value::<LibrarySearchResult>(value)
+                    .map(Found::from)
+                    .map_err(|e| format!("Unexpected search results: {e}"))
             })
             .await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(search) = this.doc_search_mut(section)
-                    && search.state.finish(generation, result)
-                {
+                if this.search.state.finish(generation, result) {
                     cx.notify();
                 }
             });
@@ -393,42 +351,33 @@ impl HarnessPane {
         .detach();
     }
 
-    /// The roots were listed again: forget chips for roots that have gone,
-    /// and search again if anything still narrows the page, since a refresh
-    /// is how files added, renamed or deleted get noticed.
-    pub(super) fn doc_search_refreshed(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        let roots = self.doc_search_roots(section);
+    /// The origins were listed again: forget chips for origins that have
+    /// gone, and search again if anything still narrows the page, since a
+    /// refresh is how files added, renamed or deleted get noticed.
+    pub(super) fn doc_search_refreshed(&mut self, cx: &mut Context<Self>) {
+        let roots = self.doc_search_roots();
         let known: Vec<&str> = roots.iter().map(|(key, _)| key.as_str()).collect();
-        let Some(search) = self.doc_search_mut(section) else {
-            return;
-        };
+        let search = &mut self.search;
         search.state.filter.prune(&known);
         if search.state.filter.is_active() || search.state.found.is_some() {
-            self.run_doc_search(section, false, cx);
+            self.run_doc_search(false, cx);
         }
     }
 
-    fn clear_doc_search(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        let Some(search) = self.doc_search_mut(section) else {
-            return;
-        };
-        search.state.filter.clear();
-        let input = search.input.clone();
+    pub(super) fn clear_doc_search(&mut self, cx: &mut Context<Self>) {
+        self.search.state.filter.clear();
+        let input = self.search.input.clone();
         // Emits a change, which runs the now empty search and so drops the
         // results; run it here too in case the box was already empty.
         input.update(cx, |input, cx| input.set_value("", cx));
-        self.run_doc_search(section, false, cx);
+        self.run_doc_search(false, cx);
     }
 
-    /// The Specs and Knowledge island: the search box, the Filters button,
-    /// then "N of M" and Clear while anything narrows the page. The button's
-    /// menu holds a chip per root and, on Knowledge, a chip per kind.
-    pub(super) fn render_doc_island(
-        &self,
-        section: HarnessSection,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let search = self.doc_search(section)?;
+    /// The Library island: the search box, the Filters button, then "N of M"
+    /// and Clear while anything narrows the page. The button's menu holds a
+    /// chip per origin, per origin type and per kind of knowledge file.
+    pub(super) fn render_doc_island(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let search = &self.search;
         let filter = &search.state.filter;
         let active = filter.is_active();
         let (shown, total) = search.state.shown_of_total();
@@ -447,7 +396,7 @@ impl HarnessPane {
             )
             .children(active.then(|| {
                 island_button("doc-search-clear", "Clear", cx).on_click(
-                    cx.listener(move |this, _, _window, cx| this.clear_doc_search(section, cx)),
+                    cx.listener(move |this, _, _window, cx| this.clear_doc_search(cx)),
                 )
             }))
             .child(self.island_close_button("docs-island-close", cx));
@@ -456,18 +405,18 @@ impl HarnessPane {
             let chip = |id: String, label: String, on: bool, chip: Chip, cx: &mut Context<Self>| {
                 island_chip(SharedString::from(id), label, on, cx).on_click(cx.listener(
                     move |this, _, _window, cx| {
-                        if let Some(search) = this.doc_search_mut(section) {
-                            match &chip {
-                                Chip::Root(key) => search.state.filter.toggle_root(key),
-                                Chip::Kind(kind) => search.state.filter.toggle_kind(*kind),
-                            }
+                        let filter = &mut this.search.state.filter;
+                        match &chip {
+                            Chip::Root(key) => filter.toggle_root(key),
+                            Chip::Type(origin_type) => filter.toggle_type(*origin_type),
+                            Chip::Kind(kind) => filter.toggle_kind(*kind),
                         }
-                        this.run_doc_search(section, false, cx);
+                        this.run_doc_search(false, cx);
                     },
                 ))
             };
             let roots: Vec<_> = self
-                .doc_search_roots(section)
+                .doc_search_roots()
                 .into_iter()
                 .map(|(key, name)| {
                     let on = filter.root_selected(&key);
@@ -481,8 +430,27 @@ impl HarnessPane {
                 })
                 .collect();
             let mut menu =
-                island_menu("docs-island-menu", cx).child(island_menu_group("Root", roots, cx));
-            if section == HarnessSection::Knowledge {
+                island_menu("docs-island-menu", cx).child(island_menu_group("Origin", roots, cx));
+            let types = self.doc_search_types();
+            // One type on offer is not a choice.
+            if types.len() > 1 {
+                let chips: Vec<_> = types
+                    .iter()
+                    .map(|origin_type| {
+                        chip(
+                            format!("doc-search-type-{}", origin_type.slug()),
+                            origin_type.label().to_string(),
+                            filter.type_selected(*origin_type),
+                            Chip::Type(*origin_type),
+                            cx,
+                        )
+                    })
+                    .collect();
+                menu = menu.child(island_menu_group("Type", chips, cx));
+            }
+            // A kind is what a knowledge file is, so the chips are offered
+            // only where there is knowledge to narrow.
+            if types.contains(&OriginType::Knowledge) {
                 let kinds: Vec<_> = KnowledgeFacet::all()
                     .into_iter()
                     .map(|kind| {
@@ -504,18 +472,12 @@ impl HarnessPane {
     }
 
     /// The sidebar while the island narrows the page: every match, under the
-    /// root it is in. Stands where the tree stands, and gives way to it again
+    /// origin it is in. Stands where the tree stands, and gives way to it again
     /// once the search and filters are cleared.
-    pub(super) fn render_doc_results(
-        &self,
-        section: HarnessSection,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn render_doc_results(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let mut col = self.file_sidebar_column("doc-search-results");
-        let Some(search) = self.doc_search(section) else {
-            return col.into_any_element();
-        };
+        let search = &self.search;
         let note = |text: String| {
             div()
                 .px(px(6.0))
@@ -557,23 +519,17 @@ impl HarnessPane {
                     .hover(|s| s.underline())
                     .child("Clear")
                     .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.clear_doc_search(section, cx);
+                        this.clear_doc_search(cx);
                     })),
             );
             return col.into_any_element();
         }
 
-        let (open_root, open_path) = match section {
-            HarnessSection::Specs => (
-                self.specs.root_key.as_deref(),
-                self.specs.selected.as_deref(),
-            ),
-            _ => (
-                self.knowledge.root_key.as_deref(),
-                self.knowledge.selected.as_deref(),
-            ),
-        };
-        for (root_name, hits) in group_hits(&found.hits, &self.doc_search_roots(section)) {
+        let (open_root, open_path) = (
+            self.library.root_key.as_deref(),
+            self.library.selected.as_deref(),
+        );
+        for (root_name, hits) in group_hits(&found.hits, &self.doc_search_roots()) {
             col = col.child(self.section_label(&root_name, cx));
             for hit in hits {
                 let selected = open_root == Some(hit.root_key.as_str())
@@ -622,12 +578,7 @@ impl HarnessPane {
                             if this.roots.open {
                                 this.close_roots_page(cx);
                             }
-                            match section {
-                                HarnessSection::Specs => {
-                                    this.open_spec_doc_in(root_key.clone(), path.clone(), cx)
-                                }
-                                _ => this.open_knowledge_doc(root_key.clone(), path.clone(), cx),
-                            }
+                            this.open_library_doc(root_key.clone(), path.clone(), cx);
                         })),
                 );
             }
@@ -644,6 +595,7 @@ mod tests {
     use crate::views::harness::HarnessSection;
     use okena_core::api::ActionRequest;
     use okena_core::doc_search::KnowledgeFacet;
+    use okena_core::library::OriginType;
 
     fn hit(root: &str, path: &str) -> Hit {
         Hit {
@@ -665,45 +617,52 @@ mod tests {
     fn nothing_selected_and_blank_text_asks_nothing() {
         let mut f = DocFilter::default();
         assert!(!f.is_active());
-        assert!(f.request(HarnessSection::Knowledge).is_none());
+        assert!(f.request().is_none());
         f.set_query("   ");
         assert!(!f.is_active(), "blank text is not a search");
-        assert!(f.request(HarnessSection::Specs).is_none());
+        assert!(f.request().is_none());
     }
 
     #[test]
-    fn a_knowledge_request_carries_trimmed_text_roots_and_kinds() {
+    fn a_request_carries_trimmed_text_origins_types_and_kinds() {
         let mut f = DocFilter::default();
         f.set_query("  Smoke ");
-        f.toggle_root("store:acme");
+        f.toggle_root("knowledge:store:acme");
+        f.toggle_type(OriginType::Knowledge);
         f.toggle_kind(KnowledgeFacet::Partial);
         f.toggle_kind(KnowledgeFacet::Brief);
-        let Some(ActionRequest::KnowledgeSearch {
+        let Some(ActionRequest::LibrarySearch {
             query,
             roots,
+            types,
             kinds,
-        }) = f.request(HarnessSection::Knowledge)
+        }) = f.request()
         else {
-            panic!("expected a knowledge search");
+            panic!("expected a library search");
         };
         assert_eq!(query, "Smoke");
-        assert_eq!(roots, ["store:acme"]);
+        assert_eq!(roots, ["knowledge:store:acme"]);
+        assert_eq!(types, [OriginType::Knowledge]);
         assert_eq!(kinds, [KnowledgeFacet::Partial, KnowledgeFacet::Brief]);
     }
 
     #[test]
-    fn a_spec_request_carries_text_and_roots_and_a_root_alone_is_a_search() {
+    fn an_origin_or_a_type_alone_is_a_search() {
         let mut f = DocFilter::default();
-        f.toggle_root("path:/repo");
-        assert!(f.is_active(), "choosing a root narrows without any text");
-        let Some(ActionRequest::SpecSearch { query, roots }) = f.request(HarnessSection::Specs)
-        else {
-            panic!("expected a spec search");
+        f.toggle_root("spec:path:/repo");
+        assert!(f.is_active(), "choosing an origin narrows without any text");
+        let Some(ActionRequest::LibrarySearch { query, roots, .. }) = f.request() else {
+            panic!("expected a library search");
         };
         assert_eq!(query, "");
-        assert_eq!(roots, ["path:/repo"]);
-        // Pages with no document search ask nothing.
-        assert!(f.request(HarnessSection::Tasks).is_none());
+        assert_eq!(roots, ["spec:path:/repo"]);
+
+        let mut by_type = DocFilter::default();
+        by_type.toggle_type(OriginType::Freeform);
+        assert!(by_type.is_active() && by_type.type_selected(OriginType::Freeform));
+        assert_eq!(by_type.selected_count(), 1);
+        by_type.toggle_type(OriginType::Freeform);
+        assert!(!by_type.is_active());
     }
 
     #[test]
@@ -741,9 +700,9 @@ mod tests {
     fn an_answer_to_an_older_question_is_dropped() {
         let mut s = DocSearchState::default();
         s.filter.set_query("a");
-        let (first, _) = s.begin(HarnessSection::Specs).expect("a search");
+        let (first, _) = s.begin().expect("a search");
         s.filter.set_query("ab");
-        let (second, _) = s.begin(HarnessSection::Specs).expect("a search");
+        let (second, _) = s.begin().expect("a search");
 
         // The newer answer lands first; the older one must not replace it.
         assert!(s.finish(second, Ok(found(&[("r", "ab.md")], 5))));
@@ -755,14 +714,14 @@ mod tests {
     fn clearing_drops_the_results_and_any_answer_still_on_its_way() {
         let mut s = DocSearchState::default();
         s.filter.set_query("a");
-        let (asked, _) = s.begin(HarnessSection::Knowledge).expect("a search");
+        let (asked, _) = s.begin().expect("a search");
         assert!(s.finish(asked, Ok(found(&[("r", "a.md")], 3))));
         assert!(s.found.is_some());
 
         s.filter.set_query("b");
-        let (late, _) = s.begin(HarnessSection::Knowledge).expect("a search");
+        let (late, _) = s.begin().expect("a search");
         s.filter.clear();
-        assert!(s.begin(HarnessSection::Knowledge).is_none());
+        assert!(s.begin().is_none());
         assert!(s.found.is_none(), "cleared: the tree comes back");
         assert!(!s.finish(late, Ok(found(&[("r", "b.md")], 3))));
         assert!(s.found.is_none());
@@ -772,15 +731,15 @@ mod tests {
     fn a_failed_search_keeps_the_last_results_and_says_so() {
         let mut s = DocSearchState::default();
         s.filter.set_query("a");
-        let (g, _) = s.begin(HarnessSection::Specs).expect("a search");
+        let (g, _) = s.begin().expect("a search");
         s.finish(g, Ok(found(&[("r", "a.md")], 3)));
         s.filter.set_query("ab");
-        let (g, _) = s.begin(HarnessSection::Specs).expect("a search");
+        let (g, _) = s.begin().expect("a search");
         assert!(s.finish(g, Err("daemon unreachable".into())));
         assert_eq!(s.error.as_deref(), Some("daemon unreachable"));
         assert_eq!(s.shown_of_total(), (1, 3));
         // Asking again clears the complaint.
-        s.begin(HarnessSection::Specs);
+        s.begin();
         assert!(s.error.is_none());
     }
 
@@ -818,45 +777,53 @@ mod tests {
     use super::super::island::tests::pane_in_window;
     use gpui::TestAppContext;
 
-    fn knowledge_roots(keys: &[&str]) -> okena_core::knowledge::KnowledgeStores {
-        let roots: Vec<serde_json::Value> = keys
+    fn origins(keys: &[&str]) -> okena_core::library::LibraryOrigins {
+        let origins: Vec<serde_json::Value> = keys
             .iter()
             .map(|key| {
+                let origin_type = key.split(':').next().unwrap_or("knowledge");
                 serde_json::json!({
-                    "key": key, "kind": "store", "name": key, "path": format!("/{key}"),
-                    "healthy": true,
+                    "key": key, "type": origin_type, "kind": "store", "name": key,
+                    "path": format!("/{key}"), "healthy": true,
                 })
             })
             .collect();
-        serde_json::from_value(serde_json::json!({ "registry_path": "", "roots": roots }))
-            .expect("knowledge stores")
+        serde_json::from_value(serde_json::json!({ "origins": origins })).expect("library origins")
     }
 
     #[gpui::test]
     fn the_island_appears_with_the_roots_and_takes_the_cursor(cx: &mut TestAppContext) {
-        let (pane, _, cx) = pane_in_window(HarnessSection::Knowledge, cx);
+        let (pane, _, cx) = pane_in_window(HarnessSection::Library, cx);
         cx.update(|window, cx| {
             pane.update(cx, |p, cx| {
                 // Nothing listed yet: no island, and the key is let through.
                 assert!(!p.focus_island_search(window, cx));
 
-                p.knowledge.stores = Some(knowledge_roots(&["store:eng", "store:ops"]));
+                p.library.origins = Some(origins(&["knowledge:store:eng", "spec:store:ops"]));
                 p.set_island_open(false, window, cx);
                 assert!(p.focus_island_search(window, cx));
                 assert!(p.island_open, "a closed island is shown first");
                 assert!(
-                    p.knowledge_search
+                    p.search
                         .input
                         .read(cx)
                         .focus_handle(cx)
                         .is_focused(window)
                 );
+                // One search over every type of origin.
                 assert_eq!(
-                    p.doc_search_roots(HarnessSection::Knowledge),
+                    p.doc_search_roots(),
                     [
-                        ("store:eng".to_string(), "store:eng".to_string()),
-                        ("store:ops".to_string(), "store:ops".to_string()),
+                        (
+                            "knowledge:store:eng".to_string(),
+                            "knowledge:store:eng".to_string()
+                        ),
+                        ("spec:store:ops".to_string(), "spec:store:ops".to_string()),
                     ]
+                );
+                assert_eq!(
+                    p.doc_search_types(),
+                    [OriginType::Knowledge, OriginType::Spec]
                 );
             });
         });
@@ -864,55 +831,55 @@ mod tests {
 
     #[gpui::test]
     fn typing_swaps_the_tree_for_results_and_escape_brings_it_back(cx: &mut TestAppContext) {
-        let (pane, window_focus, cx) = pane_in_window(HarnessSection::Knowledge, cx);
+        let (pane, window_focus, cx) = pane_in_window(HarnessSection::Library, cx);
         cx.update(|window, cx| {
             pane.update(cx, |p, cx| {
-                p.knowledge.stores = Some(knowledge_roots(&["store:eng"]));
+                p.library.origins = Some(origins(&["knowledge:store:eng"]));
                 p.files.open = false;
                 p.focus_island_search(window, cx);
-                p.knowledge_search
+                p.search
                     .input
                     .update(cx, |i, cx| i.set_value("zeppelin", cx));
             });
         });
         cx.update(|window, cx| {
             pane.update(cx, |p, cx| {
-                assert!(p.doc_search_active(HarnessSection::Knowledge));
+                assert!(p.doc_search_active());
                 assert!(p.files.open, "the matches are listed in the sidebar");
 
                 // Esc: the text goes, focus goes back to the window.
                 p.cancel_island_search(window, cx);
-                assert_eq!(p.knowledge_search.input.read(cx).value(), "");
+                assert_eq!(p.search.input.read(cx).value(), "");
                 assert!(window_focus.is_focused(window));
             });
         });
         pane.update(cx, |p, _| {
-            assert!(!p.doc_search_active(HarnessSection::Knowledge));
-            assert!(p.knowledge_search.state.found.is_none(), "the tree is back");
+            assert!(!p.doc_search_active());
+            assert!(p.search.state.found.is_none(), "the tree is back");
         });
     }
 
     #[gpui::test]
     fn a_chip_narrows_without_text_and_clear_brings_the_tree_back(cx: &mut TestAppContext) {
-        let (pane, _, cx) = pane_in_window(HarnessSection::Knowledge, cx);
+        let (pane, _, cx) = pane_in_window(HarnessSection::Library, cx);
         pane.update(cx, |p, cx| {
-            p.knowledge.stores = Some(knowledge_roots(&["store:eng", "store:gone"]));
-            let filter = &mut p.knowledge_search.state.filter;
+            p.library.origins = Some(origins(&["knowledge:store:eng", "knowledge:store:gone"]));
+            let filter = &mut p.search.state.filter;
             filter.toggle_kind(KnowledgeFacet::Partial);
-            filter.toggle_root("store:gone");
-            p.run_doc_search(HarnessSection::Knowledge, false, cx);
-            assert!(p.doc_search_active(HarnessSection::Knowledge));
+            filter.toggle_root("knowledge:store:gone");
+            p.run_doc_search(false, cx);
+            assert!(p.doc_search_active());
 
             // The roots are listed again without the one that was chosen.
-            p.knowledge.stores = Some(knowledge_roots(&["store:eng"]));
-            p.doc_search_refreshed(HarnessSection::Knowledge, cx);
-            let filter = &p.knowledge_search.state.filter;
-            assert!(!filter.root_selected("store:gone"));
+            p.library.origins = Some(origins(&["knowledge:store:eng"]));
+            p.doc_search_refreshed(cx);
+            let filter = &p.search.state.filter;
+            assert!(!filter.root_selected("knowledge:store:gone"));
             assert!(filter.kind_selected(KnowledgeFacet::Partial));
 
-            p.clear_doc_search(HarnessSection::Knowledge, cx);
-            assert!(!p.doc_search_active(HarnessSection::Knowledge));
-            assert!(p.knowledge_search.state.found.is_none());
+            p.clear_doc_search(cx);
+            assert!(!p.doc_search_active());
+            assert!(p.search.state.found.is_none());
         });
     }
 }

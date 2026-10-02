@@ -22,7 +22,13 @@ pub fn read_project_map(path: Option<&str>, project_id: &str) -> ActionResult {
         return ActionResult::Err(format!("project not found: {project_id}"));
     };
     let repo = okena_core::fs::expand_home(path);
-    let report = okena_knowledge::project_map::report_for_repo(&repo);
+    let mut report = okena_knowledge::project_map::report_for_repo(&repo);
+    // The map's docs are opened in the Library, so the root is named by the
+    // key the Library lists it under: a project's knowledge folder is a
+    // knowledge origin.
+    if let Some(key) = report.root_key.as_mut() {
+        *key = okena_core::library::upgrade_key(okena_core::library::OriginType::Knowledge, key);
+    }
     ActionResult::Ok(Some(
         serde_json::to_value(report).expect("BUG: a project map report must serialize"),
     ))
@@ -387,7 +393,7 @@ mod tests {
         match read_project_map(repo.to_str(), "p") {
             ActionResult::Ok(Some(v)) => assert_eq!(
                 v["root_key"],
-                format!("path:{}", repo.join(".okena/knowledge").display())
+                format!("knowledge:path:{}", repo.join(".okena/knowledge").display())
             ),
             _ => panic!("expected a report"),
         }

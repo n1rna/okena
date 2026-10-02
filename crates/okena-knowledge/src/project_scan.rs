@@ -93,7 +93,7 @@ pub fn plan(repo: &Path) -> Result<ScanPlan, KnowledgeError> {
 
 /// Where `repo`'s map goes: its knowledge root, whether or not that exists yet.
 ///
-/// The same root discovery lists, so the map shows up in Harness → Knowledge
+/// The same root discovery lists, so the map shows up in Harness → Library
 /// once written.
 pub fn map_root(repo: &Path) -> Result<PathBuf, KnowledgeError> {
     let config = project::read_config(repo)?;

@@ -1,13 +1,15 @@
 //! Which roots hold context, who owns them and which projects follow them.
 //!
-//! Built from what okena already discovers — the workspace's projects, the
-//! knowledge stores and the OpenSpec roots — so the launcher searches exactly
-//! the roots the Specs and Knowledge sections show. Holds no file contents:
+//! Built from what okena already discovers — the workspace's projects and the
+//! Library's origins: knowledge stores, OpenSpec roots and freeform folders —
+//! so the launcher searches exactly the origins the Library shows. Holds no
+//! file contents:
 //! [`Catalog::items`] reads a root when asked, and the index caches that.
 
 use crate::items::{self, MapItems, Owner};
 use okena_core::context::{ContextItem, ContextKind, ContextOwner, ContextRef};
 use okena_core::knowledge::{KnowledgeRootKind, KnowledgeStores};
+use okena_core::library::LibraryOrigin;
 use okena_core::project_map::MapStatus;
 use okena_core::specs::{SpecRootKind, SpecStores};
 use std::collections::BTreeSet;
@@ -29,6 +31,8 @@ pub enum RootKind {
     Map,
     Spec,
     Knowledge,
+    /// A freeform Library origin: a folder of markdown, read as documents.
+    Freeform,
 }
 
 impl RootKind {
@@ -38,6 +42,7 @@ impl RootKind {
             RootKind::Map => kind == ContextKind::MapEntry,
             RootKind::Spec => kind == ContextKind::Spec,
             RootKind::Knowledge => kind.is_installable() || kind == ContextKind::Doc,
+            RootKind::Freeform => kind == ContextKind::Doc,
         }
     }
 }
@@ -60,12 +65,18 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Every root: one map root per project, then every healthy knowledge and
-    /// spec root discovery found.
+    /// Every root: one map root per project, then every healthy knowledge
+    /// root, spec root and freeform origin discovery found.
+    ///
+    /// The stores' keys are whatever discovery was asked to give them. The
+    /// daemon passes them under their Library keys, which carry the origin's
+    /// type, so a knowledge store and an OpenSpec store sharing an id are two
+    /// owners here as they are two origins there.
     pub fn build(
         projects: Vec<CatalogProject>,
         knowledge: &KnowledgeStores,
         specs: &SpecStores,
+        freeform: &[LibraryOrigin],
     ) -> Self {
         let mut roots = Vec::new();
         for project in &projects {
@@ -108,6 +119,19 @@ impl Catalog {
                 &projects,
             ));
         }
+        for origin in freeform.iter().filter(|o| o.healthy) {
+            // A folder belongs to no project and nothing follows it: it is
+            // context for whoever picks it.
+            roots.push(catalog_root(
+                RootKind::Freeform,
+                None,
+                &origin.key,
+                &origin.name,
+                PathBuf::from(&origin.path),
+                &[],
+                &projects,
+            ));
+        }
         Catalog { projects, roots }
     }
 
@@ -146,6 +170,7 @@ impl Catalog {
             (_, None) => (Vec::new(), None),
             (RootKind::Spec, Some(path)) => (items::spec_items(&root.owner, path), None),
             (RootKind::Knowledge, Some(path)) => (items::knowledge_items(&root.owner, path), None),
+            (RootKind::Freeform, Some(path)) => (items::freeform_items(&root.owner, path), None),
         }
     }
 
@@ -189,7 +214,7 @@ fn scope_base(root: &CatalogRoot) -> Option<PathBuf> {
     let path = root.path.as_ref()?;
     Some(match root.kind {
         RootKind::Spec => path.join(okena_openspec::root::OPENSPEC_DIR),
-        RootKind::Map | RootKind::Knowledge => path.clone(),
+        RootKind::Map | RootKind::Knowledge | RootKind::Freeform => path.clone(),
     })
 }
 
@@ -264,7 +289,8 @@ pub(crate) mod tests {
     use okena_core::specs::SpecRoot;
 
     /// Two mapped projects `shop` and `billing`, a knowledge store `acme`
-    /// followed by `shop`, and a spec root inside `billing`.
+    /// followed by `shop`, a spec root inside `billing`, and a freeform
+    /// folder `notes` nobody follows.
     pub struct World {
         pub dir: tempfile::TempDir,
         pub catalog: Catalog,
@@ -338,8 +364,11 @@ pub(crate) mod tests {
             roots: vec![billing_specs],
             ..Default::default()
         };
+        let notes = base.join("notes");
+        freeform_folder(&notes);
+        let freeform = [LibraryOrigin::freeform("notes", notes.to_string_lossy())];
         World {
-            catalog: Catalog::build(projects, &knowledge, &specs),
+            catalog: Catalog::build(projects, &knowledge, &specs, &freeform),
             dir,
         }
     }
@@ -365,6 +394,52 @@ pub(crate) mod tests {
         assert_eq!(specs.owner.owner, ContextOwner::project("p-billing"));
         assert!(Catalog::is_chosen(specs, &["p-billing".into()]));
         assert!(!Catalog::is_chosen(specs, &["p-shop".into()]));
+    }
+
+    #[test]
+    fn a_freeform_folder_is_a_root_of_documents_owned_by_its_key() {
+        let w = world();
+        let base = w.dir.path().canonicalize().unwrap();
+        let notes = w
+            .catalog
+            .roots
+            .iter()
+            .find(|r| r.kind == RootKind::Freeform)
+            .expect("the folder is a root");
+        let key = format!("freeform:path:{}", base.join("notes").display());
+        assert_eq!(notes.owner.owner, ContextOwner::store(&key));
+        assert!(notes.projects.is_empty(), "nothing follows a folder");
+
+        let (items, status) = Catalog::items(notes);
+        assert!(status.is_none());
+        let listed: Vec<_> = items
+            .iter()
+            .map(|i| (i.reference.kind, i.reference.locator.as_str(), i.title.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (ContextKind::Doc, "adr/0001-two-processes.md", "Two processes"),
+                (ContextKind::Doc, "workflows/release.md", "Cutting a release"),
+            ]
+        );
+        assert_eq!(items[1].description, "Tag, then publish.");
+
+        // A ref a client sends back resolves to the same document again, and
+        // one pointing out of the folder does not.
+        let picked = ContextRef {
+            kind: ContextKind::Doc,
+            owner: ContextOwner::store(&key),
+            locator: "workflows/release.md".into(),
+        };
+        let escape = ContextRef {
+            locator: "../acme/docs/principles.md".into(),
+            ..picked.clone()
+        };
+        let got = w.catalog.resolve(&[picked.clone(), escape]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].reference, picked);
+        assert!(got[0].path.ends_with("notes/workflows/release.md"));
     }
 
     #[test]

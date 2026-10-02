@@ -82,8 +82,8 @@ pub struct StateResponse {
 
 /// One space on the wire.
 ///
-/// Only what a client draws or needs to route by. A space's Specs and
-/// Knowledge roots and its task filters are settings, and clients read those
+/// Only what a client draws or needs to route by. A space's Library origins
+/// and its task filters are settings, and clients read those
 /// through `GetSettings` like every other setting — repeating them in every
 /// state snapshot would put a kilobyte of config on the PTY hot path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,7 +516,7 @@ pub struct ApiProject {
     /// means the same thing on either side, so it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_change: Option<String>,
-    /// The knowledge root a knowledge session is writing into, by key. Like
+    /// The knowledge origin a knowledge session is writing into, by key. Like
     /// `spec_change`, it names a thing both sides discover for themselves, so
     /// it crosses unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1836,197 +1836,287 @@ pub enum ActionRequest {
         #[serde(default)]
         vars: std::collections::BTreeMap<String, String>,
     },
-    // ─── Engineering harness: OpenSpec ────────────────────────────────────
+    // ─── Engineering harness: Library ─────────────────────────────────────
     //
-    // okena follows OpenSpec's store model (https://openspec.dev/docs/stores):
-    // roots come from the machine store registry, from projects holding their
-    // own `openspec/` tree or a `store:` pointer, and from folders in
-    // settings. The daemon reads and writes those files itself
-    // (`okena-openspec`), so nothing here needs the `openspec` CLI installed,
-    // and whatever okena writes the CLI reads back.
-    /// Every OpenSpec root okena can see, with health, references, pointers,
-    /// sync state on each store and folder checkout, and the machine
-    /// `defaultStore` — an `okena_core::specs::SpecStores`.
-    SpecStores,
-    /// One root's planning tree: capabilities, active changes and the archive.
+    // Knowledge stores (ADR-0003), OpenSpec roots (https://openspec.dev/docs/stores)
+    // and freeform folders of markdown are one set of typed origins
+    // (`okena_core::library`, QBL-440), so there is one set of actions over
+    // them. `root` is always an origin's Library key, which carries its type
+    // (`knowledge:store:eng`, `spec:path:/work/app`, `freeform:path:/notes`);
+    // the daemon refuses keys it did not discover itself, so a key cannot name
+    // an arbitrary directory. Where an action only makes sense for one type —
+    // overrides for knowledge, `defaultStore` for spec — the others are
+    // refused with the reason.
+    //
+    // The daemon reads and writes the files itself (`okena-knowledge`,
+    // `okena-openspec`), so nothing here needs the `openspec` CLI installed,
+    // and whatever okena writes in a spec origin the CLI reads back. None of
+    // these touch the workspace except the two that start an agent session,
+    // so the daemon runs the rest off its lock.
+    /// Every origin the active space reads, of every type, with health, sync
+    /// state, project pointers, and OpenSpec's machine `defaultStore` — an
+    /// `okena_core::library::LibraryOrigins`.
+    LibraryOrigins,
+    /// What one origin holds — an `okena_core::library::LibraryTree`, in its
+    /// type's shape: a knowledge origin's entries, a spec origin's
+    /// capabilities, changes and archive, a freeform origin's documents.
     ///
-    /// `root` is a key from `SpecStores`; `None` opens the default root. The
-    /// daemon refuses keys it did not discover itself, so a key cannot name an
-    /// arbitrary directory.
-    SpecsTree {
+    /// `None` opens the default origin.
+    LibraryTree {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
     },
-    /// Read one document from a root.
+    /// Read one file from an origin — an `okena_core::library::LibraryDocument`.
     ///
-    /// `path` is relative to the root, as returned by `SpecsTree`. The daemon
-    /// refuses any path that resolves outside the root, so a compromised or
-    /// buggy client cannot use this to read arbitrary files.
-    SpecRead {
+    /// `path` is relative to the origin, as `LibraryTree` returns it. The
+    /// daemon refuses any path that resolves outside the origin, so a
+    /// compromised or buggy client cannot use this to read arbitrary files.
+    LibraryRead {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         path: String,
     },
-    /// Search every root's documents by name, path and content — a
-    /// `SpecSearchResult`.
+    /// Search every origin's files by name, path and content — an
+    /// `okena_core::library::LibrarySearchResult`.
     ///
-    /// `roots` are keys from `SpecStores`; empty is every root, and a key the
-    /// daemon did not discover matches nothing
-    /// (`okena_core::doc_search::spec_matches`).
-    SpecSearch {
+    /// `roots` are origin keys, `types` origin types and `kinds` what a
+    /// knowledge file is; any left empty is no opinion. Values OR within a
+    /// group and the groups AND with each other and the text
+    /// (`okena_core::doc_search::library_matches`). A key the daemon did not
+    /// discover matches nothing.
+    LibrarySearch {
         #[serde(default)]
         query: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         roots: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        types: Vec<crate::library::OriginType>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        kinds: Vec<crate::doc_search::KnowledgeFacet>,
     },
-    /// Replace one existing document in a root. Replies with the new
+    /// Replace one existing file in an origin. Replies with the new
     /// `revision`.
     ///
-    /// `path` is checked exactly as `SpecRead` checks it, so a write can no
-    /// more land outside a root than a read can leave one. `revision` is the
-    /// one `SpecRead` returned: when the file has changed since, the write is
-    /// refused and nothing is written, so an agent editing the same file is
+    /// `path` is checked exactly as `LibraryRead` checks it, so a write can no
+    /// more land outside an origin than a read can leave one. `revision` is
+    /// the one the read returned: when the file has changed since, the write
+    /// is refused and nothing is written, so an agent editing the same file is
     /// never clobbered by a stale buffer.
-    SpecWrite {
+    LibraryWrite {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         path: String,
         content: String,
         revision: String,
     },
-    /// Create a new file in a root holding `content`. Replies with its
+    /// Create a new file in an origin holding `content`. Replies with its
     /// normalized `path` and its `revision`.
     ///
     /// `path` must be a plain relative path — no `..`, no absolute path, no
-    /// hidden names — whose existing folders resolve inside the root, the way
-    /// `SpecRead` resolves a document. A file already there is refused, never
-    /// replaced; the folders it needs are created.
-    SpecFileCreate {
+    /// hidden names — whose existing folders resolve inside the origin, the
+    /// way `LibraryRead` resolves a file. A file already there is refused,
+    /// never replaced; the folders it needs are created.
+    LibraryFileCreate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         path: String,
         #[serde(default)]
         content: String,
     },
-    /// Create a folder in a root — a change directory under
-    /// `openspec/changes/`, mostly. Checked like `SpecFileCreate`; anything
+    /// Create a folder in an origin — a change directory under
+    /// `openspec/changes/`, mostly. Checked like `LibraryFileCreate`; anything
     /// already at `path` is refused. Replies with the normalized `path`.
-    SpecFolderCreate {
+    LibraryFolderCreate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         path: String,
     },
-    /// Move one file within a root. `from` is checked as `SpecRead` checks a
-    /// path and `to` as `SpecFileCreate` does, so anything at `to` is refused.
-    /// Replies with the normalized `path` it now has.
-    SpecFileRename {
+    /// Move one file within an origin. `from` is checked as `LibraryRead`
+    /// checks a path and `to` as `LibraryFileCreate` does, so anything at `to`
+    /// is refused. Replies with the normalized `path` it now has.
+    LibraryFileRename {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         from: String,
         to: String,
     },
-    /// Delete one file in a root, checked as `SpecRead` checks a path. Folders
-    /// are refused, so this never removes more than the file named.
-    SpecFileDelete {
+    /// Delete one file in an origin, checked as `LibraryRead` checks a path.
+    /// Folders are refused, so this never removes more than the file named.
+    LibraryFileDelete {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
         path: String,
     },
-    /// Register an existing store checkout in OpenSpec's machine registry —
-    /// `openspec store register <path> [--id <id>] --yes`. A root without
-    /// `.openspec-store/store.yaml` becomes a store named `id`, else its
-    /// folder name.
-    /// Clone an OpenSpec store repository and register the checkout.
+    /// Which knowledge origins hold `path`, and which one a launch would
+    /// actually use.
     ///
-    /// The Knowledge counterpart is `KnowledgeStoreClone`; both sections offer
-    /// the same three ways to add a root (QBL-415).
-    SpecStoreClone {
+    /// Asked about a file in okena's read-only `okena-defaults` store, to show
+    /// whether something already overrides it and to offer somewhere to put a
+    /// copy. Replies with `{ path, layered, winner, roots: [{ key, name, kind,
+    /// has }] }` in resolution order — every healthy knowledge origin except
+    /// okena's own. `layered` is false for a path nothing overrides (a doc, an
+    /// agent, the README), where the question does not apply. Spec and
+    /// freeform origins never appear: they do not layer.
+    LibraryOverrides {
+        path: String,
+    },
+    /// Which knowledge origins hold a copy of each layered file, and which
+    /// copy is applied.
+    ///
+    /// The whole picture at once rather than one file at a time, because both
+    /// things that need it need it for a list: a template's detail page names
+    /// every origin holding a copy, and the sidebar marks each template that
+    /// has an override (QBL-426). Replies with `{ roots: [{ key, name, kind,
+    /// builtin }], paths: { "<path in an origin>": { copies: [key…], applied }
+    /// } }`. `roots` is layering order — every healthy knowledge origin,
+    /// okena's own last, since it is not a layer but the compiled-in fallback
+    /// made readable. `copies` are the origins where the file exists, in that
+    /// order, and `applied` is the first one a launch would actually read,
+    /// which is not the first copy when an earlier one is empty.
+    LibraryLayering,
+    /// Copy a file from okena's defaults into the knowledge origin `root`, at
+    /// the same path.
+    ///
+    /// How a default is changed: the copy is yours to edit, and resolution
+    /// prefers it. An existing file is never overwritten — it is opened
+    /// instead, and the reply says which happened with `created`. Replies with
+    /// `{ root, path, revision, created }`. An origin of another type is
+    /// refused: only knowledge origins layer.
+    LibraryOverride {
+        /// Knowledge origin to put the copy in. Never okena's own store.
+        root: String,
+        /// File path relative to the defaults store, as `LibraryTree` gives
+        /// it. The copy goes at the same path in `root`.
+        path: String,
+    },
+    /// Clone a repository and add the checkout as an origin of `origin_type`:
+    /// registered in okena's knowledge registry, in OpenSpec's machine
+    /// registry (`openspec store register`), or listed in the space's
+    /// freeform folders.
+    LibraryStoreClone {
+        #[serde(rename = "type")]
+        origin_type: crate::library::OriginType,
         url: String,
-        /// Destination folder. `None` clones into `harness.specs.clone_dir`,
-        /// named the way `git clone` would.
+        /// Destination folder. `None` clones into the type's `clone_dir` in
+        /// the space's `library` setting, named the way `git clone` would.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
-    SpecStoreRegister {
+    /// Add an existing folder as an origin of `origin_type`.
+    ///
+    /// A knowledge checkout's id is its committed identity, else its folder
+    /// name. A spec root without `.openspec-store/store.yaml` becomes a store
+    /// named `id`, else its folder name — `openspec store register <path>
+    /// [--id <id>] --yes`. A freeform folder has no id.
+    LibraryStoreRegister {
+        #[serde(rename = "type")]
+        origin_type: crate::library::OriginType,
         path: String,
+        /// Spec only: the store id to give a root that has none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
-    /// Forget a registered store — `openspec store unregister <id>`. The
-    /// checkout stays on disk.
-    SpecStoreUnregister {
-        id: String,
+    /// Take an origin off the list. The folder stays on disk.
+    ///
+    /// A store is forgotten by its registry — okena's for knowledge,
+    /// OpenSpec's for spec (`openspec store unregister <id>`). A folder is
+    /// dropped from the space's settings. A project's origin cannot be
+    /// removed here: it belongs to its repository.
+    LibraryStoreUnregister {
+        /// The origin's Library key.
+        root: String,
     },
-    /// Create and register a new store — `openspec store setup <id> --path
-    /// <path> [--remote <url>]` — with one initial commit when `init_git`.
-    SpecStoreSetup {
+    /// Create a new origin of `origin_type` at `path`, with one initial commit
+    /// when `init_git`, and add it as `LibraryStoreRegister` would.
+    ///
+    /// For spec this is `openspec store setup <id> --path <path> [--remote
+    /// <url>]`.
+    LibraryStoreSetup {
+        #[serde(rename = "type")]
+        origin_type: crate::library::OriginType,
+        /// The store id. Freeform has none; it is used as the folder's title.
         id: String,
         path: String,
-        /// Canonical clone source, recorded in the store's identity.
+        /// Knowledge only: the store's display name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Knowledge only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        /// Canonical clone source, recorded in a store's identity.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remote: Option<String>,
         #[serde(default = "crate::specs::default_init_git")]
         init_git: bool,
     },
     /// Set or clear OpenSpec's machine-wide `defaultStore` — `openspec config
-    /// set|unset defaultStore`.
-    SpecSetDefaultStore {
+    /// set|unset defaultStore`. Spec origins only; `id` is the store id.
+    LibrarySetDefaultStore {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
-    /// `git fetch` in a store or folder root's checkout. Replies with its sync
-    /// state — an `okena_core::store_git::StoreGitStatus`. A project root is
-    /// refused: its project's own git owns it.
-    SpecStoreFetch {
+    /// `git fetch` in an origin's checkout. Replies with its sync state — an
+    /// `okena_core::store_git::StoreGitStatus`. A project's origin is refused:
+    /// its project's own git owns it.
+    LibraryStoreFetch {
         root: String,
     },
-    /// Fetch, then fast-forward a store or folder checkout. Anything but a
+    /// Fetch, then fast-forward an origin's checkout. Anything but a
     /// fast-forward of a clean checkout is refused with the reason. Replies
     /// with the sync state.
-    SpecStorePull {
+    LibraryStorePull {
         root: String,
     },
-    /// Commit exactly `paths` in a store or folder checkout with `message`.
+    /// Commit exactly `paths` in an origin's checkout with `message`.
     ///
     /// Every path must be one the sync state lists as changed — relative to
     /// the checkout, as listed — so a client cannot commit anything it was not
     /// shown. Anything else, staged or not, stays out of the commit. Nothing is
     /// pushed. Replies with the sync state after.
-    SpecStoreCommit {
+    LibraryStoreCommit {
         root: String,
         paths: Vec<String>,
         message: String,
     },
-    /// Push a store or folder checkout's branch to its upstream: a step of its
+    /// Push an origin's checked-out branch to its upstream: a step of its
     /// own, so a failed push keeps the commit. Replies with the sync state
     /// after.
-    SpecStorePush {
+    LibraryStorePush {
         root: String,
     },
-    /// Draft a new OpenSpec change from a free-text idea, with an agent.
+    /// Open an agent session in an origin, briefed to write there. What it
+    /// writes is the origin type's own:
     ///
-    /// Scaffolds `openspec/changes/<slug>/` in the chosen root — the
-    /// `.openspec.yaml` that `openspec new change` writes, plus a stub
-    /// proposal — and opens an agent session there briefed to fill it in.
-    /// okena creates the directory itself so the change exists and is
-    /// browsable even if the agent is closed immediately; the agent's job is
-    /// the thinking, not the mkdir.
-    SpecDraftChange {
-        /// Root to draft in, a key from `SpecStores`. `None` uses the default
-        /// root.
+    /// - **spec** drafts a new OpenSpec change from `request`. okena scaffolds
+    ///   `openspec/changes/<slug>/` first — the `.openspec.yaml` that
+    ///   `openspec new change` writes, plus a stub proposal — so the change
+    ///   exists and is browsable even if the agent is closed immediately; the
+    ///   agent's job is the thinking, not the mkdir.
+    /// - **knowledge** adds to or updates the knowledge there. Nothing is
+    ///   scaffolded: where an entry belongs is the agent's call, made from the
+    ///   layout the brief states and the entries already there.
+    /// - **freeform** writes or updates documents in the folder. There is no
+    ///   layout to state, so the brief tells the agent to follow what is
+    ///   already there, and not to commit.
+    ///
+    /// Runs on the workspace path, since it creates a session project.
+    LibraryDraft {
+        /// Origin to draft in. `None` uses the default origin.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root: Option<String>,
-        idea: String,
-        /// Directory name for the change. `None` derives one from `idea`.
+        /// What to write, in the user's words.
+        request: String,
+        /// Spec only: directory name for the change. `None` derives one from
+        /// `request`.
         ///
-        /// Separate from the prompt because the prompt is now a paragraph:
+        /// Separate from the request because the request is a paragraph:
         /// slugging it directly produced a truncated, unreadable directory
         /// name, and the directory is the change's identity in OpenSpec.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         /// Override the agent to launch. `None` uses
-        /// `settings.harness.agent_command`; an empty string scaffolds the
-        /// change and starts no agent.
+        /// `settings.harness.agent_command`; in a spec origin an empty string
+        /// scaffolds the change and starts no agent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_command: Option<String>,
         /// Model for this launch only. `None` runs the one the brief's template
@@ -2038,250 +2128,16 @@ pub enum ActionRequest {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         context: Vec<crate::context::ContextRef>,
     },
-    /// Open an agent session on one document of a spec root — a spec or a
-    /// change's file — briefed to change it as `request` says.
+    /// Open an agent session on one file of a knowledge or spec origin,
+    /// briefed to change it as `request` says.
     ///
     /// The agent edits only that file and commits nothing. The client refuses
     /// while the document has unsaved edits, so the two cannot conflict. Runs
     /// on the workspace path, since it creates a session project.
-    SpecRefineDocument {
-        /// Root key from `SpecStores`.
+    LibraryRefineDocument {
+        /// The origin's Library key.
         root: String,
-        /// Document path, relative to the root.
-        path: String,
-        /// What to change, in the user's words.
-        request: String,
-        /// Override the agent to launch. `None` uses
-        /// `settings.harness.agent_command`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent_command: Option<String>,
-        /// Model for this launch only. `None` runs the one the brief's template
-        /// names for the agent (`okena_core::agent_model`); an empty string runs
-        /// the CLI's own default; anything else is passed to the CLI as is.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        /// Items picked for the agent, re-resolved by the daemon.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        context: Vec<crate::context::ContextRef>,
-    },
-    // ─── Engineering harness: knowledge ───────────────────────────────────
-    //
-    // Knowledge stores (ADR-0003) are git repositories of engineering docs,
-    // skills, agents and prompt templates, registered in okena's per-profile
-    // registry, plus the kind folders projects carry. The daemon reads and
-    // clones them through `okena-knowledge`, and fast-forwards, commits and
-    // pushes them with the store git OpenSpec stores share (ADR-0004); none of
-    // these touch the workspace, so the daemon runs them off its lock.
-    /// Every knowledge root okena can see, with health, sync state and project
-    /// pointers — an `okena_core::knowledge::KnowledgeStores`.
-    KnowledgeStores,
-    /// One root's entries — a `KnowledgeTree`.
-    ///
-    /// `root` is a key from `KnowledgeStores`; `None` opens the default root.
-    /// The daemon refuses keys it did not discover itself.
-    KnowledgeTree {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        root: Option<String>,
-    },
-    /// Read one file from a root — a `KnowledgeDocument`.
-    ///
-    /// `path` is relative to the root, as `KnowledgeTree` returns it. Anything
-    /// resolving outside the root is refused.
-    KnowledgeRead {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        root: Option<String>,
-        path: String,
-    },
-    /// Search every root's files by name, path and content — a
-    /// `KnowledgeSearchResult`.
-    ///
-    /// `roots` are keys from `KnowledgeStores` and `kinds` the kinds to keep;
-    /// either left empty is no opinion. Values OR within a group and the
-    /// groups AND with each other and the text
-    /// (`okena_core::doc_search::knowledge_matches`). A root key the daemon
-    /// did not discover matches nothing.
-    KnowledgeSearch {
-        #[serde(default)]
-        query: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        roots: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        kinds: Vec<crate::doc_search::KnowledgeFacet>,
-    },
-    /// Replace one existing file in a root. Replies with the new `revision`.
-    ///
-    /// `path` is checked exactly as `KnowledgeRead` checks it. `revision` is
-    /// the one the read returned; a file changed since is refused and left
-    /// untouched.
-    KnowledgeWrite {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        root: Option<String>,
-        path: String,
-        content: String,
-        revision: String,
-    },
-    /// Create a new file in a root holding `content`. Replies with its
-    /// normalized `path` and its `revision`. Checked exactly as
-    /// `SpecFileCreate` checks a path: nothing outside the root, no hidden
-    /// names, and never over an existing file.
-    KnowledgeFileCreate {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        root: Option<String>,
-        path: String,
-        #[serde(default)]
-        content: String,
-    },
-    /// Create a folder in a root. Checked like `KnowledgeFileCreate`.
-    KnowledgeFolderCreate {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        root: Option<String>,
-        path: String,
-    },
-    /// Move one file within a root: `from` checked as `KnowledgeRead` checks a
-    /// path, `to` as `KnowledgeFileCreate` does. Replies with the new `path`.
-    KnowledgeFileRename {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        root: Option<String>,
-        from: String,
-        to: String,
-    },
-    /// Delete one file in a root, checked as `KnowledgeRead` checks a path.
-    /// Folders are refused.
-    KnowledgeFileDelete {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        root: Option<String>,
-        path: String,
-    },
-    /// Which roots hold `path`, and which one a launch would actually use.
-    ///
-    /// Asked about a file in okena's read-only `okena-defaults` store, to show
-    /// whether something already overrides it and to offer somewhere to put a
-    /// copy. Replies with `{ path, layered, winner, roots: [{ key, name, kind,
-    /// has }] }` in resolution order — every healthy root except okena's own.
-    /// `layered` is false for a path nothing overrides (a doc, an agent, the
-    /// README), where the question does not apply.
-    KnowledgeOverrides {
-        path: String,
-    },
-    /// Which roots hold a copy of each layered file, and which copy is applied.
-    ///
-    /// The whole picture at once rather than one file at a time, because both
-    /// things that need it need it for a list: a template's detail page names
-    /// every root holding a copy, and the sidebar marks each template that has
-    /// an override (QBL-426). Replies with `{ roots: [{ key, name, kind,
-    /// builtin }], paths: { "<path in a root>": { copies: [key…], applied } }
-    /// }`. `roots` is layering order — every healthy root, okena's own last,
-    /// since it is not a layer but the compiled-in fallback made readable.
-    /// `copies` are the roots where the file exists, in that order, and
-    /// `applied` is the first one a launch would actually read, which is not
-    /// the first copy when an earlier one is empty.
-    KnowledgeLayering,
-    /// Copy a file from okena's defaults into `root`, at the same path.
-    ///
-    /// How a default is changed: the copy is yours to edit, and resolution
-    /// prefers it. An existing file is never overwritten — it is opened
-    /// instead, and the reply says which happened with `created`. Replies with
-    /// `{ root, path, revision, created }`.
-    KnowledgeOverride {
-        /// Root to put the copy in, a key from `KnowledgeStores`. Never
-        /// okena's own store.
-        root: String,
-        /// File path relative to the defaults store, as `KnowledgeTree` gives
-        /// it. The copy goes at the same path in `root`.
-        path: String,
-    },
-    /// Clone a store and register the checkout.
-    KnowledgeStoreClone {
-        url: String,
-        /// Destination folder. `None` clones into
-        /// `harness.knowledge.clone_dir`, named the way `git clone` would.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-    },
-    /// Register an existing checkout. Its id is its committed identity, else
-    /// its folder name.
-    KnowledgeStoreRegister {
-        path: String,
-    },
-    /// Forget a registered store. The checkout stays on disk.
-    KnowledgeStoreUnregister {
-        id: String,
-    },
-    /// Create and register a new store, with one initial commit when
-    /// `init_git`.
-    KnowledgeStoreSetup {
-        id: String,
-        path: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-        /// Canonical clone source, recorded in the store's identity.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        remote: Option<String>,
-        #[serde(default = "crate::specs::default_init_git")]
-        init_git: bool,
-    },
-    /// `git fetch` in a store's checkout. Replies with its sync state — a
-    /// `KnowledgeGitStatus`.
-    KnowledgeStoreFetch {
-        root: String,
-    },
-    /// Fetch, then fast-forward a store's checkout. Anything but a
-    /// fast-forward of a clean checkout is refused with the reason. Replies
-    /// with the sync state.
-    KnowledgeStorePull {
-        root: String,
-    },
-    /// Commit exactly `paths` in a store's checkout with `message`.
-    ///
-    /// Every path must be one the sync state lists as changed — relative to
-    /// the checkout, as listed — so a client cannot commit anything it was not
-    /// shown. Anything else, staged or not, stays out of the commit. Nothing is
-    /// pushed. Replies with the sync state after.
-    KnowledgeStoreCommit {
-        root: String,
-        paths: Vec<String>,
-        message: String,
-    },
-    /// Push a store's checked-out branch to its upstream: a step of its own,
-    /// so a failed push keeps the commit. Replies with the sync state after.
-    KnowledgeStorePush {
-        root: String,
-    },
-    /// Open an agent session in a knowledge root, briefed to add to or update
-    /// the knowledge there.
-    ///
-    /// Nothing is scaffolded: where an entry belongs is the agent's call, made
-    /// from the layout the brief states and the entries already there. Runs on
-    /// the workspace path, since it creates a session project.
-    KnowledgeDraft {
-        /// Root to work in, a key from `KnowledgeStores`. `None` uses the
-        /// default root.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        root: Option<String>,
-        /// What to write or change, in the user's words.
-        request: String,
-        /// Override the agent to launch. `None` uses
-        /// `settings.harness.agent_command`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent_command: Option<String>,
-        /// Model for this launch only. `None` runs the one the brief's template
-        /// names for the agent (`okena_core::agent_model`); an empty string runs
-        /// the CLI's own default; anything else is passed to the CLI as is.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        /// Items picked for the agent, re-resolved by the daemon.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        context: Vec<crate::context::ContextRef>,
-    },
-    /// Open an agent session on one file of a knowledge root, briefed to
-    /// change it as `request` says. The knowledge counterpart of
-    /// `SpecRefineDocument`, with the same rules.
-    KnowledgeRefineDocument {
-        /// Root key from `KnowledgeStores`.
-        root: String,
-        /// File path, relative to the root.
+        /// File path, relative to the origin.
         path: String,
         /// What to change, in the user's words.
         request: String,
@@ -3322,14 +3178,25 @@ mod tests {
                 terminal_id: None,
                 limit: Some(20),
             },
-            ActionRequest::KnowledgeSearch {
+            ActionRequest::LibrarySearch {
                 query: "smoke".into(),
-                roots: vec!["store:acme".into()],
+                roots: vec!["knowledge:store:acme".into()],
+                types: vec![crate::library::OriginType::Knowledge],
                 kinds: vec![crate::doc_search::KnowledgeFacet::Partial],
             },
-            ActionRequest::SpecSearch {
+            ActionRequest::LibrarySearch {
                 query: "login".into(),
                 roots: Vec::new(),
+                types: Vec::new(),
+                kinds: Vec::new(),
+            },
+            ActionRequest::LibraryStoreClone {
+                origin_type: crate::library::OriginType::Freeform,
+                url: "git@example.com:acme/notes.git".into(),
+                path: None,
+            },
+            ActionRequest::LibraryStoreUnregister {
+                root: "spec:store:plans".into(),
             },
             ActionRequest::ContextHit {
                 item: crate::context::ContextRef {

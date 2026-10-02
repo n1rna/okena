@@ -1,39 +1,42 @@
-//! The Roots page — add, list, arrange and remove the roots a section reads.
+//! The Origins page — add, list, arrange and remove the origins the Library
+//! reads.
 //!
-//! Opened by the `+` in the Knowledge and Specs sidebars' ROOTS header, and it
-//! stands where a document's text stands, the way the New form does: the
-//! sidebar you are changing stays on screen beside it.
+//! Opened by the `+` in the Library sidebar's ORIGINS header, and it stands
+//! where a document's text stands, the way the New form does: the sidebar you
+//! are changing stays on screen beside it.
 //!
-//! One page for both sections, because the questions are the same. What
-//! differs is what a root *is*:
+//! One page for every origin type, because the questions are the same. What
+//! differs is whether a type layers:
 //!
-//! - **Knowledge roots layer**, so they have one saved order (QBL-425) and the
-//!   list is dragged into it. The top root holding a template wins, so moving
-//!   a row changes which copy the next agent launch uses. `okena-defaults` is
-//!   shown last and has no handle: it holds a copy of the compiled-in
-//!   defaults, so it must not be draggable above the layers that override it.
-//! - **Specs roots do not layer** — a change belongs to one root — so the
-//!   Specs list has no order and no handles.
+//! - **Knowledge origins layer**, so they have one saved order (QBL-425) and
+//!   their rows are dragged into it. The top one holding a template wins, so
+//!   moving a row changes which copy the next agent launch uses.
+//!   `okena-defaults` is shown last and has no handle: it holds a copy of the
+//!   compiled-in defaults, so it must not be draggable above the layers that
+//!   override it.
+//! - **Spec and freeform origins do not layer** — a change belongs to one
+//!   root, a document to one folder — so they have no order, no handles and
+//!   no overrides.
 //!
-//! Adding is the shared form (`add_root_form`), the same three choices
-//! Settings offers, because there are now two places to add a root and they
-//! must not drift.
+//! Adding is the shared form (`add_root_form`), the same choices Settings
+//! offers, because there are two places to add an origin and they must not
+//! drift.
 
 use crate::theme::{ThemeColors, theme, with_alpha};
 use crate::ui::tokens::{ui_text, ui_text_md, ui_text_ms};
 use crate::views::components::add_root_form::{
-    AddMode, AddRootChrome, AddRootForm, RootKind, describe, render_add_root,
+    AddMode, AddRootChrome, AddRootForm, describe, render_add_root,
 };
 use gpui::prelude::*;
 use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
-use okena_core::knowledge::{KnowledgeRootKind, KnowledgeStores, Severity};
-use okena_core::specs::{SpecRootKind, SpecStores};
+use okena_core::library::{LibraryOrigin, LibraryOrigins, OriginKind, OriginType};
 
-use super::{HarnessPane, HarnessSection};
+use super::HarnessPane;
+use super::library_view::{counts_line, group_label};
 
-/// The Roots page's own state. One per pane, for that pane's section.
+/// The Origins page's own state. One per pane.
 pub(crate) struct RootsPage {
     /// Showing in the right-hand column.
     pub(crate) open: bool,
@@ -44,55 +47,46 @@ pub(crate) struct RootsPage {
 }
 
 impl RootsPage {
-    pub(crate) fn new(section: HarnessSection, cx: &mut Context<HarnessPane>) -> Self {
+    pub(crate) fn new(cx: &mut Context<HarnessPane>) -> Self {
         Self {
             open: false,
-            form: AddRootForm::new(Self::kind(section), cx),
+            // Knowledge first: it is the type the page's order is about. The
+            // form's own pills change it.
+            form: AddRootForm::new(OriginType::Knowledge, cx),
             busy: false,
             error: None,
-        }
-    }
-
-    /// Tasks and Testing have no roots; their page is never opened, so the
-    /// kind only has to be something.
-    fn kind(section: HarnessSection) -> RootKind {
-        match section {
-            HarnessSection::Specs => RootKind::Specs,
-            _ => RootKind::Knowledge,
         }
     }
 }
 
 // ─── The list, as data ──────────────────────────────────────────────────────
 
-/// How a root can be taken off the list, when it can.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Removal {
-    /// Unregister a store by id. The checkout stays on disk.
-    Store(String),
-    /// Drop a folder from `harness.specs.folders`. Specs only.
-    Folder(String),
-}
-
-/// What the page shows for one root.
+/// What the page shows for one origin.
 ///
-/// Built from either section's roots so the page renders one shape, and so
-/// "which roots can be dragged, which can be removed" is a thing that can be
-/// tested without a window.
+/// One shape for every type, so the page renders one kind of row and "which
+/// origins can be dragged, which can be removed, which take overrides" is a
+/// thing that can be tested without a window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RootRow {
+    /// The origin's Library key: what a remove is sent with.
     pub(crate) key: String,
+    pub(crate) origin_type: OriginType,
     pub(crate) name: String,
     pub(crate) path: String,
-    /// What the root is: `Store`, `Project`, `Folder`.
+    /// Where the origin was found: `Store`, `Project`, `Folder`, or
+    /// `okena's own`.
     pub(crate) kind: &'static str,
     /// `Ok`, `Check` or `Problem` — the health badge.
     pub(crate) health: Health,
-    /// A line of detail under the path: counts, or what points at it.
+    /// A line of detail under the path: counts, or what it is.
     pub(crate) detail: Option<String>,
     pub(crate) problems: Vec<String>,
-    pub(crate) removal: Option<Removal>,
-    /// Takes part in the saved order, so it has a drag handle.
+    /// Can be taken off the list here. A project's origin cannot: it belongs
+    /// to its repository. Neither can okena's own store, which would only
+    /// come back.
+    pub(crate) removable: bool,
+    /// Takes part in the saved layering order, so it has a drag handle. Only
+    /// knowledge origins layer, and okena's own is always last.
     pub(crate) orderable: bool,
 }
 
@@ -121,89 +115,53 @@ impl Health {
     }
 }
 
-/// The Knowledge list: every root in the order it layers in, which is the
-/// order discovery already put them in (QBL-425), with `okena-defaults` last
-/// and unmovable.
-pub(crate) fn knowledge_rows(stores: &KnowledgeStores) -> Vec<RootRow> {
-    stores
-        .roots
-        .iter()
-        .map(|root| {
-            let c = &root.counts;
-            RootRow {
-                key: root.key.clone(),
-                name: root.name.clone(),
-                path: root.path.clone(),
-                kind: match (root.builtin, root.kind) {
-                    (true, _) => "okena's own",
-                    (_, KnowledgeRootKind::Store) => "Store",
-                    (_, KnowledgeRootKind::Project) => "Project",
-                },
-                health: if !root.healthy {
-                    Health::Problem
-                } else if root.status.iter().any(|d| d.severity == Severity::Warning) {
-                    Health::Check
-                } else {
-                    Health::Ok
-                },
-                detail: root.healthy.then(|| {
-                    format!(
-                        "{} docs · {} skills · {} agents · {} templates",
-                        c.docs, c.skills, c.agents, c.templates
-                    )
-                }),
-                problems: root.status.iter().map(|d| d.message.clone()).collect(),
-                // okena's own store is rewritten on every start, so removing
-                // it would only make it come back.
-                removal: (!root.builtin)
-                    .then(|| root.store_id.clone().map(Removal::Store))
-                    .flatten(),
-                orderable: !root.builtin,
-            }
-        })
-        .collect()
-}
-
-/// The Specs list. No order, so nothing is orderable; a folder root is removed
-/// from the setting that added it, and a project root cannot be removed here
-/// at all — it belongs to its repository.
-pub(crate) fn spec_rows(stores: &SpecStores) -> Vec<RootRow> {
-    stores
-        .roots
-        .iter()
-        .map(|root| RootRow {
-            key: root.key.clone(),
-            name: root.name.clone(),
-            path: root.path.clone(),
-            kind: match root.kind {
-                SpecRootKind::Store => "Store",
-                SpecRootKind::Project => "Project",
-                SpecRootKind::Folder => "Folder",
-            },
-            health: if !root.healthy {
-                Health::Problem
-            } else if root
-                .status
-                .iter()
-                .any(|d| d.severity == okena_core::specs::SpecSeverity::Warning)
-            {
-                Health::Check
-            } else {
-                Health::Ok
-            },
-            detail: root
+/// The row for one origin.
+pub(crate) fn origin_row(origin: &LibraryOrigin) -> RootRow {
+    RootRow {
+        key: origin.key.clone(),
+        origin_type: origin.origin_type,
+        name: origin.name.clone(),
+        path: origin.path.clone(),
+        kind: match (origin.builtin, origin.kind) {
+            (true, _) => "okena's own",
+            (_, OriginKind::Store) => "Store",
+            (_, OriginKind::Project) => "Project",
+            (_, OriginKind::Folder) => "Folder",
+        },
+        health: if !origin.healthy {
+            Health::Problem
+        } else if origin.warned() {
+            Health::Check
+        } else {
+            Health::Ok
+        },
+        detail: match origin.origin_type {
+            // Counts of an origin nobody can read would be zeros that look
+            // like a fact.
+            OriginType::Knowledge => origin
+                .counts
+                .as_ref()
+                .filter(|_| origin.healthy)
+                .map(counts_line),
+            OriginType::Spec => origin
                 .is_default
                 .then(|| "The machine default store".to_string())
-                .or_else(|| root.schema.clone().map(|s| format!("Schema: {s}"))),
-            problems: root.status.iter().map(|d| d.message.clone()).collect(),
-            removal: match root.kind {
-                SpecRootKind::Store => root.store_id.clone().map(Removal::Store),
-                SpecRootKind::Folder => Some(Removal::Folder(root.path.clone())),
-                SpecRootKind::Project => None,
-            },
-            orderable: false,
-        })
-        .collect()
+                .or_else(|| origin.schema.clone().map(|s| format!("Schema: {s}"))),
+            OriginType::Freeform => origin.documents.map(|n| {
+                format!("{n} {}", if n == 1 { "document" } else { "documents" })
+            }),
+        },
+        problems: origin.status.iter().map(|d| d.message.clone()).collect(),
+        removable: !origin.builtin && origin.kind != OriginKind::Project,
+        orderable: origin.takes_part_in_order(),
+    }
+}
+
+/// Every origin as a row, in the order the Library lists them: knowledge in
+/// the order it layers in — which is the order discovery already put it in
+/// (QBL-425), `okena-defaults` last — then specs, then freeform.
+pub(crate) fn origin_rows(origins: &LibraryOrigins) -> Vec<RootRow> {
+    origins.origins.iter().map(origin_row).collect()
 }
 
 /// What the page is dragging: the root, and where it started.
@@ -236,7 +194,7 @@ impl Render for RootDragView {
 // ─── Rendering ──────────────────────────────────────────────────────────────
 
 impl HarnessPane {
-    /// Show the Roots page, from the `+` in the sidebar's ROOTS header.
+    /// Show the Origins page, from the `+` in the sidebar's ORIGINS header.
     pub(super) fn open_roots_page(&mut self, cx: &mut Context<Self>) {
         self.roots.open = true;
         self.roots.error = None;
@@ -244,7 +202,7 @@ impl HarnessPane {
         // you leave whatever was there — matching how picking an entry leaves
         // the New form.
         self.knowledge_draft.open = false;
-        self.specs.composing = false;
+        self.library.composing = false;
         cx.notify();
     }
 
@@ -254,24 +212,16 @@ impl HarnessPane {
         cx.notify();
     }
 
-    /// The roots of the section this pane is showing, as rows.
+    /// The Library's origins, as rows.
     fn root_rows(&self) -> Vec<RootRow> {
-        match self.section {
-            HarnessSection::Specs => self.specs.stores.as_ref().map(spec_rows),
-            _ => self.knowledge.stores.as_ref().map(knowledge_rows),
-        }
-        .unwrap_or_default()
+        self.library
+            .origins
+            .as_ref()
+            .map(origin_rows)
+            .unwrap_or_default()
     }
 
-    /// Re-read the section's roots after the daemon changed them.
-    fn refresh_roots(&mut self, cx: &mut Context<Self>) {
-        match self.section {
-            HarnessSection::Specs => self.refresh_specs(cx),
-            _ => self.refresh_knowledge(cx),
-        }
-    }
-
-    /// Run an action that changes the roots, then say what happened.
+    /// Run an action that changes the origins, then say what happened.
     fn run_root_action(
         &mut self,
         action: ActionRequest,
@@ -295,7 +245,7 @@ impl HarnessPane {
                         Ok(v) => {
                             this.report(describe(&v.unwrap_or(serde_json::Value::Null)), cx);
                             this.roots.form.clear(cx);
-                            this.refresh_roots(cx);
+                            this.refresh_library(cx);
                         }
                         Err(e) => this.roots.error = Some(e),
                     }
@@ -307,10 +257,12 @@ impl HarnessPane {
     }
 
     fn submit_add_root(&mut self, cx: &mut Context<Self>) {
-        let kind = self.roots.form.kind();
+        let origin_type = self.roots.form.origin_type();
         let mode = self.roots.form.mode;
         match self.roots.form.request(cx) {
-            Ok(action) => self.run_root_action(action, move |v| describe(kind, mode, v), cx),
+            Ok(action) => {
+                self.run_root_action(action, move |v| describe(origin_type, mode, v), cx)
+            }
             Err(missing) => {
                 self.roots.error = Some(missing);
                 cx.notify();
@@ -318,56 +270,47 @@ impl HarnessPane {
         }
     }
 
-    fn remove_root(&mut self, removal: Removal, cx: &mut Context<Self>) {
-        match removal {
-            Removal::Store(id) => {
-                let action = match self.section {
-                    HarnessSection::Specs => ActionRequest::SpecStoreUnregister { id },
-                    _ => ActionRequest::KnowledgeStoreUnregister { id },
-                };
-                self.run_root_action(
-                    action,
-                    |v| {
-                        format!(
-                            "Removed '{}'. Its checkout is still at {}.",
-                            v["id"].as_str().unwrap_or(""),
-                            v["left_on_disk"].as_str().unwrap_or("")
-                        )
-                    },
-                    cx,
-                );
-            }
-            // A folder root is not in a registry: it is a line in settings, so
-            // removing it is a settings edit and there is nothing to ask the
-            // daemon.
-            Removal::Folder(path) => {
-                let settings = crate::settings::settings_entity(cx);
-                let folders: Vec<String> = settings
-                    .read(cx)
-                    .settings
-                    .active_space()
-                    .spec_folders()
-                    .into_iter()
-                    .filter(|f| okena_core::fs::expand_home(f) != okena_core::fs::expand_home(&path))
-                    .collect();
-                settings.update(cx, |state, cx| state.set_spec_folders(folders, cx));
-                self.report(format!("Removed the folder root {path}."), cx);
-                self.refresh_roots(cx);
-            }
-        }
+    /// Take the origin keyed `key` off the list. The daemon knows how: a
+    /// store leaves its registry, a folder leaves the space's settings.
+    /// Either way the folder stays on disk.
+    fn remove_root(&mut self, key: String, cx: &mut Context<Self>) {
+        self.run_root_action(
+            ActionRequest::LibraryStoreUnregister { root: key },
+            |v| {
+                format!(
+                    "Removed '{}'. Its folder is still at {}.",
+                    v["id"].as_str().unwrap_or(""),
+                    v["left_on_disk"].as_str().unwrap_or("")
+                )
+            },
+            cx,
+        );
     }
 
-    /// Save the order with `key` dropped onto the row at `onto`.
+    /// Save the layering order with the knowledge origin keyed `key` dropped
+    /// onto the knowledge row at `onto`.
     ///
     /// The order written is the whole list as shown, so this is also what
-    /// drops keys for roots that are no longer discovered.
+    /// drops keys for origins that are no longer discovered.
     fn reorder_roots(&mut self, key: &str, onto: usize, cx: &mut Context<Self>) {
-        let Some(stores) = self.knowledge.stores.as_ref() else {
+        let Some(origins) = self.library.origins.as_ref() else {
+            return;
+        };
+        let layers: Vec<LibraryOrigin> = origins.of_type(OriginType::Knowledge).cloned().collect();
+        // The order is written in the keys discovery gives, as it always was.
+        let Some((OriginType::Knowledge, key)) = okena_core::library::split_key(key) else {
             return;
         };
         let settings = crate::settings::settings_entity(cx);
-        let saved = settings.read(cx).settings.active_space().knowledge.order.clone();
-        let shown = okena_core::knowledge_order::normalize(&stores.roots, &saved);
+        let saved = settings
+            .read(cx)
+            .settings
+            .active_space()
+            .library
+            .knowledge
+            .order
+            .clone();
+        let shown = okena_core::knowledge_order::normalize(&layers, &saved);
         let next = okena_core::knowledge_order::moved(&shown, key, onto);
         if next == shown {
             return;
@@ -378,8 +321,8 @@ impl HarnessPane {
         // Rearrange what is on screen now rather than waiting for the settings
         // to reach the daemon and a fresh listing to come back: a drag that
         // visibly does nothing for half a second reads as a drag that failed.
-        if let Some(stores) = self.knowledge.stores.as_mut() {
-            okena_core::knowledge_order::apply(&mut stores.roots, &next);
+        if let Some(origins) = self.library.origins.as_mut() {
+            origins.arrange_layers(&next);
         }
         cx.notify();
     }
@@ -456,7 +399,8 @@ impl HarnessPane {
         }
 
         let mut actions = h_flex().gap(px(6.0)).flex_shrink_0();
-        if let Some(removal) = row.removal.clone() {
+        if row.removable {
+            let key = row.key.clone();
             let id = format!("roots-remove-{}", row.key);
             actions = actions.child(
                 div()
@@ -476,7 +420,7 @@ impl HarnessPane {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _window, cx| {
-                            this.remove_root(removal.clone(), cx)
+                            this.remove_root(key.clone(), cx)
                         }),
                     ),
             );
@@ -528,14 +472,10 @@ impl HarnessPane {
         container.into_any_element()
     }
 
-    /// The right-hand column when the Roots page is open.
+    /// The right-hand column when the Origins page is open.
     pub(super) fn render_roots_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let rows = self.root_rows();
-        // Knowledge roots layer, so they have an order to arrange. Specs roots
-        // do not, so the list is just a list.
-        let ordered = self.section != HarnessSection::Specs;
-        let thing = if ordered { "knowledge" } else { "specs" };
 
         let header = h_flex()
             .items_center()
@@ -548,7 +488,7 @@ impl HarnessPane {
                 div()
                     .text_size(ui_text(15.0, cx))
                     .text_color(rgb(t.text_primary))
-                    .child("Roots"),
+                    .child("Origins"),
             )
             .child(self.small_button(
                 "roots-close",
@@ -569,43 +509,67 @@ impl HarnessPane {
             col = col.child(self.error_banner(error, cx));
         }
 
-        col = col.child(
-            div().px(px(12.0)).pt(px(10.0)).child(
-                div()
-                    .text_size(ui_text_ms(cx))
-                    .text_color(rgb(t.text_muted))
-                    .child(if ordered {
-                        "Templates, partials and skills resolve top to bottom — the first root \
-                         with the file wins. Drag a root to change which copy an agent launches \
-                         with. okena's own store is always consulted last."
-                    } else {
-                        "Every root here is searched for specs and changes. Specs are not \
-                         layered, so the order does not matter."
-                    }),
-            ),
-        );
-
-        // ── The roots ──────────────────────────────────────────────────────
-        let mut list = v_flex()
-            .mx(px(12.0))
-            .mt(px(10.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(rgb(t.border));
+        let (note_size, note_color) = (ui_text_ms(cx), rgb(t.text_muted));
+        let note = move |text: &'static str| {
+            div()
+                .px(px(12.0))
+                .pt(px(10.0))
+                .text_size(note_size)
+                .text_color(note_color)
+                .child(text)
+        };
         if rows.is_empty() {
-            list = list.child(
+            col = col.child(note("No origins yet — add one below."));
+        }
+
+        // ── The origins, a list per type ───────────────────────────────────
+        for origin_type in OriginType::all() {
+            let of_type: Vec<&RootRow> = rows
+                .iter()
+                .filter(|r| r.origin_type == origin_type)
+                .collect();
+            if of_type.is_empty() {
+                continue;
+            }
+            // Only knowledge origins layer, so only their list has an order
+            // to arrange and handles to arrange it with.
+            let ordered = origin_type.layers();
+            col = col.child(
                 div()
                     .px(px(12.0))
-                    .py(px(10.0))
+                    .pt(px(16.0))
                     .text_size(ui_text_ms(cx))
                     .text_color(rgb(t.text_muted))
-                    .child(format!("No {thing} roots yet — add one below.")),
+                    .child(group_label(origin_type).to_uppercase()),
             );
+            col = col.child(note(match origin_type {
+                OriginType::Knowledge => {
+                    "Templates, partials and skills resolve top to bottom — the first origin \
+                     with the file wins. Drag an origin to change which copy an agent launches \
+                     with. okena's own store is always consulted last."
+                }
+                OriginType::Spec => {
+                    "Every origin here is searched for specs and changes. Specs are not \
+                     layered, so there is no order and nothing here overrides anything."
+                }
+                OriginType::Freeform => {
+                    "Folders of markdown, listed, searched and handed to agents as context. \
+                     Freeform origins are not layered and take no overrides."
+                }
+            }));
+            let mut list = v_flex()
+                .mx(px(12.0))
+                .mt(px(8.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgb(t.border));
+            // The index a drop is measured against is the row's place among
+            // the knowledge origins, which is the place it layers at.
+            for (index, row) in of_type.into_iter().enumerate() {
+                list = list.child(self.render_root_manage_row(row, index, ordered, cx));
+            }
+            col = col.child(list);
         }
-        for (index, row) in rows.iter().enumerate() {
-            list = list.child(self.render_root_manage_row(row, index, ordered, cx));
-        }
-        col = col.child(list);
 
         // ── Adding one ─────────────────────────────────────────────────────
         col = col.child(
@@ -615,7 +579,7 @@ impl HarnessPane {
                 .pb(px(4.0))
                 .text_size(ui_text_ms(cx))
                 .text_color(rgb(t.text_muted))
-                .child("ADD A ROOT"),
+                .child("ADD AN ORIGIN"),
         );
         col = col.child(
             div()
@@ -631,6 +595,11 @@ impl HarnessPane {
                         busy: self.roots.busy,
                     },
                     cx,
+                    cx.listener(|this, origin_type: &OriginType, _window, cx| {
+                        this.roots.form.set_origin_type(*origin_type, cx);
+                        this.roots.error = None;
+                        cx.notify();
+                    }),
                     cx.listener(|this, mode: &AddMode, _window, cx| {
                         this.roots.form.mode = *mode;
                         this.roots.error = None;
@@ -652,10 +621,11 @@ impl HarnessPane {
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{Health, Removal, knowledge_rows, spec_rows};
+    use super::{Health, origin_rows};
     use okena_core::knowledge::{
         Diagnostic, KnowledgeCounts, KnowledgeRoot, KnowledgeRootKind, KnowledgeStores,
     };
+    use okena_core::library::{LibraryOrigin, LibraryOrigins, OriginType};
     use okena_core::specs::{SpecRoot, SpecRootKind, SpecStores};
 
     fn knowledge_root(key: &str, name: &str) -> KnowledgeRoot {
@@ -681,84 +651,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_knowledge_list_is_draggable_and_removable_except_okenas_own() {
-        // The order discovery hands back is the order shown, so the list is
-        // built in place; what the page decides is which rows have a handle
-        // and which have a Remove.
-        let defaults = KnowledgeRoot {
-            builtin: true,
-            store_id: Some("okena-defaults".into()),
-            ..knowledge_root("store:okena-defaults", "okena-defaults")
-        };
-        let project = KnowledgeRoot {
-            kind: KnowledgeRootKind::Project,
-            store_id: None,
-            ..knowledge_root("path:/repo/.okena/knowledge", "web")
-        };
-        let stores = KnowledgeStores {
-            roots: vec![knowledge_root("store:acme", "acme"), project, defaults],
-            ..Default::default()
-        };
-
-        let rows = knowledge_rows(&stores);
-        assert_eq!(
-            rows.iter().map(|r| r.kind).collect::<Vec<_>>(),
-            ["Store", "Project", "okena's own"]
-        );
-        assert_eq!(
-            rows.iter().map(|r| r.orderable).collect::<Vec<_>>(),
-            [true, true, false],
-            "okena-defaults is shown last and cannot be moved"
-        );
-        assert_eq!(
-            rows[0].removal,
-            Some(Removal::Store("acme".into())),
-            "a store is unregistered by id"
-        );
-        assert_eq!(
-            rows[1].removal, None,
-            "a project root has no registry entry to remove"
-        );
-        assert_eq!(
-            rows[2].removal, None,
-            "okena's own store is rewritten on every start, so removing it is meaningless"
-        );
-        assert_eq!(
-            rows[0].detail.as_deref(),
-            Some("2 docs · 1 skills · 0 agents · 3 templates")
-        );
-    }
-
-    #[test]
-    fn an_unhealthy_knowledge_root_still_lists_with_its_problem() {
-        // The page is where you go to fix a broken root, so a root that cannot
-        // be read must be on it, with the reason and a way to remove it.
-        let broken = KnowledgeRoot {
-            healthy: false,
-            status: vec![Diagnostic::error(
-                "store_checkout_missing",
-                "The checkout of `gone` is gone: /k/gone",
-            )],
-            ..knowledge_root("store:gone", "gone")
-        };
-        let stores = KnowledgeStores {
-            roots: vec![broken],
-            ..Default::default()
-        };
-        let rows = knowledge_rows(&stores);
-        assert_eq!(rows[0].health, Health::Problem);
-        assert_eq!(rows[0].detail, None, "counts of a root nobody can read");
-        assert_eq!(rows[0].problems.len(), 1);
-        assert!(rows[0].orderable, "still part of the order while it exists");
-        assert_eq!(rows[0].removal, Some(Removal::Store("gone".into())));
-    }
-
-    #[test]
-    fn the_specs_list_has_no_order_and_removes_a_folder_from_settings() {
-        // Specs roots are not layered, so nothing is orderable; a folder root
-        // came from a setting, so that is where it goes back to.
-        let root = |key: &str, path: &str, kind: SpecRootKind, id: Option<&str>| SpecRoot {
+    fn spec_root(key: &str, path: &str, kind: SpecRootKind, id: Option<&str>) -> SpecRoot {
+        SpecRoot {
             key: key.into(),
             kind,
             name: key.into(),
@@ -772,30 +666,127 @@ mod tests {
             references: Vec::new(),
             used_by: Vec::new(),
             status: Vec::new(),
-        };
-        let stores = SpecStores {
-            roots: vec![
-                root("store:plans", "/s/plans", SpecRootKind::Store, Some("plans")),
-                root("path:/s/folder", "/s/folder", SpecRootKind::Folder, None),
-                root("path:/s/repo", "/s/repo", SpecRootKind::Project, None),
-            ],
-            ..Default::default()
-        };
+        }
+    }
 
-        let rows = spec_rows(&stores);
+    fn origins(knowledge: Vec<KnowledgeRoot>, specs: Vec<SpecRoot>) -> LibraryOrigins {
+        LibraryOrigins::assemble(
+            KnowledgeStores {
+                roots: knowledge,
+                ..Default::default()
+            },
+            SpecStores {
+                roots: specs,
+                ..Default::default()
+            },
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn knowledge_origins_are_draggable_and_removable_except_okenas_own() {
+        // The order discovery hands back is the order shown, so the list is
+        // built in place; what the page decides is which rows have a handle
+        // and which have a Remove.
+        let defaults = KnowledgeRoot {
+            builtin: true,
+            store_id: Some("okena-defaults".into()),
+            ..knowledge_root("store:okena-defaults", "okena-defaults")
+        };
+        let project = KnowledgeRoot {
+            kind: KnowledgeRootKind::Project,
+            store_id: None,
+            ..knowledge_root("path:/repo/.okena/knowledge", "web")
+        };
+        let rows = origin_rows(&origins(
+            vec![knowledge_root("store:acme", "acme"), project, defaults],
+            Vec::new(),
+        ));
+        assert_eq!(
+            rows.iter().map(|r| r.kind).collect::<Vec<_>>(),
+            ["Store", "Project", "okena's own"]
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.orderable).collect::<Vec<_>>(),
+            [true, true, false],
+            "okena-defaults is shown last and cannot be moved"
+        );
+        assert!(rows[0].removable, "a store is unregistered");
+        assert_eq!(rows[0].key, "knowledge:store:acme", "by its Library key");
+        assert!(
+            !rows[1].removable,
+            "a project's origin has no registry entry to remove"
+        );
+        assert!(
+            !rows[2].removable,
+            "okena's own store is rewritten on every start, so removing it is meaningless"
+        );
+        assert_eq!(
+            rows[0].detail.as_deref(),
+            Some("2 docs · 1 skill · 0 agents · 3 templates")
+        );
+    }
+
+    #[test]
+    fn an_unhealthy_knowledge_origin_still_lists_with_its_problem() {
+        // The page is where you go to fix a broken origin, so one that cannot
+        // be read must be on it, with the reason and a way to remove it.
+        let broken = KnowledgeRoot {
+            healthy: false,
+            status: vec![Diagnostic::error(
+                "store_checkout_missing",
+                "The checkout of `gone` is gone: /k/gone",
+            )],
+            ..knowledge_root("store:gone", "gone")
+        };
+        let rows = origin_rows(&origins(vec![broken], Vec::new()));
+        assert_eq!(rows[0].health, Health::Problem);
+        assert_eq!(rows[0].detail, None, "counts of an origin nobody can read");
+        assert_eq!(rows[0].problems.len(), 1);
+        assert!(rows[0].orderable, "still part of the order while it exists");
+        assert!(rows[0].removable);
+    }
+
+    #[test]
+    fn spec_origins_have_no_order_and_a_folder_is_removable_like_a_store() {
+        // Spec origins are not layered, so nothing is orderable; a folder came
+        // from a setting, and the daemon takes it back out of it.
+        let rows = origin_rows(&origins(
+            Vec::new(),
+            vec![
+                spec_root("store:plans", "/s/plans", SpecRootKind::Store, Some("plans")),
+                spec_root("path:/s/folder", "/s/folder", SpecRootKind::Folder, None),
+                spec_root("path:/s/repo", "/s/repo", SpecRootKind::Project, None),
+            ],
+        ));
         assert!(
             rows.iter().all(|r| !r.orderable),
-            "specs roots are never dragged"
-        );
-        assert_eq!(rows[0].removal, Some(Removal::Store("plans".into())));
-        assert_eq!(
-            rows[1].removal,
-            Some(Removal::Folder("/s/folder".into())),
-            "a folder root is removed from harness.specs.folders by its path"
+            "spec origins are never dragged"
         );
         assert_eq!(
-            rows[2].removal, None,
-            "a project root belongs to its repository"
+            rows.iter().map(|r| r.removable).collect::<Vec<_>>(),
+            [true, true, false],
+            "a project's origin belongs to its repository"
         );
+        assert_eq!(rows[1].key, "spec:path:/s/folder");
+        assert_eq!(rows[1].kind, "Folder");
+    }
+
+    #[test]
+    fn a_freeform_origin_is_removable_and_has_neither_an_order_nor_overrides() {
+        let mut notes = LibraryOrigin::freeform("notes", "/notes");
+        notes.documents = Some(1);
+        let mut all = origins(vec![knowledge_root("store:acme", "acme")], Vec::new());
+        all.origins.push(notes.clone());
+        let rows = origin_rows(&all);
+        let row = rows.last().expect("the freeform row");
+        assert_eq!(row.origin_type, OriginType::Freeform);
+        assert_eq!(row.kind, "Folder");
+        assert_eq!(row.detail.as_deref(), Some("1 document"));
+        assert!(row.removable);
+        assert!(!row.orderable, "no handle: freeform origins do not layer");
+        assert!(!notes.takes_overrides(), "and nothing is overridden into one");
+        // The knowledge origin beside it keeps both.
+        assert!(rows[0].orderable && all.origins[0].takes_overrides());
     }
 }

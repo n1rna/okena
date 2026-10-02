@@ -1,4 +1,8 @@
-//! Engineering-harness knowledge actions, over `okena-knowledge` (ADR-0003).
+//! The Library's `knowledge` origins, over `okena-knowledge` (ADR-0003).
+//!
+//! `library.rs` hands this module every Library action that is about a
+//! knowledge origin. It is the one origin type that layers, so overrides, the
+//! layering answer and the saved order all live here.
 //!
 //! Reads are scoped to roots discovery found and path-checked against them:
 //! these actions are reachable by any paired client and by agents through
@@ -13,11 +17,11 @@ use super::briefs::{self, PromptRoots};
 use crate::workspace::persistence::{AppSettings, get_config_dir};
 use crate::workspace::state::ProjectData;
 use okena_core::api::ActionRequest;
-use okena_core::doc_search::{
-    KnowledgeFacet, KnowledgeHit, KnowledgeSearchFilter, KnowledgeSearchResult, SearchDoc,
-    knowledge_matches,
+use okena_core::doc_search::{KnowledgeFacet, LibrarySearchFilter, SearchDoc, library_matches};
+use okena_core::knowledge::{KnowledgeRoot, KnowledgeRootKind, KnowledgeStores};
+use okena_core::library::{
+    LibraryDocument, LibraryHit, LibrarySearchResult, LibraryTree, OriginType,
 };
-use okena_core::knowledge::{KnowledgeDocument, KnowledgeRoot, KnowledgeRootKind, KnowledgeStores};
 use okena_knowledge::discover::{self, ProjectSource, Sources};
 use okena_knowledge::prompts::{self, Flow, Vars};
 use okena_knowledge::registry::{self, RegisterOutcome};
@@ -25,7 +29,7 @@ use okena_knowledge::setup::{self, SetupRequest};
 use okena_knowledge::{KnowledgeError, git, tree};
 use std::path::Path;
 
-/// Largest file `KnowledgeRead` returns. Knowledge is prose; past this it is
+/// Largest file a read returns. Knowledge is prose; past this it is
 /// not, and streaming it through a JSON reply would stall the client.
 const MAX_DOC_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -39,7 +43,7 @@ pub fn knowledge_project_sources(
     projects: &[ProjectData],
     settings: &AppSettings,
 ) -> Vec<ProjectSource> {
-    if !settings.active_space().knowledge.projects {
+    if !settings.active_space().library.knowledge.projects {
         return Vec::new();
     }
     projects
@@ -68,26 +72,23 @@ pub(super) fn knowledge_sources(
     Sources {
         registry_path: registry.to_path_buf(),
         projects: projects.to_vec(),
-        stores: space.knowledge.stores.clone(),
-        order: space.knowledge.order.clone(),
+        stores: space.library.knowledge.stores.clone(),
+        order: space.library.knowledge.order.clone(),
     }
 }
 
-/// Run a knowledge action; `None` for any other action.
-pub fn execute_knowledge_action(
-    action: &ActionRequest,
-    projects: &[ProjectSource],
-    settings: &AppSettings,
-) -> Option<ActionResult> {
+/// This profile's knowledge registry, with okena's own defaults store put on
+/// disk and registered in it first.
+pub(super) fn registry() -> std::path::PathBuf {
     let registry = registry::registry_path(&get_config_dir());
     ensure_defaults(&registry);
-    execute_at(&registry, action, projects, settings)
+    registry
 }
 
 /// Put okena's own briefs on disk and in the registry, once per run.
 ///
 /// Here rather than at startup because this is the first moment anything cares
-/// that knowledge exists, and a user who never opens the Knowledge view should
+/// that knowledge exists, and a user who never opens the Library should
 /// not have folders appear for it. Failures are swallowed on purpose: a
 /// read-only config directory should cost you the ability to *read* the
 /// defaults, not the ability to use knowledge at all — launches still fall
@@ -102,7 +103,7 @@ fn ensure_defaults(registry: &Path) {
         if prompts::defaults::ensure_store(&dir).is_err() {
             return;
         }
-        // Registering is what makes it appear in the Knowledge view. Already
+        // Registering is what makes it appear in the Library. Already
         // registered is the ordinary case and not an error worth reporting.
         let _ = registry::register(registry, &dir.to_string_lossy(), None);
     });
@@ -116,7 +117,9 @@ pub(super) fn defaults_store() -> std::path::PathBuf {
         .join(prompts::defaults::DEFAULT_STORE_DIR)
 }
 
-fn execute_at(
+/// Run a Library action against the knowledge origins; `None` for an action
+/// this type has nothing to do with.
+pub(super) fn execute_at(
     registry: &Path,
     action: &ActionRequest,
     projects: &[ProjectSource],
@@ -127,73 +130,58 @@ fn execute_at(
     // order (QBL-425) rather than in whatever order discovery produced.
     let sources = &knowledge_sources(registry, projects, settings);
     Some(match action {
-        ActionRequest::KnowledgeStores => {
-            to_result(serde_json::to_value(stores(sources)), "knowledge stores")
-        }
-        ActionRequest::KnowledgeTree { root } => tree_of(sources, root.as_deref()),
-        ActionRequest::KnowledgeRead { root, path } => read(sources, root.as_deref(), path),
-        ActionRequest::KnowledgeSearch {
-            query,
-            roots,
-            kinds,
-        } => search(sources, query, roots, kinds),
-        ActionRequest::KnowledgeWrite {
+        ActionRequest::LibraryTree { root } => tree_of(sources, root.as_deref()),
+        ActionRequest::LibraryRead { root, path } => read(sources, root.as_deref(), path),
+        ActionRequest::LibraryWrite {
             root,
             path,
             content,
             revision,
         } => write(sources, root.as_deref(), path, content, revision),
-        ActionRequest::KnowledgeFileCreate {
+        ActionRequest::LibraryFileCreate {
             root,
             path,
             content,
         } => in_root(sources, root.as_deref(), |key, dir| {
             super::document_files::create_file(key, dir, path, content, MAX_DOC_BYTES)
         }),
-        ActionRequest::KnowledgeFolderCreate { root, path } => {
+        ActionRequest::LibraryFolderCreate { root, path } => {
             in_root(sources, root.as_deref(), |key, dir| {
                 super::document_files::create_folder(key, dir, path)
             })
         }
-        ActionRequest::KnowledgeFileRename { root, from, to } => {
+        ActionRequest::LibraryFileRename { root, from, to } => {
             in_root(sources, root.as_deref(), |key, dir| {
                 super::document_files::rename(key, dir, tree::resolve_document, from, to)
             })
         }
-        ActionRequest::KnowledgeFileDelete { root, path } => {
+        ActionRequest::LibraryFileDelete { root, path } => {
             in_root(sources, root.as_deref(), |key, dir| {
                 super::document_files::delete(key, dir, tree::resolve_document, path)
             })
         }
-        ActionRequest::KnowledgeOverrides { path } => overrides(sources, path),
-        ActionRequest::KnowledgeLayering => layering(sources),
-        ActionRequest::KnowledgeOverride { root, path } => override_into(sources, root, path),
-        ActionRequest::KnowledgeStoreClone { url, path } => match git::clone_store(
+        ActionRequest::LibraryOverrides { path } => overrides(sources, path),
+        ActionRequest::LibraryLayering => layering(sources),
+        ActionRequest::LibraryOverride { root, path } => override_into(sources, root, path),
+        ActionRequest::LibraryStoreClone { url, path, .. } => match git::clone_store(
             registry,
             url,
             path.as_deref(),
-            &settings.active_space().knowledge.clone_dir(),
+            &settings.active_space().library.knowledge.clone_dir(),
         ) {
             Ok(out) => registered(out),
             Err(e) => failed(e),
         },
-        ActionRequest::KnowledgeStoreRegister { path } => register(registry, path),
-        ActionRequest::KnowledgeStoreUnregister { id } => {
-            match registry::unregister(registry, id) {
-                Ok(left) => ActionResult::Ok(Some(serde_json::json!({
-                    "id": id,
-                    "left_on_disk": left.to_string_lossy(),
-                }))),
-                Err(e) => failed(e),
-            }
-        }
-        ActionRequest::KnowledgeStoreSetup {
+        ActionRequest::LibraryStoreRegister { path, .. } => register(registry, path),
+        ActionRequest::LibraryStoreUnregister { root } => unregister(registry, sources, root),
+        ActionRequest::LibraryStoreSetup {
             id,
             path,
             name,
             description,
             remote,
             init_git,
+            ..
         } => {
             let request = SetupRequest {
                 id: id.clone(),
@@ -213,16 +201,16 @@ fn execute_at(
                 Err(e) => failed(e),
             }
         }
-        ActionRequest::KnowledgeStoreFetch { root } => sync(sources, root, |path| {
+        ActionRequest::LibraryStoreFetch { root } => sync(sources, root, |path| {
             git::fetch(path).map(|()| git::status(path).unwrap_or_default())
         }),
-        ActionRequest::KnowledgeStorePull { root } => sync(sources, root, git::pull),
-        ActionRequest::KnowledgeStoreCommit {
+        ActionRequest::LibraryStorePull { root } => sync(sources, root, git::pull),
+        ActionRequest::LibraryStoreCommit {
             root,
             paths,
             message,
         } => sync(sources, root, |path| git::commit(path, paths, message)),
-        ActionRequest::KnowledgeStorePush { root } => sync(sources, root, git::push),
+        ActionRequest::LibraryStorePush { root } => sync(sources, root, git::push),
         _ => return None,
     })
 }
@@ -247,12 +235,21 @@ fn registered(out: RegisterOutcome) -> ActionResult {
     })))
 }
 
-fn discovered(sources: &Sources) -> KnowledgeStores {
-    discover::discover(sources)
+/// Every knowledge root discovery finds, under its Library key.
+///
+/// The one place this module discovers, and so the one place a root's key
+/// becomes its Library key (`knowledge:store:eng`): everything after —
+/// resolving the key a client sent back, a tree's `root_key`, a search hit, the
+/// layering answer, a session's recorded origin — reads it from here. The
+/// saved order was applied inside `discover`, in the keys it is written in.
+pub(super) fn discovered(sources: &Sources) -> KnowledgeStores {
+    let mut stores = discover::discover(sources);
+    okena_core::library::key_knowledge_stores(&mut stores);
+    stores
 }
 
 /// Every root, with sync state on each store.
-fn stores(sources: &Sources) -> KnowledgeStores {
+pub(super) fn stores(sources: &Sources) -> KnowledgeStores {
     let mut stores = discovered(sources);
     git::attach_status(&mut stores);
     stores
@@ -384,7 +381,7 @@ fn root_line(root: &KnowledgeRoot) -> serde_json::Value {
 /// Copy okena's default for `path` into `root`, at the same path.
 ///
 /// Reads through the defaults root rather than from the compiled-in constants
-/// so the copy is the exact file the Knowledge view was showing, and so the
+/// so the copy is the exact file the Library was showing, and so the
 /// path goes through the same checks a read does. An existing file is opened,
 /// never overwritten: a second Override must not discard the edits the first
 /// one was made for.
@@ -455,7 +452,7 @@ fn read_only(root: &KnowledgeRoot) -> String {
 /// A usable root the client named, and not okena's own.
 ///
 /// Every action that writes goes through this rather than [`resolve_root`]:
-/// the Knowledge view hides the controls, but the same actions are reachable
+/// the Library hides the controls, but the same actions are reachable
 /// from any paired client and from agents over okena's MCP server, so the
 /// refusal has to live at the daemon.
 pub(super) fn resolve_writable_root(
@@ -479,11 +476,11 @@ pub(super) fn resolve_root(
     let root = match key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(key) => stores.root(key).cloned().ok_or_else(|| {
             format!(
-                "unknown knowledge root `{key}` — it is no longer discovered; refresh the Knowledge view"
+                "unknown knowledge origin `{key}` — it is no longer discovered; refresh the Library"
             )
         })?,
         None => stores.default_root().cloned().ok_or_else(|| {
-            "no knowledge stores yet — clone or add one in Settings → Knowledge".to_string()
+            "no knowledge origins yet — clone or add one in Settings → Library".to_string()
         })?,
     };
     if !root.healthy {
@@ -505,7 +502,10 @@ fn tree_of(sources: &Sources, key: Option<&str>) -> ActionResult {
     let mut t = tree::read_tree(Path::new(&root.path));
     t.root_key = root.key;
     t.store_id = root.store_id;
-    to_result(serde_json::to_value(&t), "knowledge tree")
+    to_result(
+        serde_json::to_value(LibraryTree::Knowledge(t)),
+        "knowledge tree",
+    )
 }
 
 fn read(sources: &Sources, key: Option<&str>, path: &str) -> ActionResult {
@@ -527,7 +527,7 @@ fn read(sources: &Sources, key: Option<&str>, path: &str) -> ActionResult {
     }
     match std::fs::read_to_string(&real) {
         Ok(content) => to_result(
-            serde_json::to_value(KnowledgeDocument {
+            serde_json::to_value(LibraryDocument {
                 root_key: root.key,
                 path: path.to_string(),
                 revision: okena_core::fs::content_revision(&content),
@@ -542,30 +542,21 @@ fn read(sources: &Sources, key: Option<&str>, path: &str) -> ActionResult {
     }
 }
 
-/// Search every usable root's entries by name, path and content (QBL-436).
+/// Add every knowledge entry `filter` keeps to `result` (QBL-436).
 ///
 /// Only roots discovery found are read, and only the files their trees list,
 /// through the same path check a read goes through: a search must not be a
 /// way to read what a read would refuse. A root that is not usable is skipped
 /// rather than failing the search — the listing already says what is wrong
 /// with it.
-fn search(
+pub(super) fn search(
     sources: &Sources,
-    query: &str,
-    roots: &[String],
-    kinds: &[KnowledgeFacet],
-) -> ActionResult {
-    let filter = KnowledgeSearchFilter {
-        query: query.to_string(),
-        roots: roots.to_vec(),
-        kinds: kinds.to_vec(),
-    };
-    // The Root and Kind choices alone, to tell whether a file is worth opening.
-    let groups = KnowledgeSearchFilter {
-        query: String::new(),
-        ..filter.clone()
-    };
-    let mut result = KnowledgeSearchResult::default();
+    filter: &LibrarySearchFilter,
+    result: &mut LibrarySearchResult,
+) {
+    // The origin, type and kind choices alone, to tell whether a file is
+    // worth opening.
+    let groups = filter.without_text();
     for root in discovered(sources).roots.iter().filter(|r| r.healthy) {
         let dir = Path::new(&root.path);
         for entry in tree::read_tree(dir).entries {
@@ -581,26 +572,24 @@ fn search(
                 paths: &paths,
                 content,
             };
+            let matches = |f: &LibrarySearchFilter, content| {
+                library_matches(f, OriginType::Knowledge, Some(facet), &doc(content))
+            };
             // Names and paths first: most searches are settled by them, and a
-            // file its root or kind has already ruled out is never opened.
-            let hit = knowledge_matches(&filter, facet, &doc(""))
-                || (knowledge_matches(&groups, facet, &doc(""))
-                    && knowledge_matches(
-                        &filter,
-                        facet,
-                        &doc(&searchable_text(dir, &entry.path)),
-                    ));
+            // file its origin or kind has already ruled out is never opened.
+            let hit = matches(filter, "")
+                || (matches(&groups, "") && matches(filter, &searchable_text(dir, &entry.path)));
             if hit {
-                result.hits.push(KnowledgeHit {
+                result.hits.push(LibraryHit {
                     root_key: root.key.clone(),
+                    origin_type: OriginType::Knowledge,
                     path: entry.path,
-                    title: entry.title,
-                    facet,
+                    label: entry.title,
+                    facet: Some(facet),
                 });
             }
         }
     }
-    to_result(serde_json::to_value(result), "knowledge search")
 }
 
 /// A listed file's text for searching: empty when it cannot be read as text
@@ -674,6 +663,37 @@ fn register(registry: &Path, path: &str) -> ActionResult {
         .and_then(|p| okena_git::repository::origin_url(&p));
     match registry::register(registry, path, remote) {
         Ok(out) => registered(out),
+        Err(e) => failed(e),
+    }
+}
+
+/// Forget the store `key` names. The checkout stays on disk.
+///
+/// Found among everything discovered, not through [`resolve_root`]: a store
+/// whose checkout has gone missing is exactly the one somebody wants off the
+/// list. A project's knowledge folder is not in the registry and belongs to
+/// its repository, and okena's own store would only come back.
+fn unregister(registry: &Path, sources: &Sources, key: &str) -> ActionResult {
+    let Some(root) = discovered(sources).root(key).cloned() else {
+        return ActionResult::Err(super::library::unknown_origin(key));
+    };
+    if root.builtin {
+        return ActionResult::Err(read_only(&root));
+    }
+    let Some(id) = root
+        .store_id
+        .filter(|_| root.kind == KnowledgeRootKind::Store)
+    else {
+        return ActionResult::Err(format!(
+            "`{}` is part of a project, not a store — it goes when its `.okena/knowledge/` folder does",
+            root.name
+        ));
+    };
+    match registry::unregister(registry, &id) {
+        Ok(left) => ActionResult::Ok(Some(serde_json::json!({
+            "id": id,
+            "left_on_disk": left.to_string_lossy(),
+        }))),
         Err(e) => failed(e),
     }
 }
@@ -788,7 +808,7 @@ pub(super) fn draft(
     let context_items =
         super::context::resolve_for_launch(&ws.data.projects, settings, &context_refs);
     let projects = knowledge_project_sources(&ws.data.projects, settings);
-    let registry = registry::registry_path(&get_config_dir());
+    let registry = registry();
     // A draft session exists to write into the root, so okena's own is refused
     // here for the same reason a save is.
     let sources = knowledge_sources(&registry, &projects, settings);
@@ -831,8 +851,8 @@ pub(super) fn draft(
     // out of knowledge discovery from the first snapshot.
     if let Some(p) = ws.data.projects.iter_mut().find(|p| p.id == project_id) {
         p.custom_session = Some(format!("Knowledge: {request}"));
-        // The root it writes into, so the Knowledge view can list it beside
-        // the entries rather than matching on the goal text.
+        // The origin it writes into, so the Library can list it beside the
+        // entries rather than matching on the goal text.
         p.knowledge_root = Some(root.key.clone());
         p.agent_purpose = Some(okena_core::harness::AgentPurpose::KnowledgeDraft {
             root: root.key.clone(),
@@ -953,7 +973,11 @@ mod tests {
     use crate::workspace::persistence::AppSettings;
     use crate::workspace::state::ProjectData;
     use okena_core::api::ActionRequest;
-    use okena_core::knowledge::{KnowledgeDocument, KnowledgeStores, KnowledgeTree};
+    use okena_core::doc_search::LibrarySearchFilter;
+    use okena_core::knowledge::{KnowledgeStores, KnowledgeTree};
+    use okena_core::library::{
+        LibraryDocument as KnowledgeDocument, LibrarySearchResult, OriginType,
+    };
     use okena_knowledge::discover::ProjectSource;
     use std::path::{Path, PathBuf};
 
@@ -987,6 +1011,16 @@ mod tests {
         write(&root.join("docs/readme.md"), "# Readme\n");
     }
 
+    /// Every knowledge root with its sync state, as the Library's listing
+    /// gets them from this module.
+    fn all_roots(sandbox: &Path, projects: &[ProjectSource]) -> KnowledgeStores {
+        super::stores(&knowledge_sources(
+            &registry(sandbox),
+            projects,
+            &AppSettings::default(),
+        ))
+    }
+
     fn run(sandbox: &Path, projects: &[ProjectSource], action: ActionRequest) -> ActionResult {
         run_ordered(sandbox, projects, action, &AppSettings::default())
     }
@@ -1003,7 +1037,7 @@ mod tests {
     /// Settings whose only content is the saved order of knowledge roots.
     fn ordered(order: &[&str]) -> AppSettings {
         let mut settings = AppSettings::default();
-        settings.active_space_mut().knowledge.order = order.iter().map(|k| (*k).to_string()).collect();
+        settings.active_space_mut().library.knowledge.order = order.iter().map(|k| (*k).to_string()).collect();
         settings
     }
 
@@ -1054,7 +1088,7 @@ mod tests {
             .collect();
         assert_eq!(names, ["app"]);
 
-        settings.active_space_mut().knowledge.projects = false;
+        settings.active_space_mut().library.knowledge.projects = false;
         assert!(knowledge_project_sources(&[plain], &settings).is_empty());
     }
 
@@ -1067,31 +1101,33 @@ mod tests {
         let registered: serde_json::Value = ok!(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeStoreRegister {
+            ActionRequest::LibraryStoreRegister {
+                origin_type: OriginType::Knowledge,
                 path: checkout.to_string_lossy().into_owned(),
+                id: None,
             },
         ));
         assert_eq!(registered["id"], "acme-eng");
 
-        let stores: KnowledgeStores = ok!(run(&sandbox, &[], ActionRequest::KnowledgeStores));
-        let root = stores.root("store:acme-eng").expect("listed");
+        let stores: KnowledgeStores = all_roots(&sandbox, &[]);
+        let root = stores.root("knowledge:store:acme-eng").expect("listed");
         assert!(root.healthy);
         assert!(root.git.is_none(), "not a git checkout");
 
         let tree: KnowledgeTree = ok!(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeTree { root: None },
+            ActionRequest::LibraryTree { root: None },
         ));
-        assert_eq!(tree.root_key, "store:acme-eng");
+        assert_eq!(tree.root_key, "knowledge:store:acme-eng");
         assert_eq!(tree.store_id.as_deref(), Some("acme-eng"));
         assert_eq!(tree.entries[0].title, "Readme");
 
         let doc: KnowledgeDocument = ok!(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeRead {
-                root: Some("store:acme-eng".into()),
+            ActionRequest::LibraryRead {
+                root: Some("knowledge:store:acme-eng".into()),
                 path: "docs/readme.md".into(),
             },
         ));
@@ -1100,11 +1136,11 @@ mod tests {
         let _: serde_json::Value = ok!(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeStoreUnregister {
-                id: "acme-eng".into(),
+            ActionRequest::LibraryStoreUnregister {
+                root: "knowledge:store:acme-eng".into(),
             },
         ));
-        let stores: KnowledgeStores = ok!(run(&sandbox, &[], ActionRequest::KnowledgeStores));
+        let stores: KnowledgeStores = all_roots(&sandbox, &[]);
         assert!(stores.roots.is_empty());
         assert!(checkout.join("docs/readme.md").is_file(), "left on disk");
         std::fs::remove_dir_all(&sandbox).ok();
@@ -1123,33 +1159,33 @@ mod tests {
         okena_knowledge::registry::register(&registry(&sandbox), &checkout.to_string_lossy(), None)
             .unwrap();
 
-        let key = format!("path:{}", sandbox.to_string_lossy());
+        let key = format!("knowledge:path:{}", sandbox.to_string_lossy());
         assert!(
             err(run(
                 &sandbox,
                 &[],
-                ActionRequest::KnowledgeTree {
+                ActionRequest::LibraryTree {
                     root: Some(key.clone())
                 }
             ))
-            .contains("unknown knowledge root")
+            .contains("unknown knowledge origin")
         );
         assert!(
             err(run(
                 &sandbox,
                 &[],
-                ActionRequest::KnowledgeRead {
+                ActionRequest::LibraryRead {
                     root: Some(key),
                     path: "outside.md".into(),
                 },
             ))
-            .contains("unknown knowledge root")
+            .contains("unknown knowledge origin")
         );
         assert!(
             !err(run(
                 &sandbox,
                 &[],
-                ActionRequest::KnowledgeRead {
+                ActionRequest::LibraryRead {
                     root: None,
                     path: "docs/../../outside.md".into(),
                 },
@@ -1160,7 +1196,7 @@ mod tests {
             err(run(
                 &sandbox,
                 &[],
-                ActionRequest::KnowledgeRead {
+                ActionRequest::LibraryRead {
                     root: None,
                     path: "docs/huge.md".into(),
                 },
@@ -1182,7 +1218,7 @@ mod tests {
             run(
                 &sandbox,
                 &[],
-                ActionRequest::KnowledgeWrite {
+                ActionRequest::LibraryWrite {
                     root: None,
                     path: path.into(),
                     content: content.into(),
@@ -1194,7 +1230,7 @@ mod tests {
         let doc: KnowledgeDocument = ok!(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeRead {
+            ActionRequest::LibraryRead {
                 root: None,
                 path: "docs/readme.md".into(),
             },
@@ -1207,7 +1243,7 @@ mod tests {
         let reopened: KnowledgeDocument = ok!(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeRead {
+            ActionRequest::LibraryRead {
                 root: None,
                 path: "docs/readme.md".into(),
             },
@@ -1242,7 +1278,7 @@ mod tests {
             run(
                 &sandbox,
                 &[],
-                ActionRequest::KnowledgeFileCreate {
+                ActionRequest::LibraryFileCreate {
                     root: None,
                     path: path.into(),
                     content: content.into(),
@@ -1253,7 +1289,7 @@ mod tests {
             run(
                 &sandbox,
                 &[],
-                ActionRequest::KnowledgeFileRename {
+                ActionRequest::LibraryFileRename {
                     root: None,
                     from: from.into(),
                     to: to.into(),
@@ -1264,7 +1300,7 @@ mod tests {
             run(
                 &sandbox,
                 &[],
-                ActionRequest::KnowledgeFileDelete {
+                ActionRequest::LibraryFileDelete {
                     root: None,
                     path: path.into(),
                 },
@@ -1280,7 +1316,7 @@ mod tests {
         let tree: KnowledgeTree = ok!(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeTree { root: None },
+            ActionRequest::LibraryTree { root: None },
         ));
         assert!(tree.entry("skills/release/SKILL.md").is_some());
 
@@ -1310,7 +1346,7 @@ mod tests {
         let _: serde_json::Value = ok!(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeFolderCreate {
+            ActionRequest::LibraryFolderCreate {
                 root: None,
                 path: "templates/flows".into(),
             },
@@ -1353,7 +1389,7 @@ mod tests {
         (sandbox, defaults)
     }
 
-    const DEFAULTS_KEY: &str = "store:okena-defaults";
+    const DEFAULTS_KEY: &str = "knowledge:store:okena-defaults";
     const TEMPLATE: &str = "templates/briefs/spec-draft.md";
 
     #[test]
@@ -1361,16 +1397,16 @@ mod tests {
         let (sandbox, defaults) = with_defaults("readonly", "acme");
 
         // The flag the clients render read-only from.
-        let stores: KnowledgeStores = ok!(run(&sandbox, &[], ActionRequest::KnowledgeStores));
+        let stores: KnowledgeStores = all_roots(&sandbox, &[]);
         let root = stores.root(DEFAULTS_KEY).expect("listed");
         assert!(root.builtin && root.healthy);
-        assert!(!stores.root("store:acme").expect("listed").builtin);
+        assert!(!stores.root("knowledge:store:acme").expect("listed").builtin);
 
         // Reading is fine — that is the whole point of the store existing.
         let doc: KnowledgeDocument = ok!(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeRead {
+            ActionRequest::LibraryRead {
                 root: Some(DEFAULTS_KEY.into()),
                 path: TEMPLATE.into(),
             },
@@ -1379,27 +1415,27 @@ mod tests {
 
         // Every way of changing it is refused, and says what to do instead.
         let refused = [
-            ActionRequest::KnowledgeWrite {
+            ActionRequest::LibraryWrite {
                 root: Some(DEFAULTS_KEY.into()),
                 path: TEMPLATE.into(),
                 content: "ours".into(),
                 revision: doc.revision.clone(),
             },
-            ActionRequest::KnowledgeFileCreate {
+            ActionRequest::LibraryFileCreate {
                 root: Some(DEFAULTS_KEY.into()),
                 path: "templates/partials/mine.md".into(),
                 content: "x".into(),
             },
-            ActionRequest::KnowledgeFolderCreate {
+            ActionRequest::LibraryFolderCreate {
                 root: Some(DEFAULTS_KEY.into()),
                 path: "templates/mine".into(),
             },
-            ActionRequest::KnowledgeFileRename {
+            ActionRequest::LibraryFileRename {
                 root: Some(DEFAULTS_KEY.into()),
                 from: TEMPLATE.into(),
                 to: "templates/moved.md".into(),
             },
-            ActionRequest::KnowledgeFileDelete {
+            ActionRequest::LibraryFileDelete {
                 root: Some(DEFAULTS_KEY.into()),
                 path: TEMPLATE.into(),
             },
@@ -1432,7 +1468,7 @@ mod tests {
             ok!(run(
                 &sandbox,
                 &projects,
-                ActionRequest::KnowledgeOverrides { path: path.into() },
+                ActionRequest::LibraryOverrides { path: path.into() },
             ))
         };
 
@@ -1445,8 +1481,8 @@ mod tests {
             .map(|r| r["key"].as_str().unwrap())
             .collect();
         assert_eq!(keys.len(), 2, "{out}");
-        assert_eq!(keys[0], "store:acme", "stores come before projects");
-        assert!(keys[1].starts_with("path:"), "{out}");
+        assert_eq!(keys[0], "knowledge:store:acme", "stores come before projects");
+        assert!(keys[1].starts_with("knowledge:path:"), "{out}");
         assert!(!keys.contains(&DEFAULTS_KEY));
         // Nobody overrides it yet.
         assert!(out["winner"].is_null(), "{out}");
@@ -1465,7 +1501,7 @@ mod tests {
         // The store overrides it too, and being earlier it takes over.
         write(&sandbox.join("acme").join(TEMPLATE), "Draft it the acme way");
         let out = ask(TEMPLATE);
-        assert_eq!(out["winner"], "store:acme", "{out}");
+        assert_eq!(out["winner"], "knowledge:store:acme", "{out}");
 
         // An empty file is not an override, here as at launch.
         write(&sandbox.join("acme").join(TEMPLATE), "---\nfor: x\n---\n");
@@ -1492,7 +1528,7 @@ mod tests {
         )
         .unwrap();
         let ask = || -> serde_json::Value {
-            ok!(run(&sandbox, &[], ActionRequest::KnowledgeLayering))
+            ok!(run(&sandbox, &[], ActionRequest::LibraryLayering))
         };
         let keys = |v: &serde_json::Value| -> Vec<String> {
             v.as_array()
@@ -1511,8 +1547,8 @@ mod tests {
             .iter()
             .map(|r| r["key"].as_str().unwrap())
             .collect();
-        assert_eq!(listed, ["store:acme", "store:zeta", DEFAULTS_KEY], "{out}");
-        let stores: KnowledgeStores = ok!(run(&sandbox, &[], ActionRequest::KnowledgeStores));
+        assert_eq!(listed, ["knowledge:store:acme", "knowledge:store:zeta", DEFAULTS_KEY], "{out}");
+        let stores: KnowledgeStores = all_roots(&sandbox, &[]);
         let discovery: Vec<&str> = stores
             .roots
             .iter()
@@ -1536,16 +1572,16 @@ mod tests {
         let brief = at(&ask(), TEMPLATE);
         assert_eq!(
             keys(&brief["copies"]),
-            ["store:acme", "store:zeta", DEFAULTS_KEY],
+            ["knowledge:store:acme", "knowledge:store:zeta", DEFAULTS_KEY],
             "{brief}"
         );
-        assert_eq!(brief["applied"], "store:acme");
+        assert_eq!(brief["applied"], "knowledge:store:acme");
 
         // Delete the winning copy and the highlight moves down the order.
         std::fs::remove_file(sandbox.join("acme").join(TEMPLATE)).unwrap();
         let brief = at(&ask(), TEMPLATE);
-        assert_eq!(keys(&brief["copies"]), ["store:zeta", DEFAULTS_KEY]);
-        assert_eq!(brief["applied"], "store:zeta");
+        assert_eq!(keys(&brief["copies"]), ["knowledge:store:zeta", DEFAULTS_KEY]);
+        assert_eq!(brief["applied"], "knowledge:store:zeta");
 
         // An empty copy is a placeholder, not an answer: it is listed as a
         // copy, and what applies is still the layer below it.
@@ -1553,9 +1589,9 @@ mod tests {
         let brief = at(&ask(), TEMPLATE);
         assert_eq!(
             keys(&brief["copies"]),
-            ["store:acme", "store:zeta", DEFAULTS_KEY]
+            ["knowledge:store:acme", "knowledge:store:zeta", DEFAULTS_KEY]
         );
-        assert_eq!(brief["applied"], "store:zeta");
+        assert_eq!(brief["applied"], "knowledge:store:zeta");
 
         // With every override gone, okena's default applies again.
         std::fs::remove_file(sandbox.join("acme").join(TEMPLATE)).unwrap();
@@ -1583,7 +1619,7 @@ mod tests {
             run(
                 &sandbox,
                 &[],
-                ActionRequest::KnowledgeOverride {
+                ActionRequest::LibraryOverride {
                     root: root.into(),
                     path: TEMPLATE.into(),
                 },
@@ -1591,9 +1627,9 @@ mod tests {
         };
 
         // The copy is the default's exact bytes, at the same path.
-        let out: serde_json::Value = ok!(take("store:acme"));
+        let out: serde_json::Value = ok!(take("knowledge:store:acme"));
         assert_eq!(out["created"], true);
-        assert_eq!(out["root"], "store:acme");
+        assert_eq!(out["root"], "knowledge:store:acme");
         assert_eq!(out["path"], TEMPLATE);
         assert_eq!(
             std::fs::read_to_string(&copy).unwrap(),
@@ -1603,27 +1639,27 @@ mod tests {
         let listed: serde_json::Value = ok!(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeOverrides {
+            ActionRequest::LibraryOverrides {
                 path: TEMPLATE.into(),
             },
         ));
-        assert_eq!(listed["winner"], "store:acme");
+        assert_eq!(listed["winner"], "knowledge:store:acme");
 
         // Overriding again opens the edited copy rather than discarding it.
         write(&copy, "our own words");
-        let out: serde_json::Value = ok!(take("store:acme"));
+        let out: serde_json::Value = ok!(take("knowledge:store:acme"));
         assert_eq!(out["created"], false);
         assert_eq!(std::fs::read_to_string(&copy).unwrap(), "our own words");
 
         // okena's own store is not somewhere a copy can go.
         assert!(err(take(DEFAULTS_KEY)).contains("Override"));
         // Nor is a root nobody discovered, or a path outside the store.
-        assert!(err(take("store:nope")).contains("unknown knowledge root"));
+        assert!(err(take("knowledge:store:nope")).contains("unknown knowledge origin"));
         assert!(!err(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeOverride {
-                root: "store:acme".into(),
+            ActionRequest::LibraryOverride {
+                root: "knowledge:store:acme".into(),
                 path: "../../escaped.md".into(),
             },
         ))
@@ -1695,8 +1731,8 @@ mod tests {
         let _: serde_json::Value = ok!(run_ordered(
             &sandbox,
             &projects,
-            ActionRequest::KnowledgeFileDelete {
-                root: Some("store:ops".into()),
+            ActionRequest::LibraryFileDelete {
+                root: Some("knowledge:store:ops".into()),
                 path: TEMPLATE.into(),
             },
             &ordered(&order),
@@ -1732,13 +1768,13 @@ mod tests {
         // "okena-defaults is always consulted last and isn't part of the
         // order": its own copy of the template cannot be dragged over a root.
         assert_eq!(
-            launched(&[DEFAULTS_KEY, "store:acme"]).text(),
+            launched(&["store:okena-defaults", "store:acme"]).text(),
             "Acme's way."
         );
         std::fs::remove_file(sandbox.join("acme").join(TEMPLATE)).unwrap();
         std::fs::remove_file(sandbox.join("zeta").join(TEMPLATE)).unwrap();
         assert!(
-            launched(&[DEFAULTS_KEY]).source.is_builtin(),
+            launched(&["store:okena-defaults"]).source.is_builtin(),
             "with no root holding it, the answer is okena's compiled-in one"
         );
 
@@ -1786,8 +1822,8 @@ mod tests {
         let out: serde_json::Value = ok!(run(
             &sandbox,
             &projects,
-            ActionRequest::KnowledgeOverride {
-                root: "store:acme".into(),
+            ActionRequest::LibraryOverride {
+                root: "knowledge:store:acme".into(),
                 path: TEMPLATE.into(),
             },
         ));
@@ -1796,16 +1832,16 @@ mod tests {
         let doc: KnowledgeDocument = ok!(run(
             &sandbox,
             &projects,
-            ActionRequest::KnowledgeRead {
-                root: Some("store:acme".into()),
+            ActionRequest::LibraryRead {
+                root: Some("knowledge:store:acme".into()),
                 path: TEMPLATE.into(),
             },
         ));
         let _: serde_json::Value = ok!(run(
             &sandbox,
             &projects,
-            ActionRequest::KnowledgeWrite {
-                root: Some("store:acme".into()),
+            ActionRequest::LibraryWrite {
+                root: Some("knowledge:store:acme".into()),
                 path: TEMPLATE.into(),
                 content: "Draft it the acme way.".into(),
                 revision: doc.revision,
@@ -1818,7 +1854,7 @@ mod tests {
         assert_eq!(
             b.source,
             prompts::Source::Root {
-                key: "store:acme".into(),
+                key: "knowledge:store:acme".into(),
                 path: TEMPLATE.into()
             }
         );
@@ -1834,8 +1870,8 @@ mod tests {
         let _: serde_json::Value = ok!(run(
             &sandbox,
             &projects,
-            ActionRequest::KnowledgeFileDelete {
-                root: Some("store:acme".into()),
+            ActionRequest::LibraryFileDelete {
+                root: Some("knowledge:store:acme".into()),
                 path: TEMPLATE.into(),
             },
         ));
@@ -1863,9 +1899,9 @@ mod tests {
         let e = err(run(
             &sandbox,
             &[],
-            ActionRequest::KnowledgeTree { root: None },
+            ActionRequest::LibraryTree { root: None },
         ));
-        assert!(e.contains("Settings → Knowledge"), "unhelpful: {e}");
+        assert!(e.contains("Settings → Library"), "unhelpful: {e}");
         std::fs::remove_dir_all(&sandbox).ok();
     }
 
@@ -1878,13 +1914,13 @@ mod tests {
             name: "app".into(),
             path: repo.clone(),
         }];
-        let stores: KnowledgeStores = ok!(run(&sandbox, &projects, ActionRequest::KnowledgeStores));
+        let stores: KnowledgeStores = all_roots(&sandbox, &projects);
         let key = stores.roots[0].key.clone();
 
         let tree: KnowledgeTree = ok!(run(
             &sandbox,
             &projects,
-            ActionRequest::KnowledgeTree {
+            ActionRequest::LibraryTree {
                 root: Some(key.clone()),
             },
         ));
@@ -1894,7 +1930,7 @@ mod tests {
             err(run(
                 &sandbox,
                 &projects,
-                ActionRequest::KnowledgeStoreFetch { root: key },
+                ActionRequest::LibraryStoreFetch { root: key },
             ))
             .contains("not a store")
         );
@@ -1938,19 +1974,23 @@ mod tests {
         query: &str,
         roots: &[&str],
         kinds: &[okena_core::doc_search::KnowledgeFacet],
-    ) -> okena_core::doc_search::KnowledgeSearchResult {
-        ok!(run(
-            sandbox,
-            &[],
-            ActionRequest::KnowledgeSearch {
-                query: query.into(),
-                roots: roots.iter().map(|r| (*r).to_string()).collect(),
-                kinds: kinds.to_vec(),
-            },
-        ))
+    ) -> LibrarySearchResult {
+        let filter = LibrarySearchFilter {
+            query: query.into(),
+            roots: roots.iter().map(|r| (*r).to_string()).collect(),
+            types: Vec::new(),
+            kinds: kinds.to_vec(),
+        };
+        let mut result = LibrarySearchResult::default();
+        super::search(
+            &knowledge_sources(&registry(sandbox), &[], &AppSettings::default()),
+            &filter,
+            &mut result,
+        );
+        result
     }
 
-    fn found(result: &okena_core::doc_search::KnowledgeSearchResult) -> Vec<String> {
+    fn found(result: &LibrarySearchResult) -> Vec<String> {
         result
             .hits
             .iter()
@@ -1964,10 +2004,10 @@ mod tests {
         searchable(&sandbox);
         // No name or path says "zeppelin"; only the file's text does.
         let result = search(&sandbox, "  ZEPPELIN ", &[], &[]);
-        assert_eq!(found(&result), ["store:acme-eng:templates/house-style.md"]);
+        assert_eq!(found(&result), ["knowledge:store:acme-eng:templates/house-style.md"]);
         assert_eq!(
             result.hits[0].facet,
-            okena_core::doc_search::KnowledgeFacet::Template
+            Some(okena_core::doc_search::KnowledgeFacet::Template)
         );
         std::fs::remove_dir_all(&sandbox).ok();
     }
@@ -1986,8 +2026,8 @@ mod tests {
         assert_eq!(
             found(&partials),
             [
-                "store:acme-eng:templates/partials/context.md",
-                "store:acme-ops:templates/partials/oncall.md",
+                "knowledge:store:acme-eng:templates/partials/context.md",
+                "knowledge:store:acme-ops:templates/partials/oncall.md",
             ]
         );
         assert_eq!(partials.total, 8, "the total is not narrowed");
@@ -1995,7 +2035,7 @@ mod tests {
         // A skill is found by a supporting file it carries.
         assert_eq!(
             found(&search(&sandbox, "checklist", &[], &[])),
-            ["store:acme-eng:skills/release/SKILL.md"]
+            ["knowledge:store:acme-eng:skills/release/SKILL.md"]
         );
         std::fs::remove_dir_all(&sandbox).ok();
     }
@@ -2011,28 +2051,28 @@ mod tests {
         assert_eq!(
             found(&partials),
             [
-                "store:acme-eng:templates/partials/context.md",
-                "store:acme-ops:templates/partials/oncall.md",
+                "knowledge:store:acme-eng:templates/partials/context.md",
+                "knowledge:store:acme-ops:templates/partials/oncall.md",
             ]
         );
-        assert!(partials.hits.iter().all(|h| h.facet == F::Partial));
+        assert!(partials.hits.iter().all(|h| h.facet == Some(F::Partial)));
 
         // Two kinds widen.
         assert_eq!(search(&sandbox, "", &[], &[F::Partial, F::Brief]).hits.len(), 3);
 
         // A root narrows, and text narrows within it.
-        let ops = search(&sandbox, "", &["store:acme-ops"], &[]);
-        assert!(ops.hits.iter().all(|h| h.root_key == "store:acme-ops"));
+        let ops = search(&sandbox, "", &["knowledge:store:acme-ops"], &[]);
+        assert!(ops.hits.iter().all(|h| h.root_key == "knowledge:store:acme-ops"));
         assert_eq!(ops.hits.len(), 2);
         assert_eq!(
-            found(&search(&sandbox, "page", &["store:acme-ops"], &[])),
-            ["store:acme-ops:templates/partials/oncall.md"]
+            found(&search(&sandbox, "page", &["knowledge:store:acme-ops"], &[])),
+            ["knowledge:store:acme-ops:templates/partials/oncall.md"]
         );
 
         // Root and kind together: the one partial in that root.
         assert_eq!(
-            found(&search(&sandbox, "", &["store:acme-eng"], &[F::Partial])),
-            ["store:acme-eng:templates/partials/context.md"]
+            found(&search(&sandbox, "", &["knowledge:store:acme-eng"], &[F::Partial])),
+            ["knowledge:store:acme-eng:templates/partials/context.md"]
         );
         std::fs::remove_dir_all(&sandbox).ok();
     }
@@ -2043,7 +2083,7 @@ mod tests {
         searchable(&sandbox);
         write(&sandbox.join("elsewhere/docs/secret.md"), "ZEPPELIN SECRET\n");
         // A key is a choice among discovered roots, never a directory.
-        let key = format!("path:{}", sandbox.join("elsewhere").to_string_lossy());
+        let key = format!("knowledge:path:{}", sandbox.join("elsewhere").to_string_lossy());
         let result = search(&sandbox, "secret", &[&key], &[]);
         assert!(result.hits.is_empty(), "{result:?}");
         // And an unfiltered search never leaves the discovered roots either.

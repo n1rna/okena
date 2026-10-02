@@ -14,9 +14,8 @@ mod render_general;
 mod render_github;
 mod render_harness;
 mod render_hooks;
-mod render_knowledge;
+mod render_library;
 mod render_paired_devices;
-mod render_specs;
 mod render_tasks;
 mod render_terminal;
 mod render_worktree;
@@ -107,10 +106,8 @@ pub struct SettingsPanel {
     /// The GitHub page: where to run gh from.
     pub(super) gh_path_input: Entity<SimpleInputState>,
     pub(super) harness_agent_root_input: Entity<SimpleInputState>,
-    /// The Specs page: OpenSpec stores, discovery and folders.
-    specs: render_specs::SpecsPage,
-    /// The Knowledge page: stores, adding one, and discovery.
-    knowledge: render_knowledge::KnowledgePage,
+    /// The Library page: origins of every type, adding one, and discovery.
+    library: render_library::LibraryPage,
     pub(super) harness_claude_extra_args_input: Entity<SimpleInputState>,
     pub(super) harness_copilot_extra_args_input: Entity<SimpleInputState>,
     pub(super) harness_codex_extra_args_input: Entity<SimpleInputState>,
@@ -207,8 +204,7 @@ impl SettingsPanel {
             // scroll-to-element machinery. Arriving here means the caller sent
             // you to add something, so the form leads the page rather than
             // being scrolled to.
-            panel.specs.add_first = true;
-            panel.knowledge.add_first = true;
+            panel.library.add_first = true;
         }
         panel
     }
@@ -964,14 +960,7 @@ impl SettingsPanel {
             cx.new(|cx| SimpleInputState::new(cx).placeholder("Acme Linear"));
         let tasks_rename_input = cx.new(SimpleInputState::new);
 
-        let specs = render_specs::SpecsPage::new(
-            s.active_space().specs.data_dir.clone(),
-            s.active_space().specs.config_dir.clone(),
-            s.active_space().specs.clone_dir.clone(),
-            cx,
-        );
-        let knowledge =
-            render_knowledge::KnowledgePage::new(s.active_space().knowledge.clone_dir.clone(), cx);
+        let library = render_library::LibraryPage::new(&s.active_space().library, cx);
 
         // One per known agent, added to its launches alongside the brief.
         let extra_args_input =
@@ -1022,9 +1011,9 @@ impl SettingsPanel {
         )
         .detach();
 
-        let github_host_input = render_specs::text_input(cx, "e.g. github.acme.corp", None);
+        let github_host_input = render_library::text_input(cx, "e.g. github.acme.corp", None);
         let gh_path_input =
-            render_specs::text_input(cx, "e.g. /opt/homebrew/bin/gh", s.gh_path.clone());
+            render_library::text_input(cx, "e.g. /opt/homebrew/bin/gh", s.gh_path.clone());
         cx.subscribe(&gh_path_input, |_this, entity, _: &InputChangedEvent, cx| {
             let val = entity.read(cx).value().to_string();
             settings_entity(cx).update(cx, |state, cx| state.set_gh_path(val, cx));
@@ -1114,8 +1103,7 @@ impl SettingsPanel {
             github_host_input,
             gh_path_input,
             harness_agent_root_input,
-            specs,
-            knowledge,
+            library,
             harness_claude_extra_args_input,
             harness_copilot_extra_args_input,
             harness_codex_extra_args_input,
@@ -1510,8 +1498,7 @@ impl SettingsPanel {
             SettingsCategory::Worktree => self.render_worktree(cx).into_any_element(),
             SettingsCategory::GitHub => self.render_github(cx).into_any_element(),
             SettingsCategory::Harness => self.render_harness(cx).into_any_element(),
-            SettingsCategory::Specs => self.render_specs(cx),
-            SettingsCategory::Knowledge => self.render_knowledge(cx),
+            SettingsCategory::Library => self.render_library(cx),
             SettingsCategory::Tasks => self.render_tasks(cx).into_any_element(),
             SettingsCategory::Hooks => self.render_hooks(cx).into_any_element(),
             SettingsCategory::Extensions => self.render_extensions(cx).into_any_element(),

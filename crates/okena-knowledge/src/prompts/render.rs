@@ -176,7 +176,7 @@ fn parse(inner: &str) -> Option<Token<'_>> {
 
 /// One identifier: a letter or underscore, then letters, digits and
 /// underscores. The same rule `docs/reference/knowledge.md` states for listing
-/// a template's placeholders, so what the Knowledge view shows and what the
+/// a template's placeholders, so what the Library shows and what the
 /// renderer fills agree.
 fn is_placeholder(name: &str) -> bool {
     let mut chars = name.chars();

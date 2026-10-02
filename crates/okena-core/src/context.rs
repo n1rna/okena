@@ -154,17 +154,18 @@ mod tests {
     #[test]
     fn a_launch_from_an_older_client_carries_no_context() {
         use crate::api::ActionRequest;
-        let old = r#"{"action":"knowledge_draft","request":"write the CI notes"}"#;
-        let ActionRequest::KnowledgeDraft { context, .. } =
+        let old = r#"{"action":"library_draft","request":"write the CI notes"}"#;
+        let ActionRequest::LibraryDraft { context, .. } =
             serde_json::from_str::<ActionRequest>(old).unwrap()
         else {
-            panic!("not a knowledge draft");
+            panic!("not a library draft");
         };
         assert!(context.is_empty());
         // And an empty one is not sent, so an older daemon still accepts it.
-        let body = serde_json::to_string(&ActionRequest::KnowledgeDraft {
+        let body = serde_json::to_string(&ActionRequest::LibraryDraft {
             root: None,
             request: "x".into(),
+            name: None,
             agent_command: None,
             model: None,
             context: Vec::new(),

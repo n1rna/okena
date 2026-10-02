@@ -1,4 +1,4 @@
-//! The dialog a Specs or Knowledge launcher picks projects and context in.
+//! The dialog a Library launcher picks projects and context in.
 //!
 //! Those launchers stand among the document or form they are about, and chip
 //! searches beside them crowded it. Their gear opens this instead: the same
@@ -23,14 +23,12 @@ const PROJECTS_HINT: &str = "Optional. Their map entries, specs and knowledge ra
 /// Which launcher's picks the dialog is showing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ContextTarget {
-    /// The New change form.
+    /// The New change form of a spec origin.
     SpecDraft,
-    /// The Write with an agent form.
+    /// The Write with an agent form of a knowledge or a freeform origin.
     KnowledgeDraft,
-    /// The Refine with agent card under an open spec document.
-    SpecRefine,
-    /// The Refine with agent card under an open knowledge file.
-    KnowledgeRefine,
+    /// The Refine with agent card under an open document.
+    Refine,
 }
 
 impl ContextTarget {
@@ -38,18 +36,15 @@ impl ContextTarget {
         match self {
             ContextTarget::SpecDraft => "spec-draft",
             ContextTarget::KnowledgeDraft => "knowledge-draft",
-            ContextTarget::SpecRefine => "spec-refine",
-            ContextTarget::KnowledgeRefine => "knowledge-refine",
+            ContextTarget::Refine => "library-refine",
         }
     }
 
     fn subtitle(self) -> &'static str {
         match self {
             ContextTarget::SpecDraft => "For the agent drafting the new change",
-            ContextTarget::KnowledgeDraft => "For the agent writing in knowledge",
-            ContextTarget::SpecRefine | ContextTarget::KnowledgeRefine => {
-                "For the agent refining this document"
-            }
+            ContextTarget::KnowledgeDraft => "For the agent writing in this origin",
+            ContextTarget::Refine => "For the agent refining this document",
         }
     }
 }
@@ -91,19 +86,17 @@ impl HarnessPane {
 
     fn pickers_slot(&self, target: ContextTarget) -> Option<&Entity<LaunchPickers>> {
         match target {
-            ContextTarget::SpecDraft => self.specs.pickers.as_ref(),
+            ContextTarget::SpecDraft => self.library.pickers.as_ref(),
             ContextTarget::KnowledgeDraft => self.knowledge_draft.pickers.as_ref(),
-            ContextTarget::SpecRefine => self.spec_refine.pickers.as_ref(),
-            ContextTarget::KnowledgeRefine => self.knowledge_refine.pickers.as_ref(),
+            ContextTarget::Refine => self.refine.pickers.as_ref(),
         }
     }
 
     fn pickers_slot_mut(&mut self, target: ContextTarget) -> &mut Option<Entity<LaunchPickers>> {
         match target {
-            ContextTarget::SpecDraft => &mut self.specs.pickers,
+            ContextTarget::SpecDraft => &mut self.library.pickers,
             ContextTarget::KnowledgeDraft => &mut self.knowledge_draft.pickers,
-            ContextTarget::SpecRefine => &mut self.spec_refine.pickers,
-            ContextTarget::KnowledgeRefine => &mut self.knowledge_refine.pickers,
+            ContextTarget::Refine => &mut self.refine.pickers,
         }
     }
 

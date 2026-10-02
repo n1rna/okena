@@ -508,7 +508,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         "ShowHarness",
         ActionDescription {
             name: "Engineering Harness",
-            description: "Open the harness window (tasks, specs, knowledge)",
+            description: "Open the harness window (tasks, library, testing)",
             category: "Global",
             factory: || Box::new(ShowHarness),
         },
@@ -517,7 +517,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         "SaveDocument",
         ActionDescription {
             name: "Save Document",
-            description: "Save the Specs or Knowledge document being edited",
+            description: "Save the Library document being edited",
             category: "Harness",
             factory: || Box::new(SaveDocument),
         },
@@ -704,7 +704,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         "ToggleOverviewSearch",
         ActionDescription {
             name: "Toggle Search Island",
-            description: "Open or close the search island on Tasks, Specs, Knowledge and the Agents and Projects overviews",
+            description: "Open or close the search island on Tasks, Library and the Agents and Projects overviews",
             category: "Layout",
             factory: || Box::new(ToggleOverviewSearch),
         },
@@ -713,7 +713,7 @@ pub fn get_action_descriptions() -> HashMap<&'static str, ActionDescription> {
         "FocusIslandSearch",
         ActionDescription {
             name: "Search This Page",
-            description: "Put the cursor in the search island on Tasks, Specs, Knowledge and the Agents and Projects overviews, opening it first if it is closed. A focused terminal keeps the key for its own search",
+            description: "Put the cursor in the search island on Tasks, Library and the Agents and Projects overviews, opening it first if it is closed. A focused terminal keeps the key for its own search",
             category: "Layout",
             factory: || Box::new(FocusIslandSearch),
         },

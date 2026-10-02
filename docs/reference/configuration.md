@@ -309,8 +309,8 @@ Controls default behavior when creating and closing git worktrees:
 
 #### Spaces
 
-A **space** is a separate set of projects, agents, tasks and roots inside one
-profile; [`spaces.md`](spaces.md) covers what one is and how it behaves. The
+A **space** is a separate set of projects, agents, tasks and Library origins
+inside one profile; [`spaces.md`](spaces.md) covers what one is and how it behaves. The
 list lives here, and the keys below are the ones that belong to a space rather
 than to the profile.
 
@@ -321,6 +321,7 @@ than to the profile.
 | `spaces[].name` | string | — | What the dot is called on hover and in the **+N** menu |
 | `spaces[].connection` | string | — | The task backend connection this space reads, by connection id. Exactly one; unset falls back to `linear`, which is what every profile had before spaces |
 | `spaces[].tasks` | object | `{}` | The hard filter scope on that connection: `{ "groups": { "<axis>": ["<group id>"] }, "labels": [...], "statuses": [...] }`, where an axis is `team`, `project`, `iteration` or whatever else the backend reports. Any of the values within one facet, all of the facets together. Empty means every task on the connection. Unknown keys are refused rather than read as "no filters" |
+| `spaces[].library` | object | — | The space's Library origins and how they are found, per origin type ([Library](#library)) |
 | `active_space` | string | `"default"` | Which space is showing. Belongs to the profile: switching it in any window or client switches it everywhere |
 
 A `settings.json` with no `spaces` is migrated on load: one Default space is
@@ -329,77 +330,65 @@ legacy `harness.spec_repo`, and those four keys are dropped on the next save.
 Connections themselves are not here — they hold credentials, so they live in
 `<profile>/tasks_credentials.json`.
 
-#### Specs (OpenSpec)
+#### Library
 
-The harness Specs view follows OpenSpec's store model
-([openspec.dev/docs/stores](https://openspec.dev/docs/stores)). It shows every
-OpenSpec *root* it can find:
+The harness [Library](library.md) lists origins of three types. Each type has
+its own block under `spaces[].library`, so each space has its own origins
+([spaces.md](spaces.md)):
 
-- **Stores** registered on this machine — what `openspec store list` shows, read
-  from OpenSpec's registry (`<data>/stores/registry.yaml`).
-- **Projects** whose repository holds an `openspec/` tree. A project whose
-  `openspec/config.yaml` only says `store: <id>` resolves to that store, as the
-  CLI does.
-- **Folders** listed in settings.
+```jsonc
+"library": {
+  "knowledge": { "projects": true, "stores": ["acme-eng"], "order": ["store:acme-eng"] },
+  "spec": { "registry": true, "projects": true, "folders": ["~/acme/specs"] },
+  "freeform": { "folders": ["~/acme/notes"] }
+}
+```
 
-Settings → Specs registers, creates (`openspec store setup`) and unregisters
-stores, and sets OpenSpec's machine `defaultStore`. These change OpenSpec's own
-files, using the CLI's `registry.yaml.lock` protocol, so the `openspec` CLI sees
-the same stores. The CLI does not need to be installed.
+Settings → Library edits all three. Registered stores are not in
+`settings.json`: checkout paths are machine state, kept in okena's knowledge
+registry (`<profile config dir>/knowledge/stores.yaml`) and in OpenSpec's own
+registry.
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-These keys live on a **space** (`spaces[].specs`), not on `harness`: each space
-has its own Specs roots and their order ([spaces.md](spaces.md)). A
-`harness.specs` block in an older `settings.json` is read once into the Default
-space and dropped on the next save.
+**Knowledge origins** ([knowledge.md](knowledge.md)):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `spaces[].specs.registry` | bool | `true` | List every registered store. When off, a store is still shown if a project points at it. A newly added space starts with this off, so it begins with no roots |
-| `spaces[].specs.projects` | bool | `true` | Find roots and `store:` pointers in **that space's** projects (worktrees and agent sessions are skipped) |
-| `spaces[].specs.folders` | string[] | `[]` | Extra folders to show as roots without registering them. The order is the order they are shown in |
-| `spaces[].specs.data_dir` | string | — | OpenSpec data directory. Unset resolves like the CLI: `$XDG_DATA_HOME/openspec`, else `~/.local/share/openspec` (`%LOCALAPPDATA%\openspec` on Windows) |
-| `spaces[].specs.config_dir` | string | — | OpenSpec config directory holding `config.json`. Unset resolves `$XDG_CONFIG_HOME/openspec`, else `~/.config/openspec` (`%APPDATA%\openspec` on Windows) |
-| `spaces[].specs.clone_dir` | string | `~/openspec` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
-| `harness.spec_repo` | string | — | Legacy single spec repository. Folded into the Default space's folders on load and dropped on the next save |
+| `spaces[].library.knowledge.projects` | bool | `true` | Find knowledge in **that space's** projects: the stores a repository follows in `.okena/knowledge.yaml`, and its own `.okena/knowledge/` (or `root:`) folders. Worktrees and agent sessions are skipped |
+| `spaces[].library.knowledge.stores` | string[] | — | The registered stores this space follows, by id. Unset is every registered store, which is what Default keeps; a newly added space starts with an empty list, so it follows none. An id naming a store that is no longer registered is skipped |
+| `spaces[].library.knowledge.order` | string[] | `[]` | The order this space's knowledge origins layer in, as root keys (`store:<id>`, `path:<absolute path>`), top first. An origin not listed goes to the bottom; `okena-defaults` is always last and never listed; keys for origins that are gone drop out ([the order](knowledge.md#the-order)). Per space, so two spaces may follow the same store and layer it differently |
+| `spaces[].library.knowledge.clone_dir` | string | `~/knowledge` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
 
-The Specs view opens OpenSpec's `defaultStore` when it is set and healthy, else
-the first healthy store, else the first healthy root. "New change" writes the
-`.openspec.yaml` that `openspec new change` writes, plus a stub `proposal.md`, in
-the chosen root. When that root is a store, the drafting agent is told to pass
-`--store <id>` to the CLI.
+There is no key naming one origin as the *source* of launch briefs. Templates,
+partials and skills resolve across every knowledge origin okena can see, in the
+order above ([resolution](knowledge.md#resolution)).
 
-Documents edit in place, the way knowledge entries do (see
-[knowledge.md](knowledge.md#in-okena)). The tree's `+` buttons create a change
-folder, a capability (`openspec/specs/<name>/spec.md`) or a document inside a
-change, and the open document has **Rename** and **Delete…**. Deleting a
-change's last document leaves the change listed with "no artifacts yet".
-
-#### Knowledge
-
-Knowledge stores are git repositories of engineering docs, skills, agents and
-prompt templates; [`knowledge.md`](knowledge.md) describes their layout and
-behaviour. The stores on a machine are listed in okena's registry,
-`<profile config dir>/knowledge/stores.yaml`, not in `settings.json`: checkout
-paths are machine state. Settings shape discovery and cloning, and hold the one
-order the roots layer in.
+**Spec origins** ([specs.md](specs.md)):
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `spaces[].knowledge.projects` | bool | `true` | Find knowledge in **that space's** projects: the stores a repository follows in `.okena/knowledge.yaml`, and its own `.okena/knowledge/` (or `root:`) folders. Worktrees and agent sessions are skipped |
-| `spaces[].knowledge.stores` | string[] | — | The registered stores this space follows, by id. Unset is every registered store, which is what Default keeps; a newly added space starts with an empty list, so it follows none. An id naming a store that is no longer registered is skipped |
-| `spaces[].knowledge.order` | list of strings | `[]` | The order this space's knowledge roots layer in, as root keys (`store:<id>`, `path:<absolute path>`), top first. A root not listed goes to the bottom; `okena-defaults` is always last and never listed; keys for roots that are gone drop out ([the order](knowledge.md#the-order)). Per space, so two spaces may follow the same store and layer it differently |
-| `spaces[].knowledge.clone_dir` | string | `~/knowledge` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
+| `spaces[].library.spec.registry` | bool | `true` | List every store in OpenSpec's registry. When off, a store is still shown if a project points at it. A newly added space starts with this off, so it begins with no spec origins |
+| `spaces[].library.spec.projects` | bool | `true` | Find roots and `store:` pointers in **that space's** projects (worktrees and agent sessions are skipped) |
+| `spaces[].library.spec.folders` | string[] | `[]` | Extra folders to show as spec origins without registering them. The order is the order they are shown in |
+| `spaces[].library.spec.data_dir` | string | — | OpenSpec data directory. Unset resolves like the CLI: `$XDG_DATA_HOME/openspec`, else `~/.local/share/openspec` (`%LOCALAPPDATA%\openspec` on Windows) |
+| `spaces[].library.spec.config_dir` | string | — | OpenSpec config directory holding `config.json`. Unset resolves `$XDG_CONFIG_HOME/openspec`, else `~/.config/openspec` (`%APPDATA%\openspec` on Windows) |
+| `spaces[].library.spec.clone_dir` | string | `~/openspec` | Folder a store is cloned into when no destination is given; the clone is named the way `git clone` names it |
 
-Like the Specs keys, these live on a **space**. A `harness.knowledge` block in an
-older `settings.json` is read once into the Default space and dropped on the next
-save.
+**Freeform origins** ([library.md](library.md#freeform-origins)):
 
-There is no key naming one root as the *source* of launch briefs. Templates,
-partials and skills resolve across every root okena can see, in the order above
-([resolution](knowledge.md#resolution)); a `harness.knowledge.prompts` left in
-an older `settings.json` is ignored and dropped on the next save.
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `spaces[].library.freeform.folders` | string[] | `[]` | The folders listed as freeform origins, in the order they are shown. Adding or removing one in the Library writes this list |
+| `spaces[].library.freeform.clone_dir` | string | `~/library` | Folder a freeform origin is cloned into when no destination is given; the clone is named the way `git clone` names it |
+
+Older shapes are read on load and written in this one on the next save:
+
+| Older key | Read into |
+|---|---|
+| `spaces[].specs` | `spaces[].library.spec` |
+| `spaces[].knowledge` | `spaces[].library.knowledge`, the saved order included |
+| `harness.specs`, `harness.knowledge` | The Default space's `library.spec` and `library.knowledge` |
+| `harness.spec_repo` | A folder in the Default space's `library.spec.folders` |
+| `harness.knowledge.prompts` | Ignored and dropped |
 
 #### Agent options
 
@@ -537,7 +526,7 @@ Set `enabled` to `false` to disable a specific binding without removing it:
 | `Copy` | `Cmd+C` / `Ctrl+Shift+C` | Copy selection |
 | `Paste` | `Cmd+V` / `Ctrl+Shift+V` | Paste from clipboard |
 | `Search` | `Cmd+F` / `Ctrl+F` (in terminal) | Search in terminal |
-| `FocusIslandSearch` | `Cmd+F` / `Ctrl+F` (outside a terminal) | Put the cursor in the search island on Tasks, Specs, Knowledge and the Projects and Agents overviews, opening it if it is closed |
+| `FocusIslandSearch` | `Cmd+F` / `Ctrl+F` (outside a terminal) | Put the cursor in the search island on Tasks, the Library and the Projects and Agents overviews, opening it if it is closed |
 | `ToggleOverviewSearch` | `Cmd+Shift+S` / `Ctrl+Shift+S` | Open or close that search island |
 | `ScrollUp` / `ScrollDown` | `Shift+PgUp` / `Shift+PgDn` | Scroll terminal output |
 | `ZoomIn` / `ZoomOut` | `Cmd+=` / `Cmd+-` | Zoom terminal font |

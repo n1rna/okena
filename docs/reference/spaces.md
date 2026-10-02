@@ -10,7 +10,8 @@ Each space has its own:
 - agents, the closed-agent history included (an agent session *is* a project)
 - folders, which group projects inside its list
 - tasks: one task backend connection, and the filters it is scoped to
-- Knowledge and Specs roots, including their order
+- [Library](library.md) origins — knowledge, spec and freeform — including
+  the order knowledge origins layer in
 
 **A space is not a workspace.** okena already uses "workspace" for the one set
 of projects and layouts saved per profile — `WorkspaceData`, `workspace.json`,
@@ -49,8 +50,11 @@ A space spans two files, which is why only the daemon writes one.
       "name": "Client A",
       "connection": "linear-2",
       "tasks": { "groups": { "project": ["alpha"] } },
-      "specs": { "registry": false, "projects": true, "folders": ["~/acme/specs"] },
-      "knowledge": { "projects": true, "stores": ["acme-eng"] }
+      "library": {
+        "knowledge": { "projects": true, "stores": ["acme-eng"] },
+        "spec": { "registry": false, "projects": true, "folders": ["~/acme/specs"] },
+        "freeform": { "folders": ["~/acme/notes"] }
+      }
     }
   ]
 }
@@ -62,12 +66,13 @@ everywhere, and it is the same after a restart.
 
 `harness.task_provider`, `harness.specs`, `harness.knowledge` and the legacy
 `harness.spec_repo` are read once, folded into Default, and gone from the file
-on the next save.
+on the next save. A space's older `specs` and `knowledge` keys are read into
+its `library` the same way.
 
 ## What a switch changes
 
 Switching spaces changes the Projects list, the Agents list, both overviews,
-Tasks, Knowledge and Specs to that space's own. It does not stop anything:
+Tasks and the Library to that space's own. It does not stop anything:
 **agents and terminals in a space you have left keep running**, because the
 daemon owns them and a space is a view onto its projects, not a lifecycle.
 

@@ -22,6 +22,11 @@
 //!
 //! Reading and writing live in `okena-openspec`. These are only the shapes that
 //! cross the wire, so a client that cannot see the filesystem can render them.
+//!
+//! An OpenSpec root is one type of Library origin ([`crate::library`]): the
+//! daemon lists it there, under a key that carries its type. Nothing about the
+//! files, the registry or `defaultStore` changes for that — the Library wraps
+//! OpenSpec, it does not replace its format.
 
 use serde::{Deserialize, Serialize};
 

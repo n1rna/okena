@@ -4249,7 +4249,7 @@ impl HarnessPane {
             Some(name) => format!("{} · {name}", self.tasks.provider_display_name),
             None => self.tasks.provider_display_name.clone(),
         };
-        // Same order as Specs and Knowledge: what the view is connected to,
+        // Same order as the Library: what the view is connected to,
         // then settings, then refresh, then the one primary action.
         let actions: Vec<AnyElement> = vec![
             div()

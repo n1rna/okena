@@ -73,7 +73,7 @@ pub(crate) struct OverrideRoot {
 
 /// Which roots hold a copy of each layered file, and which copy is applied.
 ///
-/// One answer for every root at once (`ActionRequest::KnowledgeLayering`),
+/// One answer for every root at once (`ActionRequest::LibraryLayering`),
 /// because both things drawn from it are lists: a template's detail page names
 /// every root holding a copy, and the sidebar marks each template that has an
 /// override (QBL-426).
@@ -217,7 +217,7 @@ impl HarnessPane {
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 client
-                    .post_action(ActionRequest::KnowledgeLayering)
+                    .post_action(ActionRequest::LibraryLayering)
                     .and_then(|v| v.ok_or_else(|| "Missing reply".to_string()))
                     .and_then(|v| {
                         serde_json::from_value::<Layering>(v)
@@ -322,7 +322,7 @@ impl HarnessPane {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _window, cx| {
-                            this.open_knowledge_doc(key.clone(), target.clone(), cx);
+                            this.open_library_doc(key.clone(), target.clone(), cx);
                         }),
                     ),
             );
@@ -355,7 +355,7 @@ impl HarnessPane {
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 client
-                    .post_action(ActionRequest::KnowledgeOverrides { path })
+                    .post_action(ActionRequest::LibraryOverrides { path })
                     .and_then(|v| v.ok_or_else(|| "Missing reply".to_string()))
                     .and_then(|v| {
                         serde_json::from_value::<Overrides>(v)
@@ -366,7 +366,7 @@ impl HarnessPane {
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
                     // A slow reply must not describe a file opened after it.
-                    if this.knowledge.selected.as_deref() != Some(wanted.as_str()) {
+                    if this.library.selected.as_deref() != Some(wanted.as_str()) {
                         return;
                     }
                     match result {
@@ -384,7 +384,7 @@ impl HarnessPane {
     /// edit. An existing file is opened rather than replaced — the daemon
     /// decides that, and says which happened.
     fn override_into(&mut self, root: String, cx: &mut Context<Self>) {
-        let Some(path) = self.knowledge.selected.clone() else {
+        let Some(path) = self.library.selected.clone() else {
             return;
         };
         self.knowledge_override.busy = true;
@@ -397,7 +397,7 @@ impl HarnessPane {
             let wanted = path.clone();
             let result = smol::unblock(move || {
                 client
-                    .post_action(ActionRequest::KnowledgeOverride { root, path })
+                    .post_action(ActionRequest::LibraryOverride { root, path })
                     .map(|_| ())
             })
             .await;
@@ -408,7 +408,7 @@ impl HarnessPane {
                         Ok(()) => {
                             this.knowledge_override.picking = false;
                             // Land on the copy, in its root, ready to edit.
-                            this.open_knowledge_doc(target, wanted, cx);
+                            this.open_library_doc(target, wanted, cx);
                         }
                         Err(e) => this.knowledge_override.error = Some(e),
                     }
@@ -524,7 +524,7 @@ impl HarnessPane {
                         "knowledge-override-add-root",
                         "Add a new root…",
                         cx.listener(|this, _, _window, cx| {
-                            this.open_settings_at("knowledge", Some("add"), cx);
+                            this.open_settings_at("library", Some("add"), cx);
                         }),
                         cx,
                     )),

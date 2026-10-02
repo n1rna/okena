@@ -5,7 +5,8 @@ knowledge: how CI works, how the repositories are laid out, where service
 boundaries are, how reviews and releases are done. It also holds the skills,
 subagents and prompt templates the organisation shares. okena reads stores,
 clones them, and keeps them up to date. It lists what is in them in the harness
-Knowledge section.
+[Library](library.md), where a knowledge store or a project's knowledge folder
+is an origin of type `knowledge`.
 
 The format belongs to okena ([ADR-0003](../decisions/0003-knowledge-stores.md)).
 Skills and agents use the existing Claude formats, so the repository is useful
@@ -30,7 +31,7 @@ Anything outside the four kind folders (a `README.md`, CI config) is ignored.
 
 `templates/` has two folders okena reads by name: `briefs/`, one file per
 [launch flow](#flows), and `partials/`, the [shared text](#partials) they
-include. Both are listed as directories of their own in the Knowledge view.
+include. Both are listed as directories of their own in the Library.
 Anything else under `templates/` is a template the store keeps for itself.
 
 | Kind | What counts as an entry | Name |
@@ -118,8 +119,8 @@ The rules for this file:
 There are three ways to add a store:
 
 - **Clone:** clones a URL and registers the checkout.
-  - With no destination, it clones into `harness.knowledge.clone_dir`
-    (default `~/knowledge`), in the folder `git clone` would name.
+  - With no destination, it clones into
+    `spaces[].library.knowledge.clone_dir` (default `~/knowledge`), in the folder `git clone` would name.
   - If the clone fails, a folder okena created is removed.
   - If the repository turns out not to be a knowledge root, the checkout stays
     on disk and the error says where it is.
@@ -166,7 +167,7 @@ Both keys and the file are optional.
   [project-map.md](project-map.md).
 
 Worktrees and agent sessions are never searched. Project discovery can be
-turned off with `harness.knowledge.projects`.
+turned off with `spaces[].library.knowledge.projects`.
 
 ## Sync
 
@@ -204,107 +205,51 @@ project root is synced with its project's own git.
 
 okena never commits on its own. The only commit it makes unasked is the initial
 one when creating a store; everything else is a commit you asked for from the
-store overview. Files are edited in the Knowledge view, in a terminal, or by an
+origin overview. Files are edited in the Library, in a terminal, or by an
 agent working in the checkout. The shared store git behind all of this, also
-used by OpenSpec stores, is described in
+used by spec and freeform origins, is described in
 [ADR-0004](../decisions/0004-store-commit-and-push.md).
 
 ## In okena
 
-- **Harness → Knowledge** has these parts:
-  - **Root list:** every root, in the order it layers in, with its health and a
-    sync badge (`↑` commits to push, `↓` commits to pull, `•` uncommitted
-    changes). `+` beside the ROOTS heading opens the **Roots page**.
-  - **Entry list:** the open root's entries grouped by kind, with docs and
-    templates nested by folder — so `briefs` and `partials` are directories
-    holding one row per file.
-    Markdown entries render formatted, and a skill lists its supporting files.
-    A template one of your roots holds a copy of is marked `override` when
-    that copy is what a launch reads, and `default` when a copy exists but
-    okena's own is still what is sent — an empty file is a placeholder, not an
-    answer. A template only okena has is not marked.
-  - **Copies:** an opened template, partial or skill lists every root holding
-    a copy of it, in [layering order](#resolution) and ending in
-    `okena-defaults`, with the copy a launch actually reads highlighted and
-    labelled **applied**. Each one opens that root's copy. The list follows
-    the roots: reorder them and the highlight moves, delete the winning copy
-    and it moves to the next. A doc or an agent has no list — nothing
-    overrides them.
-  - **Search island:** a bar floating at the bottom of the view with a search
-    box and a **Filters** button. The button opens a menu holding two filters,
-    **Root** and **Kind** (doc, skill, agent, template, partial, brief), and
-    shows how many values are picked. `Cmd+F` (`Ctrl+F`) puts the cursor in
-    the box. The text is
-    matched, trimmed and without case, against every file's title, name, path
-    — so a folder name matches — and content, in **every** root, not just the
-    open one. Values within a filter widen (either root), and the filters
-    narrow each other and the text. While anything narrows the view the entry
-    list gives way to the matches, listed under the root each is in, with
-    "N of M"; clicking one opens it in its root. **Clear**, or `Esc` in the
-    box, brings the entry list back. The daemon does the matching
-    (`knowledge_search`), since a client holds only file names until a file
-    is opened. The Specs view has the same island with the **Root** filter
-    (`spec_search`).
-  - **Editing:** an opened file can be edited and saved with `cmd-s`
-    (`ctrl-s`). A Markdown file toggles between **Edit** (the source) and
-    **Preview**; any other file opens straight in the editor. A file with
-    unsaved edits is marked `●` in the list and keeps its edits while another
-    file is open. **Revert** drops them and reloads the file. The Specs view
-    edits spec documents the same way.
-  - **Files:** `+` beside the ENTRIES heading creates an entry. Pick the kind and a
-    name (`ci/pipeline` makes folders), and it opens in the editor, starting
-    from the kind's frontmatter. The open file's **Rename** moves it, and the
-    open document follows with any unsaved edits. **Delete…** asks first, then
-    removes the file and closes it. Paths are checked the way reads are:
-    nothing outside the root, no hidden names, and never over an existing
-    file. A folder emptied this way stops being listed.
-  - **Store overview:** the branch, the last fetch, and **Fetch**, **Pull** and
-    **Push** buttons. Pull and Push are offered only when they can succeed, and
-    a line says why not while there is something to pull or push. Below them
-    are the uncommitted files and a commit box. Leaving the message blank
-    commits with a default that names the file, or the number of files. The
-    Specs view shows the same panel for store and folder roots.
-  - **Unresolved stores:** projects that follow a store not on this machine are
-    listed under "Followed, not here".
-- **New with agent** opens an agent session in a root, briefed on this layout
-  and on the frontmatter entries are picked by.
+Knowledge roots are listed in **Harness → Library** under **Knowledge**. The
+page they share with spec and freeform origins — the origin list, search,
+editing, creating and renaming files, the origin overview with git, the Origins
+page and Settings → Library — is described in
+[library.md](library.md#the-library-page). What is particular to a knowledge
+origin:
+
+- **Entry list:** the open origin's entries grouped by kind, with docs and
+  templates nested by folder — so `briefs` and `partials` are directories
+  holding one row per file. Markdown entries render formatted, and a skill
+  lists its supporting files. A template one of your roots holds a copy of is
+  marked `override` when that copy is what a launch reads, and `default` when
+  a copy exists but okena's own is still what is sent — an empty file is a
+  placeholder, not an answer. A template only okena has is not marked.
+- **Copies:** an opened template, partial or skill lists every root holding a
+  copy of it, in [layering order](#resolution) and ending in `okena-defaults`,
+  with the copy a launch actually reads highlighted and labelled **applied**.
+  Each one opens that root's copy. The list follows the roots: reorder them
+  and the highlight moves, delete the winning copy and it moves to the next. A
+  doc or an agent has no list — nothing overrides them.
+- **Kind filter:** the search island's **Kind** filter (doc, skill, agent,
+  template, partial, brief) narrows knowledge entries.
+- **New entry:** `+` beside the ENTRIES heading creates an entry. Pick the kind
+  and a name (`ci/pipeline` makes folders), and it opens in the editor,
+  starting from the kind's frontmatter. A folder emptied by a delete stops
+  being listed.
+- **Order:** knowledge origins are the only ones that layer. They are listed in
+  the order they layer in, and dragged into another on the
+  [Origins page](library.md#the-origins-page).
+- **Unresolved stores:** projects that follow a store not on this machine are
+  listed under "Followed, not here".
+- **Write with an agent** opens an agent session in a root, briefed on this
+  layout and on the frontmatter entries are picked by.
   - **In a store:** the agent is told to work on a `knowledge/<topic>` branch,
     commit, and not push unless asked.
   - **In a project root:** committing is left to you.
   - **Agent:** it starts the agent you pick, else `harness.agent_command`;
     without an agent it refuses.
-
-### The Roots page
-
-`+` beside the sidebar's ROOTS heading opens the Roots page in the right-hand
-column, where a document would be — the same way **New** opens its form, so the
-roots you are changing stay on screen beside it. Knowledge and Specs share it,
-and it is also offered from either section's empty state, where there is no
-sidebar to put a `+` in.
-
-The page:
-
-- **Adds a root**, with the same three choices Settings offers — clone a
-  repository, add an existing folder, create a new one. It is the same form,
-  not a copy of it.
-- **Lists every root** with its kind, health, path and what it holds, problems
-  included, so a broken root is fixed from the same place it is listed.
-- **Removes one.** A store is unregistered and its checkout stays on disk. A
-  Specs folder root is dropped from `harness.specs.folders`. A project root has
-  neither, so it has no Remove: it belongs to its repository. `okena-defaults`
-  has none either — it is rewritten on every start.
-- **Reorders Knowledge roots by dragging**, which saves at once and changes
-  which copy of a template the next agent launch uses. The drop line sits along
-  the top of the row you are over, so a root lands where that line is.
-  `okena-defaults` is shown last without a handle. Specs roots are not layered,
-  so the Specs list has no order and no handles.
-
-### Elsewhere
-
-- **Settings → Knowledge** clones a repository, adds an existing folder or
-  creates a new store — the same three choices Settings → Specs offers. It
-  removes a store from the registry while leaving the checkout on disk. It also
-  switches project discovery on or off and sets the clone folder.
 
 ## Launch context
 
@@ -336,9 +281,10 @@ starts.
   | Map entry | Each area, concept, exposed and consumed interface, CI pipeline and infrastructure resource of a valid [`project-map.yaml`](project-map.md#as-launch-context) |
   | Spec | Spec documents and active change folders of an OpenSpec root |
   | Knowledge doc, Skill, Agent | `docs/**`, `skills/**/SKILL.md` and `agents/**` of a knowledge root. Templates are not offered |
+  | Doc | Every document of a [freeform origin](library.md#freeform-origins) |
 
-- **Where from:** every workspace repository and every root the Knowledge and
-  Specs sections list.
+- **Where from:** every workspace repository and every origin the
+  [Library](library.md) lists.
 - **Ranking:** items from the chosen projects, and from the stores they follow,
   come before the rest. Within each band, match quality plus how often an item
   has been added (adding one records it). Everything stays findable.
@@ -353,8 +299,8 @@ starts.
 From the launcher to the agent's first prompt:
 
 1. **Refs.** The client sends refs, not paths. Each launch action
-   (`TaskStartWork`, `SpecDraftChange`, `KnowledgeDraft`,
-   `SpecRefineDocument`, `KnowledgeRefineDocument`, `AgentStartSession`) carries
+   (`TaskStartWork`, `LibraryDraft`, `LibraryRefineDocument`,
+   `AgentStartSession`) carries
    `context: [{ kind, owner, project_id | root_key, locator }]`, where the
    locator is a map id (`area:checkout`) or a path relative to the owning
    repository or store.
@@ -457,7 +403,8 @@ an override of your own stays where you put it and simply stops applying.
 | `task-refine` | Rewriting an existing task's title and description in place, after asking what it would otherwise guess | `key`, `title`, `kind`, `url`, `description` |
 | `spec-draft` | Filling in a scaffolded OpenSpec change | `idea`, `change`, `change_dir`, `root_path`, `store_note`, `references`, `context` |
 | `knowledge-draft` | Adding to or updating a knowledge root | `request`, `path`, `what`, `commit_note`, `context` |
-| `doc-refine` | Changing one open spec, change file or knowledge file, without committing | `request`, `file`, `path`, `root_path`, `what`, `context` |
+| `freeform-draft` | Writing or updating the documents of a freeform origin, without committing | `request`, `path`, `context` |
+| `doc-refine` | Changing one open spec, change file, knowledge file or freeform document, without committing | `request`, `file`, `path`, `root_path`, `what`, `context` |
 | `agent-session` | A free-form session against a goal you typed. Break down and Refine send their rendered brief as the goal | `goal`, `projects`, `context` |
 | `extension-build` | Building an okena [extension](extensions.md) from a summary, started by **Build an extension** on the Extensions page. The summary is optional, so it is a block | `summary`, `projects`, `context` |
 | `project-scan` | Writing or updating a repository's [project map](project-map.md#scanning) | `project`, `path`, `map_root`, `skill`, `start` |
@@ -529,8 +476,8 @@ holds a copy of the built-ins for reading, and the built-ins are step 2 already.
 #### The order
 
 Stores and project roots form **one ordered list**, saved as
-`harness.knowledge.order` — root keys (`store:<id>`, `path:<absolute path>`),
-top first:
+`spaces[].library.knowledge.order` — root keys (`store:<id>`,
+`path:<absolute path>`), top first:
 
 - A root the list names sits where the list puts it, so a project root can be
   above a store or below it.
@@ -547,7 +494,8 @@ top first:
 
 Keys, not paths: the order is a preference, while the checkout paths stay
 machine state in the registry, so a synced `settings.json` means the same thing
-on every machine. Arrange the list on the [Roots page](#the-roots-page).
+on every machine. Arrange the list on the
+[Origins page](library.md#the-origins-page).
 
 A root can override one partial — say, `reporting` — without supplying any
 template, and one template without supplying any partial. An empty file is not
@@ -568,7 +516,7 @@ passed alongside the rendered brief, before it, and never replace it.
 okena's own briefs, partials and skills (the
 [`project-map` skill](project-map.md#the-project-map-skill)) are written to
 `<profile config dir>/knowledge/okena-defaults` and registered, so they are
-readable in Harness → Knowledge like any other store. They are the same bytes
+readable in Harness → Library like any other store. They are the same bytes
 the built-ins render from, at the paths a root of your own would override them
 at: `templates/briefs/<flow>.md`, `templates/partials/<name>.md` and
 `skills/<name>/SKILL.md`. A file okena used to manage here and no longer does
@@ -576,7 +524,7 @@ is removed on the next start, so the store never shows a brief no launch reads.
 
 - It is a knowledge root, not a git repository.
 - **It is read-only.** okena rewrites every file in it to match the build on
-  each start, so what the Knowledge view shows is always the text a launch
+  each start, so what the Library shows is always the text a launch
   would send. A file opens as a preview: there is no edit, save, rename, delete
   or refine, `New` and `Write with an agent` cannot target it, and the daemon
   refuses those actions rather than only hiding them. Editing a file here on

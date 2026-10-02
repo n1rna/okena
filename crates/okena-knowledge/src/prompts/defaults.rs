@@ -21,6 +21,7 @@ pub const fn file(flow: Flow) -> &'static str {
         Flow::TaskRefine => include_str!("templates/briefs/task-refine.md"),
         Flow::SpecDraft => include_str!("templates/briefs/spec-draft.md"),
         Flow::KnowledgeDraft => include_str!("templates/briefs/knowledge-draft.md"),
+        Flow::FreeformDraft => include_str!("templates/briefs/freeform-draft.md"),
         Flow::DocumentRefine => include_str!("templates/briefs/doc-refine.md"),
         Flow::AgentSession => include_str!("templates/briefs/agent-session.md"),
         Flow::ExtensionBuild => include_str!("templates/briefs/extension-build.md"),
@@ -165,7 +166,7 @@ pub fn skill_file(name: &str) -> Option<&'static str> {
 /// The folder a root keeps its partials in, relative to the root.
 ///
 /// Beside [`super::flows::BRIEFS_DIR`], and shown as a directory of its own in
-/// the Knowledge view for the same reason (QBL-427).
+/// the Library for the same reason (QBL-427).
 pub const PARTIALS_DIR: &str = "templates/partials";
 
 /// Where a store keeps partial `name`, relative to its root.
@@ -243,7 +244,7 @@ const STALE_RECORD_PATH: &str = ".okena-knowledge/defaults.lock";
 ///
 /// The briefs used to sit flat at `templates/<flow>.md`, beside the partials
 /// (QBL-427). A file left behind there would be a brief no launch reads, shown
-/// in the Knowledge view as though it were current — so a materialize removes
+/// in the Library as though it were current — so a materialize removes
 /// it. Only okena's own store is swept: an override of your own at the old
 /// path simply stops applying, and stays where you put it.
 fn retired_files() -> Vec<String> {
@@ -257,7 +258,7 @@ fn retired_files() -> Vec<String> {
 /// whatever is there.
 ///
 /// This folder is okena's, not yours (QBL-415). Every file is restored to the
-/// built-in on every run, so what the Knowledge view shows under
+/// built-in on every run, so what the Library shows under
 /// `okena-defaults` is always the text a launch would actually use — a
 /// guarantee that is worth more than the ability to edit a copy in place, and
 /// that the old edit-detecting behaviour quietly broke: an edited default kept
@@ -337,7 +338,7 @@ every file here is rewritten to match the build each time okena starts, so what
 you read is always what a launch would actually send. Editing a file here does
 nothing — your change is gone by the next start.
 
-To change one, override it. Open it in Harness → Knowledge and press
+To change one, override it. Open it in Harness → Library and press
 **Override**, pick one of your own knowledge roots, and edit the copy there.
 okena looks for each file in every root it can see — registered stores first,
 then your projects' own knowledge folders — and uses the first one that has it,

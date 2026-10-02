@@ -34,8 +34,9 @@ Architecture and build rules live next to the code, not here:
 
 <!-- hand-maintained, keep short: the few things actually in motion + what's next.
      If everything is "hot", nothing is. -->
-- **Knowledge stores** — the harness Knowledge view over git-backed org knowledge
-  repos ([sprint](sprints/sprint-2026-09-10-knowledge-stores.md),
+- **Knowledge stores** — git-backed org knowledge repos, listed in the harness
+  [Library](reference/library.md) beside OpenSpec roots and plain markdown
+  folders ([sprint](sprints/sprint-2026-09-10-knowledge-stores.md),
   [ADR-0003](decisions/0003-knowledge-stores.md)). Launch briefs come from a
   store's templates ([reference](reference/knowledge.md#launch-prompts)), and
   every launcher can hand an agent map entries, specs, knowledge and skills

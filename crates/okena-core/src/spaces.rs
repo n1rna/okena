@@ -6,8 +6,8 @@
 //! `workspace.json`, "Delete workspace…"). A *space* is the switch above that:
 //! one profile holds several, and each has its own projects (agents included,
 //! since an agent session is a project), its own task backend connection and
-//! filters, and its own Knowledge and Specs roots. Profiles separate whole
-//! config directories; spaces separate what is inside one.
+//! filters, and its own Library origins. Profiles separate whole config
+//! directories; spaces separate what is inside one.
 //!
 //! There is always a Default space. It cannot be renamed or deleted, and
 //! everything a profile had before spaces existed belongs to it — which is why
@@ -40,6 +40,7 @@ pub fn default_space_id() -> String {
 
 /// One space.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SpaceWire")]
 pub struct SpaceData {
     pub id: String,
     pub name: String,
@@ -52,61 +53,104 @@ pub struct SpaceData {
     /// inside it and can never reach outside.
     #[serde(default, skip_serializing_if = "TaskScope::is_empty")]
     pub tasks: TaskScope,
-    /// Where this space's Specs view finds OpenSpec roots.
+    /// Where this space's Library finds its origins, by type.
     #[serde(default)]
-    pub specs: SpecDiscoveryConfig,
-    /// Where this space's Knowledge view finds stores.
+    pub library: LibraryConfig,
+}
+
+/// A space as `settings.json` may hold it: today's shape, or the one from
+/// before the Library (QBL-440), when a space had `specs` and `knowledge`.
+///
+/// Reading is the migration. The two old keys become `library.spec` and
+/// `library.knowledge` untouched — the same folders, the same stores, the same
+/// saved order — and, because [`SpaceData`] writes only `library`, they are
+/// gone from the file on the next save rather than lingering as a second,
+/// silently ignored source of truth.
+#[derive(Deserialize)]
+struct SpaceWire {
+    id: String,
+    name: String,
     #[serde(default)]
-    pub knowledge: KnowledgeConfig,
+    connection: Option<String>,
+    #[serde(default)]
+    tasks: TaskScope,
+    #[serde(default)]
+    library: Option<LibraryConfig>,
+    #[serde(default)]
+    specs: Option<SpecDiscoveryConfig>,
+    #[serde(default)]
+    knowledge: Option<KnowledgeConfig>,
+}
+
+impl From<SpaceWire> for SpaceData {
+    fn from(wire: SpaceWire) -> Self {
+        // A file holding both was hand-edited halfway; `library` is the one
+        // this build writes, so it wins and the old keys fill only what it
+        // could not have said.
+        let library = match wire.library {
+            Some(library) => library,
+            None => LibraryConfig {
+                knowledge: wire.knowledge.unwrap_or_default(),
+                spec: wire.specs.unwrap_or_default(),
+                freeform: FreeformConfig::default(),
+            },
+        };
+        Self {
+            id: wire.id,
+            name: wire.name,
+            connection: wire.connection,
+            tasks: wire.tasks,
+            library,
+        }
+    }
 }
 
 impl SpaceData {
     /// The Default space as a profile that never had spaces should read: the
     /// roots and connection the harness config already named.
-    pub fn default_space(
-        connection: Option<String>,
-        specs: SpecDiscoveryConfig,
-        knowledge: KnowledgeConfig,
-    ) -> Self {
+    pub fn default_space(connection: Option<String>, library: LibraryConfig) -> Self {
         Self {
             id: DEFAULT_SPACE_ID.to_string(),
             name: DEFAULT_SPACE_NAME.to_string(),
             connection,
             tasks: TaskScope::default(),
-            specs,
-            knowledge,
+            library,
         }
     }
 
-    /// A space someone just added: no projects, no agents, no roots.
+    /// A space someone just added: no projects, no agents, no origins.
     ///
-    /// "No roots" is why this is not `Default::default()` for
-    /// [`SpecDiscoveryConfig`]: that one lists OpenSpec's machine registry,
-    /// which would hand a brand-new space every store on the box. Projects
-    /// stay on, and a new space has none, so it still starts empty — and the
-    /// first project added to it brings its own roots, as it does in Default.
+    /// "No origins" is why this is not `Default::default()` for
+    /// [`LibraryConfig`]: that one lists OpenSpec's machine registry and
+    /// every registered knowledge store, which would hand a brand-new space
+    /// every store on the box. Projects stay on, and a new space has none, so
+    /// it still starts empty — and the first project added to it brings its
+    /// own origins, as it does in Default.
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             connection: None,
             tasks: TaskScope::default(),
-            specs: SpecDiscoveryConfig {
-                registry: false,
-                projects: true,
-                folders: Vec::new(),
-                data_dir: None,
-                config_dir: None,
-                clone_dir: None,
-            },
-            knowledge: KnowledgeConfig {
-                projects: true,
-                // No roots: a new space follows no store until one is added
-                // to it. Default keeps `None`, which is every store.
-                stores: Some(Vec::new()),
-                // …and so nothing to order yet.
-                order: Vec::new(),
-                clone_dir: None,
+            library: LibraryConfig {
+                spec: SpecDiscoveryConfig {
+                    registry: false,
+                    projects: true,
+                    folders: Vec::new(),
+                    data_dir: None,
+                    config_dir: None,
+                    clone_dir: None,
+                },
+                knowledge: KnowledgeConfig {
+                    projects: true,
+                    // No origins: a new space follows no store until one is
+                    // added to it. Default keeps `None`, which is every store.
+                    stores: Some(Vec::new()),
+                    // …and so nothing to order yet.
+                    order: Vec::new(),
+                    clone_dir: None,
+                },
+                freeform: FreeformConfig::default(),
             },
         }
     }
@@ -127,20 +171,30 @@ impl SpaceData {
             .unwrap_or(FALLBACK_CONNECTION_ID)
     }
 
-    /// Folders to show as spec roots, in order, with blanks dropped.
+    /// Folders to show as spec origins, in order, with blanks dropped.
     ///
     /// The legacy `harness.spec_repo` used to be folded in here; it is folded
     /// into the Default space's folders once, at migration, so by the time
     /// anything reads this there is one list.
     pub fn spec_folders(&self) -> Vec<String> {
-        self.specs
-            .folders
-            .iter()
-            .map(|f| f.trim())
-            .filter(|f| !f.is_empty())
-            .map(str::to_string)
-            .collect()
+        listed_folders(&self.library.spec.folders)
     }
+
+    /// Folders to show as freeform origins, in order, with blanks dropped.
+    pub fn freeform_folders(&self) -> Vec<String> {
+        listed_folders(&self.library.freeform.folders)
+    }
+}
+
+/// A folder list as it is read: trimmed, blanks dropped, order untouched —
+/// the order is the order they are shown in.
+fn listed_folders(folders: &[String]) -> Vec<String> {
+    folders
+        .iter()
+        .map(|f| f.trim())
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Mint an id for a space called `name`, avoiding the ids already `taken`.
@@ -256,12 +310,102 @@ pub fn fit_selector(count: usize, active: usize, capacity: usize) -> SelectorFit
     SelectorFit { shown, overflow }
 }
 
-// The two root configurations below are per *space*. They moved here from the
+// The origin configurations below are per *space*. They moved here from the
 // harness settings when spaces arrived: a profile no longer has one set of
-// Specs and Knowledge roots, each space does. `okena-workspace` re-exports
-// them, so `settings::SpecDiscoveryConfig` still names this type.
+// roots, each space does. `okena-workspace` re-exports them, so
+// `settings::SpecDiscoveryConfig` still names this type.
 
-/// Where a space's Specs view finds OpenSpec roots.
+/// Where a space's Library finds its origins: one block per origin type
+/// (`okena_core::library::OriginType`), under one key.
+///
+/// The blocks stay separate because the three types are found differently —
+/// knowledge stores through okena's registry, spec roots through OpenSpec's
+/// own, freeform origins by the folders listed here — and because the first
+/// two are exactly what `spaces[].knowledge` and `spaces[].specs` held before
+/// the Library, so a settings file from then carries over without a value
+/// changing meaning.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryConfig {
+    /// `knowledge` origins, and the order they layer in.
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
+    /// `spec` origins: OpenSpec roots.
+    #[serde(default)]
+    pub spec: SpecDiscoveryConfig,
+    /// `freeform` origins: folders of markdown.
+    #[serde(default, skip_serializing_if = "FreeformConfig::is_unset")]
+    pub freeform: FreeformConfig,
+}
+
+/// Where a freeform clone goes when no destination is given, before `~`
+/// expansion.
+pub const DEFAULT_FREEFORM_CLONE_DIR: &str = "~/library";
+
+/// Freeform origins, per space: any folder of markdown.
+///
+/// The folders are the whole of it. A freeform origin has no identity file
+/// and no registry — that is what makes it freeform — so the list of paths is
+/// the only record of it, the way `spec.folders` is for an OpenSpec folder.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeformConfig {
+    /// The folders to show, in the order they are shown in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
+
+    /// Folder a repository is cloned into when no destination is given. Unset
+    /// is `~/library`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_dir: Option<String>,
+}
+
+impl FreeformConfig {
+    /// Nothing set, so nothing worth writing to the file.
+    pub fn is_unset(&self) -> bool {
+        self.folders.is_empty() && self.clone_dir.is_none()
+    }
+
+    /// The clone folder with `~` expanded; blank counts as unset.
+    pub fn clone_dir(&self) -> std::path::PathBuf {
+        let dir = self
+            .clone_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .unwrap_or(DEFAULT_FREEFORM_CLONE_DIR);
+        crate::fs::expand_home(dir)
+    }
+
+    /// Add `folder` to the list unless it is already there, compared after
+    /// `~` expansion so `~/notes` and its absolute path are one folder.
+    /// Returns whether it was added.
+    pub fn add_folder(&mut self, folder: &str) -> bool {
+        let folder = folder.trim();
+        if folder.is_empty() || self.holds(folder) {
+            return false;
+        }
+        self.folders.push(folder.to_string());
+        true
+    }
+
+    /// Drop `folder` from the list, compared as [`Self::add_folder`]
+    /// compares. Returns whether anything was dropped.
+    pub fn remove_folder(&mut self, folder: &str) -> bool {
+        let wanted = crate::fs::expand_home(folder.trim());
+        let before = self.folders.len();
+        self.folders
+            .retain(|f| crate::fs::expand_home(f.trim()) != wanted);
+        self.folders.len() != before
+    }
+
+    fn holds(&self, folder: &str) -> bool {
+        let wanted = crate::fs::expand_home(folder);
+        self.folders
+            .iter()
+            .any(|f| crate::fs::expand_home(f.trim()) == wanted)
+    }
+}
+
+/// Where a space's Library finds OpenSpec roots.
 ///
 /// Discovery follows OpenSpec's own model
 /// (<https://openspec.dev/docs/stores>): stores registered on this machine,
@@ -339,7 +483,7 @@ impl Default for SpecDiscoveryConfig {
 /// Where a clone goes when no destination is given, before `~` expansion.
 pub const DEFAULT_KNOWLEDGE_CLONE_DIR: &str = "~/knowledge";
 
-/// Knowledge stores (ADR-0003), per space.
+/// Knowledge origins (ADR-0003), per space.
 ///
 /// The stores themselves are not listed here: checkout paths are machine
 /// state, kept in okena's per-profile registry (`knowledge/stores.yaml`), so a
@@ -430,22 +574,26 @@ mod tests {
         let s = SpaceData::new("client-a", "Client A");
         assert!(s.connection.is_none());
         assert!(s.tasks.is_empty());
-        assert!(s.specs.folders.is_empty());
+        assert!(s.library.spec.folders.is_empty());
+        assert!(s.library.freeform.folders.is_empty());
         // The machine registry belongs to Default, not to every new space.
-        assert!(!s.specs.registry);
+        assert!(!s.library.spec.registry);
         assert!(!s.is_default());
     }
 
     #[test]
     fn the_default_space_keeps_what_the_harness_config_had() {
-        let specs = SpecDiscoveryConfig {
-            folders: vec!["~/specs".into()],
+        let library = LibraryConfig {
+            spec: SpecDiscoveryConfig {
+                folders: vec!["~/specs".into()],
+                ..Default::default()
+            },
             ..Default::default()
         };
-        let d = SpaceData::default_space(Some("linear".into()), specs, KnowledgeConfig::default());
+        let d = SpaceData::default_space(Some("linear".into()), library);
         assert!(d.is_default());
         assert_eq!(d.name, DEFAULT_SPACE_NAME);
-        assert_eq!(d.specs.folders, ["~/specs"]);
+        assert_eq!(d.library.spec.folders, ["~/specs"]);
         assert_eq!(d.connection.as_deref(), Some("linear"));
     }
 
@@ -560,7 +708,7 @@ mod tests {
     #[test]
     fn a_spaces_spec_folders_keep_the_order_they_were_given() {
         let mut space = SpaceData::new("client-a", "Client A");
-        space.specs.folders = vec![
+        space.library.spec.folders = vec![
             "  ~/b  ".into(),
             "".into(),
             "~/a".into(),
@@ -575,12 +723,107 @@ mod tests {
     #[test]
     fn a_new_space_follows_no_knowledge_store_while_default_follows_them_all() {
         let fresh = SpaceData::new("client-a", "Client A");
-        assert_eq!(fresh.knowledge.stores.as_deref(), Some(&[][..]));
-        let default = SpaceData::default_space(None, Default::default(), Default::default());
+        assert_eq!(fresh.library.knowledge.stores.as_deref(), Some(&[][..]));
+        let default = SpaceData::default_space(None, Default::default());
         assert!(
-            default.knowledge.stores.is_none(),
+            default.library.knowledge.stores.is_none(),
             "Default keeps every registered store, as a profile had before spaces"
         );
+    }
+
+    #[test]
+    fn a_space_saved_before_the_library_keeps_its_roots_order_and_settings() {
+        // What `settings.json` held per space before QBL-440.
+        let old = r#"{
+            "id": "client-a", "name": "Client A", "connection": "linear-2",
+            "specs": { "registry": false, "projects": true,
+                       "folders": ["~/acme/specs"], "data_dir": "~/.openspec-data",
+                       "clone_dir": "~/acme/openspec" },
+            "knowledge": { "projects": false, "stores": ["acme-eng", "acme-ops"],
+                           "order": ["store:acme-ops", "path:/repo/.okena/knowledge"],
+                           "clone_dir": "~/acme/knowledge" }
+        }"#;
+        let space: SpaceData = serde_json::from_str(old).expect("an older space still loads");
+        assert_eq!(space.connection.as_deref(), Some("linear-2"));
+
+        let spec = &space.library.spec;
+        assert!(!spec.registry && spec.projects);
+        assert_eq!(spec.folders, ["~/acme/specs"]);
+        assert_eq!(spec.data_dir.as_deref(), Some("~/.openspec-data"));
+        assert_eq!(spec.clone_dir.as_deref(), Some("~/acme/openspec"));
+
+        let knowledge = &space.library.knowledge;
+        assert!(!knowledge.projects);
+        assert_eq!(
+            knowledge.stores.as_deref(),
+            Some(&["acme-eng".to_string(), "acme-ops".to_string()][..])
+        );
+        assert_eq!(
+            knowledge.order,
+            ["store:acme-ops", "path:/repo/.okena/knowledge"],
+            "the saved order is carried over as written"
+        );
+        assert_eq!(knowledge.clone_dir.as_deref(), Some("~/acme/knowledge"));
+        assert!(space.library.freeform.is_unset());
+
+        // Saved again, the space holds one `library` key and neither old one.
+        let saved = serde_json::to_value(&space).expect("serialize");
+        assert!(saved.get("specs").is_none() && saved.get("knowledge").is_none(), "got {saved}");
+        assert_eq!(saved["library"]["spec"]["folders"][0], "~/acme/specs");
+        assert_eq!(saved["library"]["knowledge"]["order"][0], "store:acme-ops");
+        let back: SpaceData = serde_json::from_value(saved).expect("reload");
+        assert_eq!(back, space);
+    }
+
+    #[test]
+    fn a_space_with_only_one_of_the_old_keys_defaults_the_other() {
+        let space: SpaceData = serde_json::from_str(
+            r#"{ "id": "default", "name": "Default", "specs": { "folders": ["~/s"] } }"#,
+        )
+        .expect("loads");
+        assert_eq!(space.library.spec.folders, ["~/s"]);
+        assert_eq!(space.library.knowledge, KnowledgeConfig::default());
+    }
+
+    #[test]
+    fn the_library_key_wins_over_leftover_old_keys() {
+        let space: SpaceData = serde_json::from_str(
+            r#"{ "id": "default", "name": "Default",
+                 "library": { "spec": { "folders": ["~/new"] } },
+                 "specs": { "folders": ["~/old"] } }"#,
+        )
+        .expect("loads");
+        assert_eq!(space.library.spec.folders, ["~/new"]);
+    }
+
+    #[test]
+    fn freeform_folders_are_added_once_and_removed_however_they_are_spelled() {
+        let mut freeform = FreeformConfig::default();
+        assert!(freeform.add_folder(" ~/notes "));
+        assert!(!freeform.add_folder("~/notes"), "already listed");
+        let absolute = crate::fs::expand_home("~/notes");
+        assert!(
+            !freeform.add_folder(&absolute.to_string_lossy()),
+            "the same folder by its absolute path"
+        );
+        assert!(!freeform.add_folder("   "));
+        assert!(freeform.add_folder("~/decisions"));
+        assert_eq!(freeform.folders, ["~/notes", "~/decisions"]);
+
+        assert!(freeform.remove_folder(&absolute.to_string_lossy()));
+        assert!(!freeform.remove_folder("~/notes"), "already gone");
+        assert_eq!(freeform.folders, ["~/decisions"]);
+    }
+
+    #[test]
+    fn a_space_with_no_freeform_origins_writes_no_freeform_block() {
+        let mut space = SpaceData::default_space(None, LibraryConfig::default());
+        let json = serde_json::to_string(&space).expect("serialize");
+        assert!(!json.contains("freeform"), "got {json}");
+        space.library.freeform.add_folder("~/notes");
+        let json = serde_json::to_value(&space).expect("serialize");
+        assert_eq!(json["library"]["freeform"]["folders"][0], "~/notes");
+        assert_eq!(space.freeform_folders(), ["~/notes"]);
     }
 
     #[test]

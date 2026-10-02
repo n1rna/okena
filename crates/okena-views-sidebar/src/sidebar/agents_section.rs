@@ -721,7 +721,7 @@ impl Sidebar {
                         .text_color(rgb(t.text_muted))
                         .child(
                             "No agent sessions. Start work on a task, draft a change \
-                             in Specs, or use + above.",
+                             in the Library, or use + above.",
                         ),
                 )
                 .into_any_element();

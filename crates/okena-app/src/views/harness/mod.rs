@@ -14,12 +14,14 @@ mod file_sidebar;
 mod island;
 mod knowledge_draft;
 mod knowledge_override;
-mod knowledge_view;
+mod library_freeform;
+mod library_knowledge;
+mod library_spec;
+mod library_view;
 mod markdown;
 mod new_task_form;
 mod roots_page;
 mod sections;
-mod specs_view;
 mod store_git;
 pub(crate) mod task_filter;
 mod task_tree;
@@ -39,6 +41,7 @@ use std::rc::Rc;
 pub use editor::EDITOR_CONTEXT;
 
 pub use okena_core::harness::HarnessSection;
+pub(crate) use library_view::{counts_line, group_label};
 pub(crate) use tasks_view::{notify_task_auth_changed, provider_label};
 
 /// Tasks-view state. Grouped so the pane struct stays readable as more views
@@ -146,83 +149,6 @@ pub(crate) struct TasksState {
     /// How a set of ticked tasks is split among agents. One for the view
     /// rather than per task: the set is the thing being decided about.
     pub(crate) selection_strategy: tasks_view::SelectionStrategy,
-}
-
-/// Specs-view state.
-pub(crate) struct SpecsState {
-    /// Every root the daemon discovered. `None` until the first load lands.
-    pub(crate) stores: Option<okena_core::specs::SpecStores>,
-    /// Projects and context for the new-change form's agent, once its dialog
-    /// has been opened.
-    pub(crate) pickers: Option<Entity<crate::views::components::launch_pickers::LaunchPickers>>,
-    /// Key of the root being shown. `None` until the first load picks the
-    /// default one.
-    pub(crate) root_key: Option<String>,
-    /// The open root's planning tree.
-    pub(crate) tree: Option<okena_core::specs::SpecTree>,
-    pub(crate) loading: bool,
-    /// Bumped on every load, so a slow response for a root the user has since
-    /// left is dropped instead of replacing the newer one.
-    pub(crate) load_generation: u64,
-    pub(crate) error: Option<String>,
-    /// Path of the document being read, relative to the root.
-    pub(crate) selected: Option<String>,
-    /// The open document's buffer, and any other with unsaved edits.
-    pub(crate) documents: editor::Documents,
-    pub(crate) content_error: Option<String>,
-    /// The idea a new change is drafted from.
-    pub(crate) idea_input: BriefInput,
-    /// Whether the document panel is showing the new-change form.
-    ///
-    /// It stands where a document's text stands rather than taking the whole
-    /// view, which hid the tree you were adding to and the specs you are meant
-    /// to read before proposing.
-    pub(crate) composing: bool,
-    /// Directory name for the change being configured. Blank derives one from
-    /// the prompt.
-    pub(crate) name_input: Entity<SimpleInputState>,
-    /// Root a new change is drafted into. Follows the open root until the
-    /// user picks another in the form.
-    pub(crate) draft_root: Option<String>,
-    pub(crate) drafting: bool,
-    /// Change names whose documents are hidden. Collapsed rather than expanded
-    /// state, so a fresh view shows everything.
-    pub(crate) collapsed: std::collections::HashSet<String>,
-    /// The open store's fetch, pull, commit and push.
-    pub(crate) git: store_git::StoreGitPanel,
-}
-
-impl SpecsState {
-    /// Whether `path` is still listed anywhere in `tree`.
-    ///
-    /// Used after a refresh to drop a selection whose file has gone, so a
-    /// deleted document doesn't leave stale content on screen looking current.
-    pub(crate) fn contains(tree: &okena_core::specs::SpecTree, path: &str) -> bool {
-        let in_change = |c: &okena_core::specs::SpecChange| {
-            c.artifacts
-                .iter()
-                .chain(c.specs.iter())
-                .any(|d| d.path == path)
-        };
-        tree.specs.iter().any(|d| d.path == path)
-            || tree.changes.iter().any(in_change)
-            || tree.archived.iter().any(in_change)
-    }
-
-    /// Stop showing the selected document. Its buffer stays only if it holds
-    /// unsaved edits. Call before `root_key` changes: buffers are keyed by it.
-    pub(crate) fn leave_selection(&mut self) {
-        if let Some(path) = self.selected.take() {
-            self.documents
-                .leave(self.root_key.as_deref().unwrap_or_default(), &path);
-        }
-        self.content_error = None;
-    }
-
-    /// Whether the currently-loaded tree still lists `path`.
-    fn tree_contains(&self, path: &str) -> bool {
-        self.tree.as_ref().is_some_and(|t| Self::contains(t, path))
-    }
 }
 
 /// A start that has been asked for and is waiting for the one before it.
@@ -335,32 +261,27 @@ pub struct HarnessPane {
     /// Board width from the last frame, used to turn a drag into a fraction.
     pub(crate) board_width: Rc<RefCell<f32>>,
     pub(crate) section: HarnessSection,
-    /// The Knowledge and Specs file sidebar: open state and width. One
-    /// setting behind both views, mirrored here per pane.
+    /// The Library's file sidebar: open state and width. One setting,
+    /// mirrored here per pane.
     pub(crate) files: file_sidebar::FileSidebar,
     pub(crate) tasks: TasksState,
-    pub(crate) specs: SpecsState,
-    pub(crate) knowledge: knowledge_view::KnowledgeState,
-    /// The Knowledge view's "New" form.
+    /// The Library: its origins of every type, and the one that is open.
+    pub(crate) library: library_view::LibraryState,
+    /// A knowledge origin's "New" form.
     pub(crate) knowledge_draft: knowledge_draft::DraftForm,
-    /// Overriding one of okena's read-only defaults from the open file.
+    /// Overriding one of okena's read-only defaults from the open file, into
+    /// a knowledge origin.
     pub(crate) knowledge_override: knowledge_override::OverrideState,
-    /// The agent card under an open spec document.
-    pub(crate) spec_refine: doc_agents::DocRefine,
-    /// The agent card under an open knowledge file.
-    pub(crate) knowledge_refine: doc_agents::DocRefine,
-    /// Creating, renaming and deleting files in the Specs tree.
-    pub(crate) spec_files: file_ops::FileOps,
-    /// Creating, renaming and deleting files in the Knowledge tree.
-    pub(crate) knowledge_files: file_ops::FileOps,
-    /// The projects-and-context dialog a Specs or Knowledge launcher opened.
+    /// The agent card under an open document.
+    pub(crate) refine: doc_agents::DocRefine,
+    /// Creating, renaming and deleting files in the open origin's tree.
+    pub(crate) file_ops: file_ops::FileOps,
+    /// The projects-and-context dialog a Library launcher opened.
     pub(crate) context_dialog: Option<context_dialog::ContextTarget>,
-    /// The Roots page the sidebar's `+` opens, for this pane's section.
+    /// The Origins page the sidebar's `+` opens.
     pub(crate) roots: roots_page::RootsPage,
-    /// What the Specs island is narrowed to, and what the daemon found.
-    pub(crate) spec_search: doc_search::DocSearch,
-    /// What the Knowledge island is narrowed to, and what the daemon found.
-    pub(crate) knowledge_search: doc_search::DocSearch,
+    /// What the Library island is narrowed to, and what the daemon found.
+    pub(crate) search: doc_search::DocSearch,
     /// Whether this page's search island is open, or closed to its pill.
     /// Never saved: a restart opens it.
     pub(crate) island_open: bool,
@@ -403,9 +324,9 @@ impl HarnessPane {
         cx.observe(
             &crate::settings::settings_entity(cx),
             |this: &mut Self, settings, cx| {
-                // Specs and Knowledge are separate panes over one sidebar
-                // setting: whichever is not on screen must still come back
-                // the way the other one was left.
+                // Library panes in different windows are separate entities
+                // over one sidebar setting: each must come back the way the
+                // other was left.
                 this.sync_file_sidebar(&settings.read(cx).settings.clone());
                 let (wanted, scope) = {
                     let settings = settings.read(cx);
@@ -446,23 +367,15 @@ impl HarnessPane {
             },
         )
         .detach();
-        let name_input = cx.new(|cx| SimpleInputState::new(cx).placeholder("add-login"));
-        let idea_input = BriefInput::new(
-            "e.g. let users sign in with Google, alongside the existing email flow",
-        );
-        let specs_git = store_git::StoreGitPanel::new(cx);
-        let knowledge = knowledge_view::KnowledgeState::new(cx);
+        let library = library_view::LibraryState::new(cx);
         // Their projects-and-context pickers are made when their dialog first
         // opens: most panes never open one.
         let knowledge_draft = knowledge_draft::DraftForm::new();
         let knowledge_override = knowledge_override::OverrideState::default();
-        let spec_refine = doc_agents::DocRefine::new();
-        let knowledge_refine = doc_agents::DocRefine::new();
-        let spec_files = file_ops::FileOps::new(cx);
-        let knowledge_files = file_ops::FileOps::new(cx);
-        let roots = roots_page::RootsPage::new(section, cx);
-        let spec_search = doc_search::DocSearch::new(HarnessSection::Specs, cx);
-        let knowledge_search = doc_search::DocSearch::new(HarnessSection::Knowledge, cx);
+        let refine = doc_agents::DocRefine::new();
+        let file_ops = file_ops::FileOps::new(cx);
+        let roots = roots_page::RootsPage::new(cx);
+        let search = doc_search::DocSearch::new(cx);
         let mut pane = Self {
             client: ctx.client,
             request_broker: ctx.request_broker,
@@ -511,36 +424,14 @@ impl HarnessPane {
                 checked: std::collections::HashSet::new(),
                 selection_strategy: tasks_view::SelectionStrategy::default(),
             },
-            specs: SpecsState {
-                stores: None,
-                pickers: None,
-                root_key: None,
-                tree: None,
-                loading: false,
-                load_generation: 0,
-                error: None,
-                selected: None,
-                documents: editor::Documents::default(),
-                content_error: None,
-                idea_input,
-                composing: false,
-                name_input,
-                draft_root: None,
-                drafting: false,
-                collapsed: std::collections::HashSet::new(),
-                git: specs_git,
-            },
-            knowledge,
+            library,
             knowledge_draft,
             knowledge_override,
-            spec_refine,
-            knowledge_refine,
-            spec_files,
-            knowledge_files,
+            refine,
+            file_ops,
             context_dialog: None,
             roots,
-            spec_search,
-            knowledge_search,
+            search,
             island_open: true,
             island_menu_open: false,
             window_focus: ctx.window_focus,
@@ -551,12 +442,8 @@ impl HarnessPane {
                 // So the dialog can default to the daemon's configured agent.
                 pane.refresh_default_agent(cx);
             }
-            HarnessSection::Specs => {
-                pane.refresh_specs(cx);
-                pane.refresh_default_agent(cx);
-            }
-            HarnessSection::Knowledge => {
-                pane.refresh_knowledge(cx);
+            HarnessSection::Library => {
+                pane.refresh_library(cx);
                 // So "New" defaults to the configured agent.
                 pane.refresh_default_agent(cx);
             }
@@ -568,7 +455,7 @@ impl HarnessPane {
 }
 
 impl HarnessPane {
-    /// Open a launcher's brief: its own file in Harness → Knowledge.
+    /// Open a launcher's brief: its own file in the Library.
     pub(crate) fn open_brief(
         &self,
     ) -> impl Fn(&SharedString, &SharedString, &mut Window, &mut App) + 'static + use<> {

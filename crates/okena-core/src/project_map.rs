@@ -391,8 +391,10 @@ pub enum ProjectMapState {
 /// in, so a client can open the map's docs there.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectMapReport {
-    /// The knowledge root's key as discovery gives it (`path:<root>`), for
-    /// reading the map's docs. `None` when the project has no knowledge root.
+    /// The key of the knowledge root the map lives in, for reading the map's
+    /// docs. As discovery gives it (`path:<root>`) where the map is read, and
+    /// as the Library lists it (`knowledge:path:<root>`) once the daemon
+    /// replies with it. `None` when the project has no knowledge root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_key: Option<String>,
     #[serde(flatten)]
