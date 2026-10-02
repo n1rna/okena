@@ -13,7 +13,7 @@ mod render;
 pub use model::{GitFacts, ProjectInfo, ProjectInfoKind};
 
 use self::model::{
-    MenuEntry, MenuPick, RootSection, StoreChip, entry_matches, locate_file, menu_entries,
+    MenuEntry, MenuPick, StoreChip, entry_matches, locate_file, menu_entries,
     store_chips,
 };
 use crate::workspace::requests::WorkbenchRequest;
@@ -23,9 +23,8 @@ use crate::workspace::state::{WindowId, Workspace};
 use gpui::*;
 use okena_core::api::ActionRequest;
 use okena_core::context::{ContextItem, ContextSearchResult};
-use okena_core::knowledge::KnowledgeStores;
+use okena_core::library::LibraryOrigins;
 use okena_core::project_map::{ProjectLinks, ProjectMapReport};
-use okena_core::specs::SpecStores;
 use okena_terminal::TerminalsRegistry;
 use okena_ui::chip_search::{ChipGroup, ChipItem, ChipSearch, ChipSearchEvent};
 use std::time::Duration;
@@ -75,11 +74,9 @@ pub struct ProjectInfoPanel {
     /// The project's context items, as the daemon last indexed them.
     context_items: Vec<ContextItem>,
     context_reading: bool,
-    /// The knowledge roots on this machine: which stores the project follows,
-    /// and where a picked doc, skill or agent opens.
-    stores: Option<KnowledgeStores>,
-    /// The spec roots, for opening a picked spec in the root holding it.
-    spec_roots: Vec<(String, String)>,
+    /// The Library's origins: which stores the project follows, and which
+    /// origin a picked file opens in.
+    origins: Option<LibraryOrigins>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -133,8 +130,7 @@ impl ProjectInfoPanel {
             entries: Vec::new(),
             context_items: Vec::new(),
             context_reading: false,
-            stores: None,
-            spec_roots: Vec::new(),
+            origins: None,
             _subscriptions: subscriptions,
         };
         panel.refresh_map(cx);
@@ -229,42 +225,27 @@ impl ProjectInfoPanel {
         .detach();
     }
 
-    /// Read the knowledge and spec roots: which stores the project follows,
-    /// and which root a picked file opens in.
+    /// Read the Library's origins: which stores the project follows, and
+    /// which origin a picked file opens in.
     fn refresh_roots(&mut self, cx: &mut Context<Self>) {
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
-            let (knowledge, specs) = smol::unblock(move || {
-                let knowledge = client
-                    .post_action(ActionRequest::KnowledgeStores)
+            let origins = smol::unblock(move || {
+                client
+                    .post_action(ActionRequest::LibraryOrigins)
                     .and_then(|v| {
-                        serde_json::from_value::<KnowledgeStores>(v.unwrap_or_default())
+                        serde_json::from_value::<LibraryOrigins>(v.unwrap_or_default())
                             .map_err(|e| e.to_string())
-                    });
-                let specs = client.post_action(ActionRequest::SpecStores).and_then(|v| {
-                    serde_json::from_value::<SpecStores>(v.unwrap_or_default())
-                        .map_err(|e| e.to_string())
-                });
-                (knowledge, specs)
+                    })
             })
             .await;
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
-                    match knowledge {
-                        Ok(stores) => this.stores = Some(stores),
+                    match origins {
+                        Ok(origins) => this.origins = Some(origins),
                         Err(e) => {
-                            log::warn!("[project-info] could not read the knowledge stores: {e}");
+                            log::warn!("[project-info] could not read the library's origins: {e}");
                         }
-                    }
-                    match specs {
-                        Ok(stores) => {
-                            this.spec_roots = stores
-                                .roots
-                                .iter()
-                                .map(|root| (root.key.clone(), root.path.clone()))
-                                .collect();
-                        }
-                        Err(e) => log::warn!("[project-info] could not read the spec roots: {e}"),
                     }
                     cx.notify();
                 });
@@ -319,33 +300,29 @@ impl ProjectInfoPanel {
         }
     }
 
-    /// Open one of the project's files, in the harness section owning the
-    /// root it lies in.
+    /// Open one of the project's files in the Library, in the origin it lies
+    /// in.
     fn open_file(&mut self, path: &str, cx: &mut Context<Self>) {
-        let knowledge: Vec<(String, String)> = self
-            .stores
+        let origins: Vec<(String, String)> = self
+            .origins
             .iter()
-            .flat_map(|stores| stores.roots.iter())
-            .map(|root| (root.key.clone(), root.path.clone()))
+            .flat_map(|origins| origins.origins.iter())
+            .map(|origin| (origin.key.clone(), origin.path.clone()))
             .collect();
-        let Some(target) = locate_file(path, &knowledge, &self.spec_roots) else {
-            log::warn!("[project-info] no knowledge or spec root holds {path}");
+        let Some(target) = locate_file(path, &origins) else {
+            log::warn!("[project-info] no library origin holds {path}");
             return;
         };
-        let request = match target.section {
-            RootSection::Knowledge => WorkbenchRequest::OpenKnowledgeDoc {
+        self.push_workbench(
+            WorkbenchRequest::OpenLibraryDoc {
                 root_key: target.root_key,
                 path: target.path,
             },
-            RootSection::Specs => WorkbenchRequest::OpenSpecDoc {
-                root_key: target.root_key,
-                path: target.path,
-            },
-        };
-        self.push_workbench(request, cx);
+            cx,
+        );
     }
 
-    /// Open a launcher's brief: its own file in Harness → Knowledge.
+    /// Open a launcher's brief: its own file in the Library.
     pub(super) fn open_brief(
         &self,
     ) -> impl Fn(&SharedString, &SharedString, &mut Window, &mut App) + 'static + use<> {
@@ -361,7 +338,7 @@ impl ProjectInfoPanel {
             return;
         };
         self.push_workbench(
-            WorkbenchRequest::OpenKnowledgeDoc {
+            WorkbenchRequest::OpenLibraryDoc {
                 root_key,
                 path: render::MANIFEST_FILE.to_string(),
             },
@@ -369,9 +346,9 @@ impl ProjectInfoPanel {
         );
     }
 
-    /// Show Knowledge on a store the project follows.
-    fn open_knowledge_root(&mut self, root_key: String, cx: &mut Context<Self>) {
-        self.push_workbench(WorkbenchRequest::OpenKnowledgeRoot { root_key }, cx);
+    /// Show the Library on a store the project follows.
+    fn open_library_root(&mut self, root_key: String, cx: &mut Context<Self>) {
+        self.push_workbench(WorkbenchRequest::OpenLibraryRoot { root_key }, cx);
     }
 
     /// Show another project's info panel, by the daemon's id for it.
@@ -392,7 +369,7 @@ impl ProjectInfoPanel {
 
     /// The stores the project follows, as the panel's chips.
     fn store_chips(&self, cx: &App) -> Vec<StoreChip> {
-        let Some(stores) = self.stores.as_ref() else {
+        let Some(stores) = self.origins.as_ref() else {
             return Vec::new();
         };
         let Some(path) = self

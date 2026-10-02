@@ -320,7 +320,7 @@ fn missing_folder(name: String, path: &Path) -> SpecRoot {
                 "folder_missing",
                 format!("Folder not found: {}", display(path)),
             )
-            .with_fix("Fix the path in Settings → Specs, or remove it."),
+            .with_fix("Fix the path in Settings → Library, or remove it."),
         ],
     }
 }

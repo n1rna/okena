@@ -346,7 +346,7 @@ impl ContextIndex {
 fn watch_dir(kind: RootKind, dir: &Path) -> PathBuf {
     match kind {
         RootKind::Spec => dir.join(okena_openspec::root::OPENSPEC_DIR),
-        RootKind::Map | RootKind::Knowledge => dir.to_path_buf(),
+        RootKind::Map | RootKind::Knowledge | RootKind::Freeform => dir.to_path_buf(),
     }
 }
 

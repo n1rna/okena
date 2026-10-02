@@ -5,7 +5,7 @@
 //! pill naming the shortcut that opens it again. The page's filters are never
 //! laid out along the bar: the button opens a menu above it that holds them
 //! in headed groups, so the bar stays the same size however many there are. The Projects and Agents
-//! overviews, Tasks, Specs and Knowledge each own what it narrows and what its
+//! overviews, Tasks and Library each own what it narrows and what its
 //! chips mean; this is only the look, so the five cannot drift apart.
 //!
 //! Every piece comes back without a handler: the page that owns the state

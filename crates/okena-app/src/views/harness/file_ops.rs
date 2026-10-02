@@ -1,14 +1,16 @@
-//! Creating, renaming and deleting files in the Specs and Knowledge trees.
+//! Creating, renaming and deleting files in a Library origin's tree.
 //!
-//! Plain file management beside the editor: a "New" form in each tree, and
+//! Plain file management beside the editor: a "New" form in the tree, and
 //! Rename and Delete for the open document. Every operation goes through the
-//! daemon (`SpecFileCreate` … `KnowledgeFileDelete`), which checks each path
-//! the way a read does and never replaces an existing file. The view re-lists
+//! daemon (`LibraryFileCreate` … `LibraryFileDelete`), whatever the origin's
+//! type: it checks each path the way a read does and never replaces an
+//! existing file. What differs by type is only where a new item goes and what
+//! it starts with ([`plan_new`]). The view re-lists
 //! its tree after each one, so the result shows without a refresh. The
 //! agent-driven flows — drafting a change, "New with agent" — sit beside this
 //! and are unchanged.
 //!
-//! Empty folders are not shown as such: both trees list files. The one
+//! Empty folders are not shown as such: every tree lists files. The one
 //! exception is a spec change, which is a folder by definition — deleting its
 //! last document leaves it listed with "no artifacts yet".
 
@@ -24,7 +26,7 @@ use okena_core::specs::change_slug;
 use okena_ui::simple_input::InputChangedEvent;
 
 use super::editor::{DocumentBuffer, EditorMode};
-use super::{HarnessPane, HarnessSection};
+use super::HarnessPane;
 
 /// What the "New" form makes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +39,8 @@ pub(crate) enum NewItem {
     SpecCapability,
     /// A document inside the change at this root-relative path.
     SpecDocument { change: String },
+    /// A markdown file anywhere in a freeform origin.
+    Freeform,
 }
 
 impl NewItem {
@@ -49,6 +53,7 @@ impl NewItem {
                 "New document in {}",
                 change.rsplit('/').next().unwrap_or(change)
             ),
+            NewItem::Freeform => "New document".to_string(),
         }
     }
 
@@ -61,6 +66,7 @@ impl NewItem {
             NewItem::SpecChange => "add-login",
             NewItem::SpecCapability => "auth",
             NewItem::SpecDocument { .. } => "design.md",
+            NewItem::Freeform => "workflows/release",
         }
     }
 }
@@ -143,12 +149,22 @@ pub(crate) fn plan_new(item: &NewItem, name: &str) -> Result<PlannedItem, String
             };
             file(format!("{change}/{named}"), String::new())
         }
+        // No layout to follow: the name is the path, and the file starts with
+        // the heading its title is read from.
+        NewItem::Freeform => {
+            let named = if std::path::Path::new(name).extension().is_some() {
+                name.to_string()
+            } else {
+                format!("{name}.md")
+            };
+            file(named, format!("# {leaf}\n"))
+        }
     };
     okena_core::fs::normalize_relative(&planned.path)?;
     Ok(planned)
 }
 
-/// One section's file operation state.
+/// The Library's file operation state.
 pub(crate) struct FileOps {
     /// What the "New" form is making, while it is open.
     pub(crate) creating: Option<NewItem>,
@@ -193,49 +209,14 @@ impl FileOps {
 // ─── Actions ────────────────────────────────────────────────────────────────
 
 impl HarnessPane {
-    fn files(&self, section: HarnessSection) -> Option<&FileOps> {
-        match section {
-            HarnessSection::Specs => Some(&self.spec_files),
-            HarnessSection::Knowledge => Some(&self.knowledge_files),
-            HarnessSection::Tasks | HarnessSection::Testing => None,
-        }
-    }
-
-    fn files_mut(&mut self, section: HarnessSection) -> Option<&mut FileOps> {
-        match section {
-            HarnessSection::Specs => Some(&mut self.spec_files),
-            HarnessSection::Knowledge => Some(&mut self.knowledge_files),
-            HarnessSection::Tasks | HarnessSection::Testing => None,
-        }
-    }
-
-    fn section_root(&self, section: HarnessSection) -> Option<String> {
-        match section {
-            HarnessSection::Specs => self.specs.root_key.clone(),
-            HarnessSection::Knowledge => self.knowledge.root_key.clone(),
-            HarnessSection::Tasks | HarnessSection::Testing => None,
-        }
-    }
-
-    fn section_selected(&self, section: HarnessSection) -> Option<String> {
-        match section {
-            HarnessSection::Specs => self.specs.selected.clone(),
-            HarnessSection::Knowledge => self.knowledge.selected.clone(),
-            HarnessSection::Tasks | HarnessSection::Testing => None,
-        }
-    }
-
     /// Open the "New" form for `item`, focused on the name.
     pub(super) fn open_new_form(
         &mut self,
-        section: HarnessSection,
         item: NewItem,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(files) = self.files_mut(section) else {
-            return;
-        };
+        let files = &mut self.file_ops;
         files.close();
         let placeholder = item.placeholder();
         files.creating = Some(item);
@@ -248,22 +229,17 @@ impl HarnessPane {
         cx.notify();
     }
 
-    fn cancel_file_op(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        if let Some(files) = self.files_mut(section) {
-            files.close();
-        }
+    fn cancel_file_op(&mut self, cx: &mut Context<Self>) {
+        self.file_ops.close();
         cx.notify();
     }
 
     /// Enter in the name box: create, or rename, whichever is open.
-    fn submit_file_op(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        let Some(files) = self.files(section) else {
-            return;
-        };
-        if files.creating.is_some() {
-            self.submit_new(section, cx);
-        } else if files.renaming.is_some() {
-            self.submit_rename(section, cx);
+    fn submit_file_op(&mut self, cx: &mut Context<Self>) {
+        if self.file_ops.creating.is_some() {
+            self.submit_new(cx);
+        } else if self.file_ops.renaming.is_some() {
+            self.submit_rename(cx);
         }
     }
 
@@ -272,19 +248,15 @@ impl HarnessPane {
     /// what is shown is stale.
     fn run_file_action(
         &mut self,
-        section: HarnessSection,
         action: ActionRequest,
         on_done: impl FnOnce(&mut Self, serde_json::Value) + 'static,
         cx: &mut Context<Self>,
     ) {
-        let Some(files) = self.files_mut(section) else {
-            return;
-        };
-        if files.busy {
+        if self.file_ops.busy {
             return;
         }
-        files.busy = true;
-        files.error = None;
+        self.file_ops.busy = true;
+        self.file_ops.error = None;
         cx.notify();
 
         let client = self.client.clone();
@@ -300,24 +272,16 @@ impl HarnessPane {
                 let _ = this.update(cx, |this, cx| {
                     match result {
                         Ok(reply) => {
-                            if let Some(files) = this.files_mut(section) {
-                                files.busy = false;
-                                files.close();
-                            }
+                            this.file_ops.busy = false;
+                            this.file_ops.close();
                             on_done(this, reply);
                         }
                         Err(e) => {
-                            if let Some(files) = this.files_mut(section) {
-                                files.busy = false;
-                                files.error = Some(e);
-                            }
+                            this.file_ops.busy = false;
+                            this.file_ops.error = Some(e);
                         }
                     }
-                    match section {
-                        HarnessSection::Specs => this.refresh_specs(cx),
-                        HarnessSection::Knowledge => this.refresh_knowledge(cx),
-                        HarnessSection::Tasks | HarnessSection::Testing => {}
-                    }
+                    this.refresh_library(cx);
                     cx.notify();
                 });
             });
@@ -325,45 +289,31 @@ impl HarnessPane {
         .detach();
     }
 
-    fn submit_new(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        let Some(files) = self.files(section) else {
+    fn submit_new(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.file_ops.creating.clone() else {
             return;
         };
-        let Some(item) = files.creating.clone() else {
-            return;
-        };
-        let name = files.name_input.read(cx).value().to_string();
+        let name = self.file_ops.name_input.read(cx).value().to_string();
         let planned = match plan_new(&item, &name) {
             Ok(p) => p,
             Err(e) => {
-                if let Some(files) = self.files_mut(section) {
-                    files.error = Some(e);
-                }
+                self.file_ops.error = Some(e);
                 cx.notify();
                 return;
             }
         };
-        let root = self.section_root(section);
+        let root = self.library.root_key.clone();
         let path = planned.path.clone();
-        let action = match (section, planned.folder) {
-            (HarnessSection::Specs, false) => ActionRequest::SpecFileCreate {
+        let action = if planned.folder {
+            ActionRequest::LibraryFolderCreate { root, path }
+        } else {
+            ActionRequest::LibraryFileCreate {
                 root,
                 path,
                 content: planned.content.clone(),
-            },
-            (HarnessSection::Specs, true) => ActionRequest::SpecFolderCreate { root, path },
-            (HarnessSection::Knowledge, false) => ActionRequest::KnowledgeFileCreate {
-                root,
-                path,
-                content: planned.content.clone(),
-            },
-            (HarnessSection::Knowledge, true) => {
-                ActionRequest::KnowledgeFolderCreate { root, path }
             }
-            (HarnessSection::Tasks | HarnessSection::Testing, _) => return,
         };
         self.run_file_action(
-            section,
             action,
             move |this, reply| {
                 let path = reply
@@ -373,10 +323,8 @@ impl HarnessPane {
                     .to_string();
                 if planned.folder {
                     // A new change opens expanded: its documents go there next.
-                    if section == HarnessSection::Specs
-                        && let Some(name) = path.rsplit('/').next()
-                    {
-                        this.specs.collapsed.remove(name);
+                    if let Some(name) = path.rsplit('/').next() {
+                        this.library.collapsed.remove(name);
                     }
                     return;
                 }
@@ -388,47 +336,30 @@ impl HarnessPane {
                 // Straight into the editor: a new file is for writing in.
                 let mut buffer = DocumentBuffer::new(path, planned.content, revision);
                 buffer.mode = EditorMode::Edit;
-                this.show_new_document(section, buffer);
+                this.show_new_document(buffer);
             },
             cx,
         );
     }
 
     /// Select a freshly created file, with its buffer already in place.
-    fn show_new_document(&mut self, section: HarnessSection, buffer: DocumentBuffer) {
+    fn show_new_document(&mut self, buffer: DocumentBuffer) {
         let path = buffer.path.clone();
-        match section {
-            HarnessSection::Specs => {
-                self.specs.leave_selection();
-                let root = self.specs.root_key.clone().unwrap_or_default();
-                self.specs.documents.insert(&root, buffer);
-                self.specs.selected = Some(path);
-            }
-            HarnessSection::Knowledge => {
-                let root = self.knowledge.root_key.clone().unwrap_or_default();
-                if let Some(previous) = self.knowledge.selected.take() {
-                    self.knowledge.documents.leave(&root, &previous);
-                }
-                self.knowledge.content_error = None;
-                self.knowledge.documents.insert(&root, buffer);
-                self.knowledge.selected = Some(path);
-            }
-            HarnessSection::Tasks | HarnessSection::Testing => {}
-        }
+        self.library.leave_selection();
+        let root = self.library.root_key.clone().unwrap_or_default();
+        self.library.documents.insert(&root, buffer);
+        self.library.selected = Some(path);
     }
 
     fn start_rename(
         &mut self,
-        section: HarnessSection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = self.section_selected(section) else {
+        let Some(path) = self.library.selected.clone() else {
             return;
         };
-        let Some(files) = self.files_mut(section) else {
-            return;
-        };
+        let files = &mut self.file_ops;
         files.close();
         files.renaming = Some(path.clone());
         let input = files.name_input.clone();
@@ -440,34 +371,21 @@ impl HarnessPane {
         cx.notify();
     }
 
-    fn submit_rename(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        let Some(files) = self.files(section) else {
+    fn submit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(from) = self.file_ops.renaming.clone() else {
             return;
         };
-        let Some(from) = files.renaming.clone() else {
-            return;
-        };
-        let to = files.name_input.read(cx).value().trim().to_string();
+        let to = self.file_ops.name_input.read(cx).value().trim().to_string();
         if to.is_empty() || to == from {
-            self.cancel_file_op(section, cx);
+            self.cancel_file_op(cx);
             return;
         }
-        let root = self.section_root(section);
-        let action = match section {
-            HarnessSection::Specs => ActionRequest::SpecFileRename {
-                root,
-                from: from.clone(),
-                to,
-            },
-            HarnessSection::Knowledge => ActionRequest::KnowledgeFileRename {
-                root,
-                from: from.clone(),
-                to,
-            },
-            HarnessSection::Tasks | HarnessSection::Testing => return,
+        let action = ActionRequest::LibraryFileRename {
+            root: self.library.root_key.clone(),
+            from: from.clone(),
+            to,
         };
         self.run_file_action(
-            section,
             action,
             move |this, reply| {
                 let Some(to) = reply.get("path").and_then(|p| p.as_str()) else {
@@ -475,76 +393,42 @@ impl HarnessPane {
                 };
                 let to = to.to_string();
                 // The open document follows the file, unsaved edits and all.
-                match section {
-                    HarnessSection::Specs => {
-                        let root = this.specs.root_key.clone().unwrap_or_default();
-                        this.specs.documents.rename(&root, &from, &to);
-                        if this.specs.selected.as_deref() == Some(from.as_str()) {
-                            this.specs.selected = Some(to);
-                        }
-                    }
-                    HarnessSection::Knowledge => {
-                        let root = this.knowledge.root_key.clone().unwrap_or_default();
-                        this.knowledge.documents.rename(&root, &from, &to);
-                        if this.knowledge.selected.as_deref() == Some(from.as_str()) {
-                            this.knowledge.selected = Some(to);
-                        }
-                    }
-                    HarnessSection::Tasks | HarnessSection::Testing => {}
+                let root = this.library.root_key.clone().unwrap_or_default();
+                this.library.documents.rename(&root, &from, &to);
+                if this.library.selected.as_deref() == Some(from.as_str()) {
+                    this.library.selected = Some(to);
                 }
             },
             cx,
         );
     }
 
-    fn arm_delete(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        let Some(path) = self.section_selected(section) else {
+    fn arm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.library.selected.clone() else {
             return;
         };
-        if let Some(files) = self.files_mut(section) {
-            files.close();
-            files.pending_delete = Some(path);
-        }
+        self.file_ops.close();
+        self.file_ops.pending_delete = Some(path);
         cx.notify();
     }
 
-    fn confirm_delete(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        let Some(path) = self.files(section).and_then(|f| f.pending_delete.clone()) else {
+    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.file_ops.pending_delete.clone() else {
             return;
         };
-        let root = self.section_root(section);
-        let action = match section {
-            HarnessSection::Specs => ActionRequest::SpecFileDelete {
-                root,
-                path: path.clone(),
-            },
-            HarnessSection::Knowledge => ActionRequest::KnowledgeFileDelete {
-                root,
-                path: path.clone(),
-            },
-            HarnessSection::Tasks | HarnessSection::Testing => return,
+        let action = ActionRequest::LibraryFileDelete {
+            root: self.library.root_key.clone(),
+            path: path.clone(),
         };
         self.run_file_action(
-            section,
             action,
-            move |this, _reply| match section {
-                HarnessSection::Specs => {
-                    let root = this.specs.root_key.clone().unwrap_or_default();
-                    this.specs.documents.remove(&root, &path);
-                    if this.specs.selected.as_deref() == Some(path.as_str()) {
-                        this.specs.selected = None;
-                        this.specs.content_error = None;
-                    }
+            move |this, _reply| {
+                let root = this.library.root_key.clone().unwrap_or_default();
+                this.library.documents.remove(&root, &path);
+                if this.library.selected.as_deref() == Some(path.as_str()) {
+                    this.library.selected = None;
+                    this.library.content_error = None;
                 }
-                HarnessSection::Knowledge => {
-                    let root = this.knowledge.root_key.clone().unwrap_or_default();
-                    this.knowledge.documents.remove(&root, &path);
-                    if this.knowledge.selected.as_deref() == Some(path.as_str()) {
-                        this.knowledge.selected = None;
-                        this.knowledge.content_error = None;
-                    }
-                }
-                HarnessSection::Tasks | HarnessSection::Testing => {}
             },
             cx,
         );
@@ -616,13 +500,11 @@ impl HarnessPane {
     }
 
     /// The name box, with Enter to submit and Escape to cancel.
-    fn render_name_field(&self, section: HarnessSection, cx: &mut Context<Self>) -> AnyElement {
-        let Some(files) = self.files(section) else {
-            return div().into_any_element();
-        };
+    fn render_name_field(&self, cx: &mut Context<Self>) -> AnyElement {
+        let files = &self.file_ops;
         let t = theme(cx);
         div()
-            .id(SharedString::from(format!("{section:?}-file-name")))
+            .id("library-file-name")
             .w_full()
             .child(
                 okena_ui::input::input_container(&t, None)
@@ -635,8 +517,8 @@ impl HarnessPane {
                 // Typing belongs to the box, not to the pane's shortcuts.
                 cx.stop_propagation();
                 match event.keystroke.key.as_str() {
-                    "enter" => this.submit_file_op(section, cx),
-                    "escape" => this.cancel_file_op(section, cx),
+                    "enter" => this.submit_file_op(cx),
+                    "escape" => this.cancel_file_op(cx),
                     _ => {}
                 }
             }))
@@ -685,10 +567,9 @@ impl HarnessPane {
     /// The "New" form, for the top of a tree while it is open.
     pub(super) fn render_new_form(
         &self,
-        section: HarnessSection,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let files = self.files(section)?;
+        let files = &self.file_ops;
         let item = files.creating.clone()?;
         let t = theme(cx);
         let name = files.name_input.read(cx).value().to_string();
@@ -699,10 +580,7 @@ impl HarnessPane {
         };
         let busy = files.busy;
         let error = files.error.clone();
-        let (create_id, cancel_id) = match section {
-            HarnessSection::Knowledge => ("knowledge-new-create", "knowledge-new-cancel"),
-            _ => ("spec-new-create", "spec-new-cancel"),
-        };
+        let (create_id, cancel_id) = ("library-new-create", "library-new-cancel");
 
         let mut form = v_flex()
             .gap(px(6.0))
@@ -722,9 +600,7 @@ impl HarnessPane {
                     kind_name(kind).to_string(),
                     kind == *current,
                     move |this, _cx| {
-                        if let Some(files) = this.files_mut(section) {
-                            files.creating = Some(NewItem::Knowledge(kind));
-                        }
+                        this.file_ops.creating = Some(NewItem::Knowledge(kind));
                     },
                     cx,
                 ));
@@ -732,7 +608,7 @@ impl HarnessPane {
             form = form.child(kinds);
         }
         form = form
-            .child(self.render_name_field(section, cx))
+            .child(self.render_name_field(cx))
             .child(self.file_note(hint, t.text_muted, cx));
         if let Some(error) = error {
             form = form.child(self.file_note(error, t.error, cx));
@@ -747,14 +623,14 @@ impl HarnessPane {
                         self.small_button(
                             create_id,
                             "Create",
-                            cx.listener(move |this, _, _window, cx| this.submit_new(section, cx)),
+                            cx.listener(move |this, _, _window, cx| this.submit_new(cx)),
                             cx,
                         )
                     })
                     .child(self.small_button(
                         cancel_id,
                         "Cancel",
-                        cx.listener(move |this, _, _window, cx| this.cancel_file_op(section, cx)),
+                        cx.listener(move |this, _, _window, cx| this.cancel_file_op(cx)),
                         cx,
                     )),
             )
@@ -765,13 +641,10 @@ impl HarnessPane {
     /// Rename and Delete for the open document, for the right of its header.
     pub(super) fn render_file_controls(
         &self,
-        section: HarnessSection,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let Some(files) = self.files(section) else {
-            return Vec::new();
-        };
-        let open = self.open_buffer(section);
+        let files = &self.file_ops;
+        let open = self.open_buffer();
         // Not while a save is in flight: its reply lands by path. And not
         // before the file has loaded, when there may be nothing to act on.
         if files.busy
@@ -781,21 +654,18 @@ impl HarnessPane {
         {
             return Vec::new();
         }
-        let ids = match section {
-            HarnessSection::Knowledge => ["knowledge-doc-rename", "knowledge-doc-delete"],
-            _ => ["spec-doc-rename", "spec-doc-delete"],
-        };
+        let ids = ["library-doc-rename", "library-doc-delete"];
         vec![
             self.small_button(
                 ids[0],
                 "Rename",
-                cx.listener(move |this, _, window, cx| this.start_rename(section, window, cx)),
+                cx.listener(move |this, _, window, cx| this.start_rename(window, cx)),
                 cx,
             ),
             self.small_button(
                 ids[1],
                 "Delete…",
-                cx.listener(move |this, _, _window, cx| this.arm_delete(section, cx)),
+                cx.listener(move |this, _, _window, cx| this.arm_delete(cx)),
                 cx,
             ),
         ]
@@ -804,17 +674,13 @@ impl HarnessPane {
     /// The rename box or the delete confirmation, under the document header.
     pub(super) fn render_file_op_bar(
         &self,
-        section: HarnessSection,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let files = self.files(section)?;
+        let files = &self.file_ops;
         let t = theme(cx);
         let busy = files.busy;
         let error = files.error.clone();
-        let (go_id, cancel_id) = match section {
-            HarnessSection::Knowledge => ("knowledge-file-op-go", "knowledge-file-op-cancel"),
-            _ => ("spec-file-op-go", "spec-file-op-cancel"),
-        };
+        let (go_id, cancel_id) = ("library-file-op-go", "library-file-op-cancel");
         let bar = v_flex()
             .flex_shrink_0()
             .gap(px(6.0))
@@ -826,10 +692,10 @@ impl HarnessPane {
 
         let (bar, go) = if let Some(from) = files.renaming.clone() {
             (
-                bar.child(self.render_name_field(section, cx))
+                bar.child(self.render_name_field(cx))
                     .child(self.file_note(
                         format!(
-                            "Move {from} to a new path in this root. Folders it needs are created."
+                            "Move {from} to a new path in this origin. Folders it needs are created."
                         ),
                         t.text_muted,
                         cx,
@@ -837,12 +703,12 @@ impl HarnessPane {
                 self.small_button(
                     go_id,
                     "Rename",
-                    cx.listener(move |this, _, _window, cx| this.submit_rename(section, cx)),
+                    cx.listener(move |this, _, _window, cx| this.submit_rename(cx)),
                     cx,
                 ),
             )
         } else if let Some(path) = files.pending_delete.clone() {
-            let unsaved = self.open_buffer(section).is_some_and(|b| b.dirty);
+            let unsaved = self.open_buffer().is_some_and(|b| b.dirty);
             (
                 bar.child(self.file_note(
                     format!(
@@ -859,7 +725,7 @@ impl HarnessPane {
                 self.danger_button(
                     go_id,
                     "Delete",
-                    move |this, cx| this.confirm_delete(section, cx),
+                    move |this, cx| this.confirm_delete(cx),
                     cx,
                 ),
             )
@@ -883,7 +749,7 @@ impl HarnessPane {
                     .child(self.small_button(
                         cancel_id,
                         "Cancel",
-                        cx.listener(move |this, _, _window, cx| this.cancel_file_op(section, cx)),
+                        cx.listener(move |this, _, _window, cx| this.cancel_file_op(cx)),
                         cx,
                     )),
             )
@@ -959,6 +825,21 @@ mod tests {
             "openspec/changes/add-login/notes.txt",
             "an extension given is kept"
         );
+    }
+
+    #[test]
+    fn a_freeform_document_goes_where_its_name_says_and_starts_with_its_heading() {
+        // No layout to follow, so nothing is prefixed.
+        let doc = plan_new(&NewItem::Freeform, "workflows/release").unwrap();
+        assert_eq!(doc.path, "workflows/release.md");
+        assert!(!doc.folder);
+        assert_eq!(doc.content, "# release\n", "the title the tree will show");
+        assert_eq!(
+            path_of(NewItem::Freeform, "notes.markdown").0,
+            "notes.markdown",
+            "an extension given is kept"
+        );
+        assert!(plan_new(&NewItem::Freeform, "../escape").is_err());
     }
 
     #[test]

@@ -1352,25 +1352,19 @@ impl WindowView {
                 crate::workspace::requests::WorkbenchRequest::OpenExtensionsPage { open } => {
                     self.show_extensions_page(open, cx);
                 }
-                crate::workspace::requests::WorkbenchRequest::OpenKnowledgeDoc {
+                crate::workspace::requests::WorkbenchRequest::OpenLibraryDoc {
                     root_key,
                     path,
                 } => {
-                    self.show_harness_view(okena_core::harness::HarnessSection::Knowledge, cx);
+                    self.show_harness_view(okena_core::harness::HarnessSection::Library, cx);
                     if let Some(pane) = self.active_harness_pane(cx) {
-                        pane.update(cx, |pane, cx| pane.open_knowledge_doc(root_key, path, cx));
+                        pane.update(cx, |pane, cx| pane.open_library_doc(root_key, path, cx));
                     }
                 }
-                crate::workspace::requests::WorkbenchRequest::OpenKnowledgeRoot { root_key } => {
-                    self.show_harness_view(okena_core::harness::HarnessSection::Knowledge, cx);
+                crate::workspace::requests::WorkbenchRequest::OpenLibraryRoot { root_key } => {
+                    self.show_harness_view(okena_core::harness::HarnessSection::Library, cx);
                     if let Some(pane) = self.active_harness_pane(cx) {
-                        pane.update(cx, |pane, cx| pane.open_knowledge_root(root_key, cx));
-                    }
-                }
-                crate::workspace::requests::WorkbenchRequest::OpenSpecDoc { root_key, path } => {
-                    self.show_harness_view(okena_core::harness::HarnessSection::Specs, cx);
-                    if let Some(pane) = self.active_harness_pane(cx) {
-                        pane.update(cx, |pane, cx| pane.open_spec_doc_in(root_key, path, cx));
+                        pane.update(cx, |pane, cx| pane.open_library_root(root_key, cx));
                     }
                 }
                 crate::workspace::requests::WorkbenchRequest::ShowProjectInfo { project_id } => {

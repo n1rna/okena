@@ -1,8 +1,8 @@
-//! Create, rename and delete for the files the Specs and Knowledge trees list.
+//! Create, rename and delete for the files a Library origin's tree lists.
 //!
-//! Each section resolves its root its own way; what happens inside the root is
-//! the same for both, and so are the checks. A path that must name an existing
-//! file goes through the section's `resolve_document` — canonical, so neither
+//! Each origin type resolves its root its own way; what happens inside the
+//! root is the same for all of them, and so are the checks. A path that must
+//! name an existing file goes through the type's `resolve_document` — canonical, so neither
 //! `..` nor a symlink leads out — and a path for something new goes through
 //! `okena_core::fs::resolve_new_path`. Nothing here replaces a file that
 //! exists, and delete removes one file, never a folder.
@@ -11,7 +11,7 @@ use super::ActionResult;
 use okena_core::fs;
 use std::path::{Path, PathBuf};
 
-/// A section's check that `path` names an existing file inside `root`.
+/// An origin type's check that `path` names an existing file inside `root`.
 pub(super) type ResolveExisting = fn(&Path, &str) -> Result<PathBuf, String>;
 
 fn io_error(verb: &str, path: &str, e: std::io::Error) -> ActionResult {

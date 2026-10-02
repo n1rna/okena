@@ -1,6 +1,6 @@
 //! gpui-component's code editor, set up for prose.
 //!
-//! The Specs and Knowledge document editor, and every box a goal or brief is
+//! The Library's document editor, and every box a goal or brief is
 //! typed in for an agent. Rope-backed text, undo, line-wise arrow keys, IME,
 //! find, and a scroll that follows the caret wherever it is — none of which
 //! `SimpleInput` has.

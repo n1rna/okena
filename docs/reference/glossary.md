@@ -4,7 +4,7 @@ Domain terms used across Okena. Implementation lives in code; this is for shared
 
 ## Space
 
-A named, separate set of projects, agents, tasks and Knowledge/Specs roots inside one profile. Switched from the selector at the top of the sidebar; there is always a **Default** space, which cannot be renamed or deleted. See [`spaces.md`](spaces.md).
+A named, separate set of projects, agents, tasks and Library origins inside one profile. Switched from the selector at the top of the sidebar; there is always a **Default** space, which cannot be renamed or deleted. See [`spaces.md`](spaces.md).
 
 Not a **Workspace** — see below. A space is the switch *above* the workspace: each one has its own projects and folders. Profiles separate whole config directories; a space separates what is inside one.
 

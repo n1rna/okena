@@ -301,13 +301,13 @@ impl SettingsState {
         self.save_and_notify(cx);
     }
 
-    /// Open or close the Knowledge and Specs file sidebar.
+    /// Open or close the Library's file sidebar.
     pub fn set_harness_files_open(&mut self, value: bool, cx: &mut Context<Self>) {
         self.settings.harness_files.is_open = value;
         self.save_and_notify(cx);
     }
 
-    /// Set the Knowledge and Specs file sidebar's width (clamped to bounds).
+    /// Set the Library file sidebar's width (clamped to bounds).
     pub fn set_harness_files_width(&mut self, value: f32, cx: &mut Context<Self>) {
         use crate::workspace::persistence::HarnessFilesSettings;
         self.settings.harness_files.width = HarnessFilesSettings::clamp_width(value);
@@ -440,18 +440,18 @@ impl SettingsState {
         }));
     }
 
-    /// List every store in OpenSpec's machine registry in the Specs view.
+    /// List every store in OpenSpec's machine registry in the Library.
     ///
-    /// Roots are per space (QBL-430), so this and its siblings edit the space
-    /// showing. Another space's roots are untouched.
+    /// Origins are per space (QBL-430), so this and its siblings edit the
+    /// space showing. Another space's origins are untouched.
     pub fn set_spec_discovery_registry(&mut self, value: bool, cx: &mut Context<Self>) {
-        self.settings.active_space_mut().specs.registry = value;
+        self.settings.active_space_mut().library.spec.registry = value;
         self.save_and_notify(cx);
     }
 
     /// Find OpenSpec roots and `store:` pointers in okena projects.
     pub fn set_spec_discovery_projects(&mut self, value: bool, cx: &mut Context<Self>) {
-        self.settings.active_space_mut().specs.projects = value;
+        self.settings.active_space_mut().library.spec.projects = value;
         self.save_and_notify(cx);
     }
 
@@ -463,7 +463,7 @@ impl SettingsState {
                 cleaned.push(folder);
             }
         }
-        self.settings.active_space_mut().specs.folders = cleaned;
+        self.settings.active_space_mut().library.spec.folders = cleaned;
         self.save_and_notify(cx);
     }
 
@@ -488,20 +488,20 @@ impl SettingsState {
     /// Override where OpenSpec's store registry lives. Blank follows the CLI's
     /// own resolution.
     pub fn set_spec_data_dir(&mut self, value: String, cx: &mut Context<Self>) {
-        self.settings.active_space_mut().specs.data_dir = opt_trimmed(value);
+        self.settings.active_space_mut().library.spec.data_dir = opt_trimmed(value);
         self.save_and_notify(cx);
     }
 
     /// Override where OpenSpec's `config.json` lives. Blank follows the CLI's
     /// own resolution.
     pub fn set_spec_config_dir(&mut self, value: String, cx: &mut Context<Self>) {
-        self.settings.active_space_mut().specs.config_dir = opt_trimmed(value);
+        self.settings.active_space_mut().library.spec.config_dir = opt_trimmed(value);
         self.save_and_notify(cx);
     }
 
     /// Find knowledge in okena projects' `.okena/` folders.
     pub fn set_knowledge_discovery_projects(&mut self, value: bool, cx: &mut Context<Self>) {
-        self.settings.active_space_mut().knowledge.projects = value;
+        self.settings.active_space_mut().library.knowledge.projects = value;
         self.save_and_notify(cx);
     }
 
@@ -511,22 +511,29 @@ impl SettingsState {
     /// reads: writing it in one go is what makes "reordering saves at once"
     /// true, and what a restart reads back.
     pub fn set_knowledge_root_order(&mut self, order: Vec<String>, cx: &mut Context<Self>) {
-        if self.settings.active_space().knowledge.order == order {
+        if self.settings.active_space().library.knowledge.order == order {
             return;
         }
-        self.settings.active_space_mut().knowledge.order = order;
+        self.settings.active_space_mut().library.knowledge.order = order;
         self.save_and_notify(cx);
     }
 
     /// Where a store is cloned when no destination is given. Blank is
     /// `~/knowledge`.
     pub fn set_knowledge_clone_dir(&mut self, value: String, cx: &mut Context<Self>) {
-        self.settings.active_space_mut().knowledge.clone_dir = opt_trimmed(value);
+        self.settings.active_space_mut().library.knowledge.clone_dir = opt_trimmed(value);
         self.save_and_notify(cx);
     }
 
     pub fn set_spec_clone_dir(&mut self, value: String, cx: &mut Context<Self>) {
-        self.settings.active_space_mut().specs.clone_dir = opt_trimmed(value);
+        self.settings.active_space_mut().library.spec.clone_dir = opt_trimmed(value);
+        self.save_and_notify(cx);
+    }
+
+    /// Where a freeform origin is cloned when no destination is given. Blank
+    /// is `~/library`.
+    pub fn set_freeform_clone_dir(&mut self, value: String, cx: &mut Context<Self>) {
+        self.settings.active_space_mut().library.freeform.clone_dir = opt_trimmed(value);
         self.save_and_notify(cx);
     }
 

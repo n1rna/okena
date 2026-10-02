@@ -1,4 +1,10 @@
-//! Engineering-harness OpenSpec actions.
+//! The Library's `spec` origins: OpenSpec roots.
+//!
+//! `library.rs` hands this module every Library action that is about a spec
+//! origin. The Library wraps OpenSpec and changes nothing about it: the
+//! `openspec/` layout, the CLI's machine registry and its lock, and
+//! `defaultStore` are read and written exactly as the CLI does, so whatever
+//! okena does here the CLI reads back and the other way round.
 //!
 //! okena works with OpenSpec (<https://github.com/Fission-AI/OpenSpec>) the way
 //! the `openspec` CLI does — stores registered on this machine, roots found in
@@ -15,7 +21,12 @@ use super::ActionResult;
 use super::briefs::{self, PromptRoots};
 use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{ProjectData, WindowId, Workspace};
-use okena_core::doc_search::{SearchDoc, SpecHit, SpecSearchFilter, SpecSearchResult, spec_matches};
+use super::library::SettingsEdit;
+use okena_core::api::ActionRequest;
+use okena_core::doc_search::{LibrarySearchFilter, SearchDoc, library_matches};
+use okena_core::library::{
+    LibraryDocument, LibraryHit, LibrarySearchResult, LibraryTree, OriginType,
+};
 use okena_core::specs::{SpecDoc, SpecRoot, SpecRootKind, SpecStores, change_slug};
 use okena_knowledge::prompts::{Flow, Vars};
 use okena_openspec::discover::{self, ProjectSource, Sources};
@@ -28,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 /// OpenSpec's machine directories, with overrides from settings.
 pub(super) fn dirs(settings: &AppSettings) -> OpenSpecDirs {
-    let specs = &settings.active_space().specs;
+    let specs = &settings.active_space().library.spec;
     OpenSpecDirs::detect(specs.data_dir.as_deref(), specs.config_dir.as_deref())
 }
 
@@ -38,7 +49,7 @@ pub(super) fn dirs(settings: &AppSettings) -> OpenSpecDirs {
 /// a listing runs in every store — without holding the workspace lock.
 pub fn spec_sources(projects: &[ProjectData], settings: &AppSettings) -> Sources {
     let space = settings.active_space();
-    let specs = &space.specs;
+    let specs = &space.library.spec;
     let projects = if specs.projects {
         projects
             .iter()
@@ -72,22 +83,22 @@ fn to_result(value: serde_json::Result<serde_json::Value>, what: &str) -> Action
     }
 }
 
-/// Every root okena can see.
-pub(super) fn stores(ws: &Workspace, settings: &AppSettings) -> ActionResult {
-    listing_result(&spec_sources(&ws.data.projects, settings), settings)
-}
-
-fn listing_result(sources: &Sources, settings: &AppSettings) -> ActionResult {
-    to_result(
-        serde_json::to_value(listing(sources, settings)),
-        "spec stores",
-    )
+/// Every OpenSpec root discovery finds, under its Library key.
+///
+/// The one place this module discovers, and so the one place a root's key
+/// becomes its Library key (`spec:store:team-plans`): resolving the key a
+/// client sent back, a tree's `root_key`, a search hit and a session's
+/// recorded origin all read it from here.
+pub(super) fn discovered(sources: &Sources, settings: &AppSettings) -> SpecStores {
+    let mut stores = discover::discover(&dirs(settings), sources);
+    okena_core::library::key_spec_stores(&mut stores);
+    stores
 }
 
 /// Every root, with sync state on each store and folder at the top of a git
 /// checkout. A project root carries none: its project's own git owns it.
-fn listing(sources: &Sources, settings: &AppSettings) -> SpecStores {
-    let mut stores = discover::discover(&dirs(settings), sources);
+pub(super) fn listing(sources: &Sources, settings: &AppSettings) -> SpecStores {
+    let mut stores = discovered(sources, settings);
     for root in stores
         .roots
         .iter_mut()
@@ -98,37 +109,142 @@ fn listing(sources: &Sources, settings: &AppSettings) -> SpecStores {
     stores
 }
 
-/// Run an OpenSpec action that runs git in store checkouts — the listing
-/// (`git status` in every store), fetch, pull, commit and push — or reads
-/// every root's documents — a search — against discovery sources copied out of
-/// the workspace. `None` for any other action.
+/// A result, and the settings change that goes with it when there is one.
+type Outcome = (ActionResult, Option<SettingsEdit>);
+
+/// Run a Library action against the spec origins; `None` for an action this
+/// type has nothing to do with.
 ///
-/// None of them touches the workspace, so the daemon runs them on its blocking
-/// pool rather than under the workspace lock.
-pub fn execute_spec_git_action(
-    action: &okena_core::api::ActionRequest,
+/// None of them touches the workspace, so the daemon runs them on its
+/// blocking pool, against discovery sources copied out of the workspace,
+/// rather than under the workspace lock: the store changes may wait on the
+/// lock an `openspec` command holds, setup commits with git, and the store
+/// git reaches the network.
+pub(super) fn execute(
+    action: &ActionRequest,
     sources: &Sources,
     settings: &AppSettings,
-) -> Option<ActionResult> {
-    use okena_core::api::ActionRequest;
+) -> Option<Outcome> {
     use okena_git::store;
+    let plain = |result: ActionResult| (result, None);
     Some(match action {
-        ActionRequest::SpecStores => listing_result(sources, settings),
-        ActionRequest::SpecSearch { query, roots } => search(sources, settings, query, roots),
-        ActionRequest::SpecStoreFetch { root } => sync(sources, settings, root, |path| {
+        ActionRequest::LibraryTree { root } => plain(tree_for(sources, settings, root.clone())),
+        ActionRequest::LibraryRead { root, path } => {
+            plain(read_for(sources, settings, root.clone(), path.clone()))
+        }
+        ActionRequest::LibraryWrite {
+            root,
+            path,
+            content,
+            revision,
+        } => plain(write_for(
+            sources,
+            settings,
+            root.clone(),
+            path.clone(),
+            content.clone(),
+            revision.clone(),
+        )),
+        ActionRequest::LibraryFileCreate {
+            root,
+            path,
+            content,
+        } => plain(in_root(sources, settings, root.clone(), |key, dir| {
+            super::document_files::create_file(key, dir, path, content, MAX_DOC_BYTES)
+        })),
+        ActionRequest::LibraryFolderCreate { root, path } => {
+            plain(in_root(sources, settings, root.clone(), |key, dir| {
+                super::document_files::create_folder(key, dir, path)
+            }))
+        }
+        ActionRequest::LibraryFileRename { root, from, to } => {
+            plain(in_root(sources, settings, root.clone(), |key, dir| {
+                super::document_files::rename(key, dir, tree::resolve_document, from, to)
+            }))
+        }
+        ActionRequest::LibraryFileDelete { root, path } => {
+            plain(in_root(sources, settings, root.clone(), |key, dir| {
+                super::document_files::delete(key, dir, tree::resolve_document, path)
+            }))
+        }
+        ActionRequest::LibraryOverride { .. } => plain(ActionResult::Err(
+            super::freeform::no_layers(OriginType::Spec),
+        )),
+        ActionRequest::LibraryStoreClone { url, path, .. } => {
+            plain(clone_store(settings, url, path.as_deref()))
+        }
+        ActionRequest::LibraryStoreRegister { path, id, .. } => {
+            plain(register_store(settings, path.clone(), id.clone()))
+        }
+        ActionRequest::LibraryStoreUnregister { root } => unregister(sources, settings, root),
+        ActionRequest::LibraryStoreSetup {
+            id,
+            path,
+            remote,
+            init_git,
+            ..
+        } => plain(setup_store(
+            settings,
+            id.clone(),
+            path.clone(),
+            remote.clone(),
+            *init_git,
+        )),
+        ActionRequest::LibrarySetDefaultStore { id } => {
+            plain(set_default_store(settings, id.clone()))
+        }
+        ActionRequest::LibraryStoreFetch { root } => plain(sync(sources, settings, root, |path| {
             store::fetch(path).map(|()| store::status(path).unwrap_or_default())
-        }),
-        ActionRequest::SpecStorePull { root } => sync(sources, settings, root, store::pull),
-        ActionRequest::SpecStoreCommit {
+        })),
+        ActionRequest::LibraryStorePull { root } => {
+            plain(sync(sources, settings, root, store::pull))
+        }
+        ActionRequest::LibraryStoreCommit {
             root,
             paths,
             message,
-        } => sync(sources, settings, root, |path| {
+        } => plain(sync(sources, settings, root, |path| {
             store::commit(path, paths, message)
-        }),
-        ActionRequest::SpecStorePush { root } => sync(sources, settings, root, store::push),
+        })),
+        ActionRequest::LibraryStorePush { root } => {
+            plain(sync(sources, settings, root, store::push))
+        }
         _ => return None,
     })
+}
+
+/// Take the root `key` names off the list. The folder stays on disk.
+///
+/// Found among everything discovered rather than only the usable roots: a
+/// store whose checkout has gone missing is exactly the one to remove. A store
+/// is forgotten by OpenSpec's registry (`openspec store unregister <id>`); a
+/// folder is a line in the space's settings, so removing it is a settings
+/// write; a project's root belongs to its repository and cannot be removed
+/// here.
+fn unregister(sources: &Sources, settings: &AppSettings, key: &str) -> Outcome {
+    let Some(root) = discovered(sources, settings).root(key).cloned() else {
+        return (ActionResult::Err(super::library::unknown_origin(key)), None);
+    };
+    match (root.kind, root.store_id.clone()) {
+        (SpecRootKind::Store, Some(id)) => (unregister_store(settings, id), None),
+        (SpecRootKind::Folder, _) => (
+            ActionResult::Ok(Some(serde_json::json!({
+                "id": root.name,
+                "left_on_disk": root.path,
+            }))),
+            Some(SettingsEdit::RemoveSpecFolder {
+                space: settings.active_space.clone(),
+                folder: root.path,
+            }),
+        ),
+        _ => (
+            ActionResult::Err(format!(
+                "`{}` is part of a project, not a store — it goes when its `openspec/` folder does",
+                root.name
+            )),
+            None,
+        ),
+    }
 }
 
 /// Run `op` in the checkout of the store or folder root `key` names. Replies
@@ -173,30 +289,22 @@ fn resolve_root_in(
     settings: &AppSettings,
     key: Option<&str>,
 ) -> Result<SpecRoot, String> {
-    let stores = discover::discover(&dirs(settings), sources);
+    let stores = discovered(sources, settings);
     match key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(key) => stores.root(key).cloned().ok_or_else(|| {
             format!(
-                "unknown spec root `{key}` — it is no longer discovered; refresh the Specs view"
+                "unknown spec origin `{key}` — it is no longer discovered; refresh the Library"
             )
         }),
         None => stores.default_root().cloned().ok_or_else(|| {
-            "no OpenSpec roots found — register a store or add a folder in Settings → Specs"
+            "no OpenSpec roots found — register a store or add a folder in Settings → Library"
                 .to_string()
         }),
     }
 }
 
-pub(super) fn tree(ws: &Workspace, settings: &AppSettings, root: Option<String>) -> ActionResult {
-    tree_for(&ws.data.projects, settings, root)
-}
-
-fn tree_for(
-    projects: &[ProjectData],
-    settings: &AppSettings,
-    root: Option<String>,
-) -> ActionResult {
-    let root = match resolve_root(projects, settings, root.as_deref()) {
+fn tree_for(sources: &Sources, settings: &AppSettings, root: Option<String>) -> ActionResult {
+    let root = match resolve_root_in(sources, settings, root.as_deref()) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -207,26 +315,24 @@ fn tree_for(
     if root.kind == SpecRootKind::Store {
         t.store_id = root.store_id.clone();
     }
-    to_result(serde_json::to_value(&t), "spec tree")
+    to_result(serde_json::to_value(LibraryTree::Spec(t)), "spec tree")
 }
 
-/// Search every usable root's documents by name, path and content (QBL-436).
+/// Add every spec document `filter` keeps to `result` (QBL-436).
 ///
 /// Only roots discovery found are read, and only the documents their trees
 /// list, through the path check a read goes through. A root that is not
 /// usable is skipped rather than failing the search.
-fn search(sources: &Sources, settings: &AppSettings, query: &str, roots: &[String]) -> ActionResult {
-    let filter = SpecSearchFilter {
-        query: query.to_string(),
-        roots: roots.to_vec(),
-    };
-    // The Root choice alone, to tell whether a document is worth opening.
-    let groups = SpecSearchFilter {
-        query: String::new(),
-        ..filter.clone()
-    };
-    let mut result = SpecSearchResult::default();
-    for root in discover::discover(&dirs(settings), sources)
+pub(super) fn search(
+    sources: &Sources,
+    settings: &AppSettings,
+    filter: &LibrarySearchFilter,
+    result: &mut LibrarySearchResult,
+) {
+    // The origin and type choices alone, to tell whether a document is worth
+    // opening.
+    let groups = filter.without_text();
+    for root in discovered(sources, settings)
         .roots
         .iter()
         .filter(|r| r.healthy)
@@ -257,21 +363,24 @@ fn search(sources: &Sources, settings: &AppSettings, query: &str, roots: &[Strin
                 paths: &paths,
                 content,
             };
-            // Names and paths first, and a document its root has already
+            let matches = |f: &LibrarySearchFilter, content| {
+                library_matches(f, OriginType::Spec, None, &doc(content))
+            };
+            // Names and paths first, and a document its origin has already
             // ruled out is never opened.
-            let hit = spec_matches(&filter, &doc(""))
-                || (spec_matches(&groups, &doc(""))
-                    && spec_matches(&filter, &doc(&searchable_text(dir, &d.path))));
+            let hit = matches(filter, "")
+                || (matches(&groups, "") && matches(filter, &searchable_text(dir, &d.path)));
             if hit {
-                result.hits.push(SpecHit {
+                result.hits.push(LibraryHit {
                     root_key: root.key.clone(),
+                    origin_type: OriginType::Spec,
                     path: d.path,
                     label,
+                    facet: None,
                 });
             }
         }
     }
-    to_result(serde_json::to_value(result), "spec search")
 }
 
 /// A listed document's text for searching: empty when it cannot be read as
@@ -292,22 +401,13 @@ fn searchable_text(root: &Path, path: &str) -> String {
 /// through a JSON action response would stall the client for no benefit.
 const MAX_DOC_BYTES: u64 = 2 * 1024 * 1024;
 
-pub(super) fn read(
-    ws: &Workspace,
-    settings: &AppSettings,
-    root: Option<String>,
-    path: String,
-) -> ActionResult {
-    read_for(&ws.data.projects, settings, root, path)
-}
-
 fn read_for(
-    projects: &[ProjectData],
+    sources: &Sources,
     settings: &AppSettings,
     root: Option<String>,
     path: String,
 ) -> ActionResult {
-    let root = match resolve_root(projects, settings, root.as_deref()) {
+    let root = match resolve_root_in(sources, settings, root.as_deref()) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -324,38 +424,30 @@ fn read_for(
         ));
     }
     match std::fs::read_to_string(&real) {
-        Ok(content) => ActionResult::Ok(Some(serde_json::json!({
-            "root": root.key,
-            "path": path,
-            "revision": okena_core::fs::content_revision(&content),
-            "content": content,
-        }))),
+        Ok(content) => to_result(
+            serde_json::to_value(LibraryDocument {
+                root_key: root.key,
+                revision: okena_core::fs::content_revision(&content),
+                path,
+                content,
+            }),
+            "spec document",
+        ),
         Err(e) => ActionResult::Err(format!("could not read {path}: {e}")),
     }
-}
-
-pub(super) fn write(
-    ws: &Workspace,
-    settings: &AppSettings,
-    root: Option<String>,
-    path: String,
-    content: String,
-    revision: String,
-) -> ActionResult {
-    write_for(&ws.data.projects, settings, root, path, content, revision)
 }
 
 /// Replace an existing document, through the same root and path checks as
 /// [`read_for`]: a write must not be a way out of a root that a read is not.
 fn write_for(
-    projects: &[ProjectData],
+    sources: &Sources,
     settings: &AppSettings,
     root: Option<String>,
     path: String,
     content: String,
     revision: String,
 ) -> ActionResult {
-    let root = match resolve_root(projects, settings, root.as_deref()) {
+    let root = match resolve_root_in(sources, settings, root.as_deref()) {
         Ok(r) => r,
         Err(e) => return ActionResult::Err(e),
     };
@@ -387,61 +479,15 @@ fn write_for(
 // `openspec new change` makes too. A capability folder emptied of its `spec.md`
 // is simply no longer listed.
 
-pub(super) fn create_file(
-    ws: &Workspace,
-    settings: &AppSettings,
-    root: Option<String>,
-    path: String,
-    content: String,
-) -> ActionResult {
-    in_root(&ws.data.projects, settings, root, |key, dir| {
-        super::document_files::create_file(key, dir, &path, &content, MAX_DOC_BYTES)
-    })
-}
-
-pub(super) fn create_folder(
-    ws: &Workspace,
-    settings: &AppSettings,
-    root: Option<String>,
-    path: String,
-) -> ActionResult {
-    in_root(&ws.data.projects, settings, root, |key, dir| {
-        super::document_files::create_folder(key, dir, &path)
-    })
-}
-
-pub(super) fn rename_file(
-    ws: &Workspace,
-    settings: &AppSettings,
-    root: Option<String>,
-    from: String,
-    to: String,
-) -> ActionResult {
-    in_root(&ws.data.projects, settings, root, |key, dir| {
-        super::document_files::rename(key, dir, tree::resolve_document, &from, &to)
-    })
-}
-
-pub(super) fn delete_file(
-    ws: &Workspace,
-    settings: &AppSettings,
-    root: Option<String>,
-    path: String,
-) -> ActionResult {
-    in_root(&ws.data.projects, settings, root, |key, dir| {
-        super::document_files::delete(key, dir, tree::resolve_document, &path)
-    })
-}
-
 /// Run `op` with the key and path of the root the client named, found exactly
 /// as a read finds it.
 fn in_root(
-    projects: &[ProjectData],
+    sources: &Sources,
     settings: &AppSettings,
     root: Option<String>,
     op: impl FnOnce(&str, &Path) -> ActionResult,
 ) -> ActionResult {
-    match resolve_root(projects, settings, root.as_deref()) {
+    match resolve_root_in(sources, settings, root.as_deref()) {
         Ok(root) => op(&root.key, Path::new(&root.path)),
         Err(e) => ActionResult::Err(e),
     }
@@ -451,56 +497,22 @@ fn in_root(
 
 /// Clone an OpenSpec store repository and register the checkout.
 ///
-/// Here rather than in `okena-openspec` for the same reason fetch, pull and
-/// push are: that crate deliberately carries no git beyond `init` and the
-/// first commit, and the clone okena needs is `okena_git`'s — including its URL
-/// validation, which must not be reimplemented where it could drift.
+/// The clone itself is shared with freeform origins
+/// (`library::clone_checkout`): `okena-openspec` deliberately carries no git
+/// beyond `init` and the first commit.
 ///
 /// A repository that turns out not to be an OpenSpec root is left on disk: the
 /// clone is the user's to keep or remove, and the error says where it is.
-pub(super) fn clone_store(
+fn clone_store(
     settings: &AppSettings,
     url: &str,
     dest: Option<&str>,
 ) -> ActionResult {
-    use okena_git::repository as git;
-
-    let Ok(url) = git::validate_clone_url(url) else {
-        return ActionResult::Err(
-            "Enter a repository URL to clone, for example git@github.com:acme/team-plans.git."
-                .into(),
-        );
+    let clone_dir = settings.active_space().library.spec.clone_dir();
+    let target = match super::library::clone_checkout(url, dest, &clone_dir, "store") {
+        Ok(t) => t,
+        Err(e) => return ActionResult::Err(e),
     };
-    let target = match dest.map(str::trim).filter(|d| !d.is_empty()) {
-        Some(dest) => okena_core::fs::expand_home(dest),
-        None => match git::clone_dir_name(url) {
-            Some(name) => settings.active_space().specs.clone_dir().join(name),
-            None => {
-                return ActionResult::Err(format!(
-                    "No folder name can be derived from {url} — choose a destination folder."
-                ));
-            }
-        },
-    };
-
-    let existed = target.exists();
-    if let Err(e) = git::clone_repository(url, &target) {
-        // Only clean up what this call created; a folder that was already
-        // there is the user's.
-        if !existed {
-            let _ = std::fs::remove_dir_all(&target);
-        }
-        return ActionResult::Err(match e {
-            okena_git::GitError::CloneTargetExists { .. } => format!(
-                "{} already exists and is not empty — choose another destination, or add that folder as an existing store.",
-                target.display()
-            ),
-            e => format!(
-                "Could not clone {url}: {} — check the URL, and that git can reach it from a terminal.",
-                e.user_detail()
-            ),
-        });
-    }
     match registry::register(&dirs(settings), &target.to_string_lossy(), None) {
         Ok(r) => ActionResult::Ok(Some(serde_json::json!({
             "id": r.id,
@@ -515,7 +527,7 @@ pub(super) fn clone_store(
     }
 }
 
-pub(super) fn register_store(
+fn register_store(
     settings: &AppSettings,
     path: String,
     id: Option<String>,
@@ -531,7 +543,7 @@ pub(super) fn register_store(
     }
 }
 
-pub(super) fn unregister_store(settings: &AppSettings, id: String) -> ActionResult {
+fn unregister_store(settings: &AppSettings, id: String) -> ActionResult {
     match registry::unregister(&dirs(settings), &id) {
         Ok(left) => ActionResult::Ok(Some(serde_json::json!({
             "id": id,
@@ -541,7 +553,7 @@ pub(super) fn unregister_store(settings: &AppSettings, id: String) -> ActionResu
     }
 }
 
-pub(super) fn setup_store(
+fn setup_store(
     settings: &AppSettings,
     id: String,
     path: String,
@@ -567,7 +579,7 @@ pub(super) fn setup_store(
     }
 }
 
-pub(super) fn set_default_store(settings: &AppSettings, id: Option<String>) -> ActionResult {
+fn set_default_store(settings: &AppSettings, id: Option<String>) -> ActionResult {
     let id = id.map(|i| i.trim().to_string()).filter(|i| !i.is_empty());
     match setup::set_default_store(&dirs(settings), id.as_deref()) {
         Ok(()) => ActionResult::Ok(Some(serde_json::json!({ "default_store": id }))),
@@ -894,6 +906,13 @@ mod tests {
         scaffold_change, tree_for, write_for,
     };
     use super::{clone_store, dirs};
+    use okena_core::doc_search::LibrarySearchFilter;
+    use okena_core::library::LibrarySearchResult;
+
+    /// Discovery sources with no projects: the registry and the folders.
+    fn src(settings: &AppSettings) -> super::Sources {
+        super::spec_sources(&[], settings)
+    }
     use crate::workspace::persistence::AppSettings;
     use okena_core::specs::{SpecRootKind, SpecTree};
     use std::path::{Path, PathBuf};
@@ -919,8 +938,8 @@ mod tests {
     /// reads — or writes — the developer's real store registry.
     fn sandboxed(sandbox: &Path) -> AppSettings {
         let mut settings = AppSettings::default();
-        settings.active_space_mut().specs.data_dir = Some(sandbox.join("data").to_string_lossy().into());
-        settings.active_space_mut().specs.config_dir = Some(sandbox.join("config").to_string_lossy().into());
+        settings.active_space_mut().library.spec.data_dir = Some(sandbox.join("data").to_string_lossy().into());
+        settings.active_space_mut().library.spec.config_dir = Some(sandbox.join("config").to_string_lossy().into());
         settings
     }
 
@@ -937,7 +956,7 @@ mod tests {
     }
 
     fn tree_of(settings: &AppSettings, root: Option<String>) -> SpecTree {
-        let ActionResult::Ok(Some(v)) = tree_for(&[], settings, root) else {
+        let ActionResult::Ok(Some(v)) = tree_for(&src(settings), settings, root) else {
             panic!("expected a spec tree");
         };
         serde_json::from_value(v).unwrap()
@@ -976,7 +995,7 @@ mod tests {
 
         let mut settings = sandboxed(&sandbox);
         let clone_dir = sandbox.join("openspec");
-        settings.active_space_mut().specs.clone_dir = Some(clone_dir.to_string_lossy().into_owned());
+        settings.active_space_mut().library.spec.clone_dir = Some(clone_dir.to_string_lossy().into_owned());
         let url = format!("file://{}", sandbox.join("remote.git").display());
 
         let ActionResult::Ok(Some(v)) = clone_store(&settings, &url, None) else {
@@ -1017,14 +1036,14 @@ mod tests {
         settings.spaces.clear();
         settings.harness.legacy_spec_repo = Some(repo.to_string_lossy().into_owned());
         settings.ensure_spaces();
-        settings.active_space_mut().specs.data_dir =
+        settings.active_space_mut().library.spec.data_dir =
             Some(sandbox.join("data").to_string_lossy().into());
-        settings.active_space_mut().specs.config_dir =
+        settings.active_space_mut().library.spec.config_dir =
             Some(sandbox.join("config").to_string_lossy().into());
 
         let t = tree_of(&settings, None);
         assert!(t.initialized);
-        assert!(t.root_key.starts_with("path:"));
+        assert!(t.root_key.starts_with("spec:path:"));
         assert!(t.store_id.is_none());
         assert_eq!(t.specs[0].name, "auth");
         assert_eq!(t.changes[0].name, "add-login");
@@ -1048,7 +1067,7 @@ mod tests {
         okena_openspec::setup::set_default_store(&dirs, Some("team-plans")).unwrap();
 
         let t = tree_of(&settings, None);
-        assert_eq!(t.root_key, "store:team-plans");
+        assert_eq!(t.root_key, "spec:store:team-plans");
         assert_eq!(t.store_id.as_deref(), Some("team-plans"));
         std::fs::remove_dir_all(&sandbox).ok();
     }
@@ -1056,10 +1075,10 @@ mod tests {
     #[test]
     fn nothing_configured_says_where_to_configure_it() {
         let sandbox = tmpdir("empty");
-        let ActionResult::Err(e) = tree_for(&[], &sandboxed(&sandbox), None) else {
+        let ActionResult::Err(e) = tree_for(&src(&sandboxed(&sandbox)), &sandboxed(&sandbox), None) else {
             panic!("expected an error");
         };
-        assert!(e.contains("Settings → Specs"), "unhelpful: {e}");
+        assert!(e.contains("Settings → Library"), "unhelpful: {e}");
         std::fs::remove_dir_all(&sandbox).ok();
     }
 
@@ -1069,11 +1088,11 @@ mod tests {
         let sandbox = tmpdir("unknown-key");
         let secret = sandbox.join("elsewhere/openspec/secret.md");
         write(&secret, "SECRET");
-        let key = format!("path:{}", sandbox.join("elsewhere").to_string_lossy());
+        let key = format!("spec:path:{}", sandbox.join("elsewhere").to_string_lossy());
         let settings = sandboxed(&sandbox);
         assert!(resolve_root(&[], &settings, Some(&key)).is_err());
         assert!(matches!(
-            read_for(&[], &settings, Some(key), "openspec/secret.md".into()),
+            read_for(&src(&settings), &settings, Some(key), "openspec/secret.md".into()),
             ActionResult::Err(_)
         ));
         std::fs::remove_dir_all(&sandbox).ok();
@@ -1086,16 +1105,16 @@ mod tests {
         populated_root(&repo);
         write(&sandbox.join("outside.md"), "SECRET");
         let mut settings = sandboxed(&sandbox);
-        settings.active_space_mut().specs.folders = vec![repo.to_string_lossy().into_owned()];
+        settings.active_space_mut().library.spec.folders = vec![repo.to_string_lossy().into_owned()];
 
         let ActionResult::Ok(Some(v)) =
-            read_for(&[], &settings, None, "openspec/specs/auth/spec.md".into())
+            read_for(&src(&settings), &settings, None, "openspec/specs/auth/spec.md".into())
         else {
             panic!("expected content");
         };
         assert_eq!(v["content"], "# Auth");
         assert!(matches!(
-            read_for(&[], &settings, None, "openspec/../../outside.md".into()),
+            read_for(&src(&settings), &settings, None, "openspec/../../outside.md".into()),
             ActionResult::Err(_)
         ));
         std::fs::remove_dir_all(&sandbox).ok();
@@ -1108,15 +1127,15 @@ mod tests {
         populated_root(&repo);
         write(&sandbox.join("outside.md"), "SECRET");
         let mut settings = sandboxed(&sandbox);
-        settings.active_space_mut().specs.folders = vec![repo.to_string_lossy().into_owned()];
+        settings.active_space_mut().library.spec.folders = vec![repo.to_string_lossy().into_owned()];
         let path = "openspec/changes/add-login/proposal.md";
 
-        let ActionResult::Ok(Some(read)) = read_for(&[], &settings, None, path.into()) else {
+        let ActionResult::Ok(Some(read)) = read_for(&src(&settings), &settings, None, path.into()) else {
             panic!("expected content");
         };
         let revision = read["revision"].as_str().unwrap().to_string();
         let ActionResult::Ok(Some(saved)) = write_for(
-            &[],
+            &src(&settings),
             &settings,
             None,
             path.into(),
@@ -1125,7 +1144,7 @@ mod tests {
         ) else {
             panic!("expected the write to land");
         };
-        let ActionResult::Ok(Some(reopened)) = read_for(&[], &settings, None, path.into()) else {
+        let ActionResult::Ok(Some(reopened)) = read_for(&src(&settings), &settings, None, path.into()) else {
             panic!("expected content");
         };
         assert_eq!(reopened["content"], "# Why not\n");
@@ -1133,7 +1152,7 @@ mod tests {
 
         // Saving again from the pre-save revision is a stale buffer.
         let ActionResult::Err(e) = write_for(
-            &[],
+            &src(&settings),
             &settings,
             None,
             path.into(),
@@ -1153,7 +1172,7 @@ mod tests {
         let outside = okena_core::fs::content_revision("SECRET");
         assert!(matches!(
             write_for(
-                &[],
+                &src(&settings),
                 &settings,
                 None,
                 "openspec/../../outside.md".into(),
@@ -1162,10 +1181,10 @@ mod tests {
             ),
             ActionResult::Err(_)
         ));
-        let key = format!("path:{}", sandbox.to_string_lossy());
+        let key = format!("spec:path:{}", sandbox.to_string_lossy());
         assert!(matches!(
             write_for(
-                &[],
+                &src(&settings),
                 &settings,
                 Some(key),
                 "outside.md".into(),
@@ -1191,9 +1210,9 @@ mod tests {
         populated_root(&repo);
         write(&sandbox.join("outside.md"), "SECRET");
         let mut settings = sandboxed(&sandbox);
-        settings.active_space_mut().specs.folders = vec![repo.to_string_lossy().into_owned()];
+        settings.active_space_mut().library.spec.folders = vec![repo.to_string_lossy().into_owned()];
         let run =
-            |op: &dyn Fn(&str, &Path) -> ActionResult| super::in_root(&[], &settings, None, op);
+            |op: &dyn Fn(&str, &Path) -> ActionResult| super::in_root(&src(&settings), &settings, None, op);
         let refused = |result: ActionResult| match result {
             ActionResult::Err(e) => e,
             ActionResult::Ok(_) => panic!("expected a refusal"),
@@ -1317,9 +1336,9 @@ mod tests {
         );
 
         // A root key discovery never found is no way in either.
-        let key = format!("path:{}", sandbox.to_string_lossy());
+        let key = format!("spec:path:{}", sandbox.to_string_lossy());
         assert!(matches!(
-            super::in_root(&[], &settings, Some(key), |k, d| {
+            super::in_root(&src(&settings), &settings, Some(key), |k, d| {
                 files::create_file(k, d, "pwned.md", "x", 1024)
             }),
             ActionResult::Err(_)
@@ -1342,7 +1361,7 @@ mod tests {
         let found = resolve_root(std::slice::from_ref(&project), &settings, None).unwrap();
         assert_eq!(found.kind, SpecRootKind::Project);
 
-        settings.active_space_mut().specs.projects = false;
+        settings.active_space_mut().library.spec.projects = false;
         assert!(resolve_root(std::slice::from_ref(&project), &settings, None).is_err());
         std::fs::remove_dir_all(&sandbox).ok();
     }
@@ -1353,7 +1372,7 @@ mod tests {
         let repo = sandbox.join("specs");
         populated_root(&repo);
         let mut settings = sandboxed(&sandbox);
-        settings.active_space_mut().specs.folders = vec![repo.to_string_lossy().into_owned()];
+        settings.active_space_mut().library.spec.folders = vec![repo.to_string_lossy().into_owned()];
         let root = resolve_root(&[], &settings, None).unwrap();
 
         let dir = scaffold_change(&root, "add-sso", "Add SSO").unwrap();
@@ -1510,7 +1529,7 @@ mod tests {
             "# Invoices\nAn invoice is immutable once sent.\n",
         );
         let mut settings = sandboxed(sandbox);
-        settings.active_space_mut().specs.folders = vec![
+        settings.active_space_mut().library.spec.folders = vec![
             plans.to_string_lossy().into_owned(),
             billing.to_string_lossy().into_owned(),
         ];
@@ -1529,21 +1548,18 @@ mod tests {
         (settings, plans, billing)
     }
 
-    fn search(
-        settings: &AppSettings,
-        query: &str,
-        roots: &[&str],
-    ) -> okena_core::doc_search::SpecSearchResult {
-        let roots: Vec<String> = roots.iter().map(|r| (*r).to_string()).collect();
-        let ActionResult::Ok(Some(v)) =
-            super::search(&super::spec_sources(&[], settings), settings, query, &roots)
-        else {
-            panic!("expected search results");
+    fn search(settings: &AppSettings, query: &str, roots: &[&str]) -> LibrarySearchResult {
+        let filter = LibrarySearchFilter {
+            query: query.to_string(),
+            roots: roots.iter().map(|r| (*r).to_string()).collect(),
+            ..Default::default()
         };
-        serde_json::from_value(v).unwrap()
+        let mut result = LibrarySearchResult::default();
+        super::search(&src(settings), settings, &filter, &mut result);
+        result
     }
 
-    fn labels(result: &okena_core::doc_search::SpecSearchResult) -> Vec<&str> {
+    fn labels(result: &LibrarySearchResult) -> Vec<&str> {
         result.hits.iter().map(|h| h.label.as_str()).collect()
     }
 
@@ -1599,7 +1615,7 @@ mod tests {
         assert_eq!(search(&settings, "spec.md", &[&plans, &billing]).hits.len(), 3);
 
         // A key discovery never produced names nothing.
-        let outside = format!("path:{}", sandbox.to_string_lossy());
+        let outside = format!("spec:path:{}", sandbox.to_string_lossy());
         assert!(search(&settings, "", &[&outside]).hits.is_empty());
         std::fs::remove_dir_all(&sandbox).ok();
     }

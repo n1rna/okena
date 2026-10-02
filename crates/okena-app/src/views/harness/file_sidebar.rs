@@ -1,4 +1,4 @@
-//! The file sidebar the Knowledge and Specs views share.
+//! The Library's file sidebar.
 //!
 //! Both views are the same shape: a column of roots and their files beside
 //! whichever document you picked. They used to hold a `TREE_WIDTH` constant
@@ -130,9 +130,9 @@ impl HarnessPane {
         cx.notify();
     }
 
-    /// Take the open state and width a settings change carries, so the Specs
-    /// and Knowledge panes — which are separate entities over one setting —
-    /// stay in step without either one reloading.
+    /// Take the open state and width a settings change carries, so Library
+    /// panes in different windows — separate entities over one setting — stay
+    /// in step without any of them reloading.
     pub(crate) fn sync_file_sidebar(&mut self, settings: &okena_workspace::settings::AppSettings) {
         self.files
             .sync(settings.harness_files.is_open, settings.harness_files.width);
@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn the_other_views_width_and_open_state_are_taken_when_idle() {
-        // Specs and Knowledge are separate panes over one setting: what you
+        // Library panes are separate entities over one setting: what you
         // do in the open one must be what you find in the other.
         let mut files = sidebar(280.0);
         files.sync(false, 360.0);

@@ -7,7 +7,7 @@
 
 use super::SettingsPanel;
 use super::components::{hook_input_row, section_container, section_header};
-use super::render_specs::muted_row;
+use super::render_library::muted_row;
 use crate::settings::settings_entity;
 use crate::theme::theme;
 use crate::ui::tokens::{ui_text, ui_text_ms};

@@ -1,13 +1,13 @@
-//! The document editor the Specs and Knowledge views share.
+//! The Library's document editor.
 //!
 //! gpui-component's code editor over the file's source: rope-backed, with
 //! tree-sitter highlighting, undo, soft wrap, IME and find — none of which
 //! `SimpleInput` has. Markdown toggles between the source and today's preview;
 //! any other text file is only ever the source.
 //!
-//! Saving goes through the daemon (`SpecWrite` / `KnowledgeWrite`), which
-//! checks the path exactly as a read does and refuses a file that changed on
-//! disk since it was read. A document with unsaved edits keeps its buffer while
+//! Saving goes through the daemon (`LibraryWrite`), whatever the origin's
+//! type: it checks the path exactly as a read does and refuses a file that
+//! changed on disk since it was read. A document with unsaved edits keeps its buffer while
 //! another one is open, so clicking around never throws work away.
 
 use crate::keybindings::SaveDocument;
@@ -22,7 +22,7 @@ use okena_core::api::ActionRequest;
 use std::collections::HashMap;
 
 use super::markdown::MarkdownCache;
-use super::{HarnessPane, HarnessSection};
+use super::HarnessPane;
 
 /// Key context around the editor. `SaveDocument` is bound in it, so `cmd-s`
 /// means nothing anywhere a document is not being edited.
@@ -166,52 +166,30 @@ impl Documents {
 }
 
 impl HarnessPane {
-    fn documents(&self, section: HarnessSection) -> Option<&Documents> {
-        match section {
-            HarnessSection::Specs => Some(&self.specs.documents),
-            HarnessSection::Knowledge => Some(&self.knowledge.documents),
-            HarnessSection::Tasks | HarnessSection::Testing => None,
-        }
+    /// Origin key and path of the document the Library is showing.
+    fn open_document_key(&self) -> Option<(String, String)> {
+        Some((
+            self.library.root_key.clone().unwrap_or_default(),
+            self.library.selected.clone()?,
+        ))
     }
 
-    fn documents_mut(&mut self, section: HarnessSection) -> Option<&mut Documents> {
-        match section {
-            HarnessSection::Specs => Some(&mut self.specs.documents),
-            HarnessSection::Knowledge => Some(&mut self.knowledge.documents),
-            HarnessSection::Tasks | HarnessSection::Testing => None,
-        }
-    }
-
-    /// Root key and path of the document `section` is showing.
-    fn open_document_key(&self, section: HarnessSection) -> Option<(String, String)> {
-        let (root, selected) = match section {
-            HarnessSection::Specs => (&self.specs.root_key, &self.specs.selected),
-            HarnessSection::Knowledge => (&self.knowledge.root_key, &self.knowledge.selected),
-            HarnessSection::Tasks | HarnessSection::Testing => return None,
-        };
-        Some((root.clone().unwrap_or_default(), selected.clone()?))
-    }
-
-    /// The document `section` is showing, once it has loaded.
-    pub(super) fn open_buffer(&self, section: HarnessSection) -> Option<&DocumentBuffer> {
-        let (root, path) = self.open_document_key(section)?;
-        self.documents(section)?.get(&root, &path)
+    /// The document the Library is showing, once it has loaded.
+    pub(super) fn open_buffer(&self) -> Option<&DocumentBuffer> {
+        let (root, path) = self.open_document_key()?;
+        self.library.documents.get(&root, &path)
     }
 
     /// Give the open document its input, the first frame it is shown.
     pub(super) fn ensure_document_input(
         &mut self,
-        section: HarnessSection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((root, path)) = self.open_document_key(section) else {
+        let Some((root, path)) = self.open_document_key() else {
             return;
         };
-        let Some(buffer) = self
-            .documents_mut(section)
-            .and_then(|d| d.get_mut(&root, &path))
-        else {
+        let Some(buffer) = self.library.documents.get_mut(&root, &path) else {
             return;
         };
         sync_editor_colors(cx);
@@ -229,10 +207,7 @@ impl HarnessPane {
                     return;
                 }
                 let value = input.read(cx).value();
-                if let Some(buffer) = this
-                    .documents_mut(section)
-                    .and_then(|d| d.by_input_mut(&input))
-                {
+                if let Some(buffer) = this.library.documents.by_input_mut(&input) {
                     let dirty = buffer.saved.as_str() != value.as_ref();
                     if dirty != buffer.dirty {
                         buffer.dirty = dirty;
@@ -245,14 +220,11 @@ impl HarnessPane {
     }
 
     /// Write the open document's buffer back to its file.
-    pub(super) fn save_document(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        let Some((root, path)) = self.open_document_key(section) else {
+    pub(super) fn save_document(&mut self, cx: &mut Context<Self>) {
+        let Some((root, path)) = self.open_document_key() else {
             return;
         };
-        let Some(buffer) = self
-            .documents_mut(section)
-            .and_then(|d| d.get_mut(&root, &path))
-        else {
+        let Some(buffer) = self.library.documents.get_mut(&root, &path) else {
             return;
         };
         if buffer.saving {
@@ -267,21 +239,11 @@ impl HarnessPane {
         let revision = buffer.revision.clone();
         cx.notify();
 
-        let root_arg = (!root.is_empty()).then(|| root.clone());
-        let action = match section {
-            HarnessSection::Specs => ActionRequest::SpecWrite {
-                root: root_arg,
-                path: path.clone(),
-                content: content.clone(),
-                revision,
-            },
-            HarnessSection::Knowledge => ActionRequest::KnowledgeWrite {
-                root: root_arg,
-                path: path.clone(),
-                content: content.clone(),
-                revision,
-            },
-            HarnessSection::Tasks | HarnessSection::Testing => return,
+        let action = ActionRequest::LibraryWrite {
+            root: (!root.is_empty()).then(|| root.clone()),
+            path: path.clone(),
+            content: content.clone(),
+            revision,
         };
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
@@ -302,10 +264,7 @@ impl HarnessPane {
                 let _ = this.update(cx, |this, cx| {
                     let saved = result.is_ok();
                     // Reverted while the write was in flight: nothing to update.
-                    let Some(buffer) = this
-                        .documents_mut(section)
-                        .and_then(|d| d.get_mut(&root, &path))
-                    else {
+                    let Some(buffer) = this.library.documents.get_mut(&root, &path) else {
                         return;
                     };
                     buffer.saving = false;
@@ -318,9 +277,14 @@ impl HarnessPane {
                         Err(e) => buffer.save_error = Some(e),
                     }
                     // A knowledge entry's title, description and tags come
-                    // from its frontmatter, which the save may have changed.
-                    if saved && section == HarnessSection::Knowledge {
-                        this.refresh_knowledge(cx);
+                    // from its frontmatter, and a freeform document's title
+                    // from its heading: the save may have changed either. A
+                    // spec's name is its folder, which a save cannot change.
+                    if saved
+                        && this.library.open_type()
+                            != Some(okena_core::library::OriginType::Spec)
+                    {
+                        this.refresh_library(cx);
                     }
                     cx.notify();
                 });
@@ -330,34 +294,24 @@ impl HarnessPane {
     }
 
     /// Drop the open document's edits and read the file again.
-    fn revert_document(&mut self, section: HarnessSection, cx: &mut Context<Self>) {
-        let Some((root, path)) = self.open_document_key(section) else {
+    fn revert_document(&mut self, cx: &mut Context<Self>) {
+        let Some((root, path)) = self.open_document_key() else {
             return;
         };
-        if let Some(documents) = self.documents_mut(section) {
-            documents.remove(&root, &path);
-        }
-        match section {
-            HarnessSection::Specs => self.open_spec_doc(path, cx),
-            HarnessSection::Knowledge => self.open_knowledge_file(path, cx),
-            HarnessSection::Tasks | HarnessSection::Testing => {}
-        }
+        self.library.documents.remove(&root, &path);
+        self.open_library_file(path, cx);
     }
 
     fn set_document_mode(
         &mut self,
-        section: HarnessSection,
         mode: EditorMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((root, path)) = self.open_document_key(section) else {
+        let Some((root, path)) = self.open_document_key() else {
             return;
         };
-        let Some(buffer) = self
-            .documents_mut(section)
-            .and_then(|d| d.get_mut(&root, &path))
-        else {
+        let Some(buffer) = self.library.documents.get_mut(&root, &path) else {
             return;
         };
         buffer.mode = mode;
@@ -374,17 +328,13 @@ impl HarnessPane {
     /// the document header.
     pub(super) fn render_document_controls(
         &self,
-        section: HarnessSection,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let Some(buffer) = self.open_buffer(section) else {
+        let Some(buffer) = self.open_buffer() else {
             return Vec::new();
         };
         let t = theme(cx);
-        let ids = match section {
-            HarnessSection::Knowledge => ["knowledge-doc-revert", "knowledge-doc-save"],
-            _ => ["spec-doc-revert", "spec-doc-save"],
-        };
+        let ids = ["library-doc-revert", "library-doc-save"];
         let mut controls = Vec::new();
         let state = if buffer.saving {
             Some(("Saving…", t.text_muted))
@@ -407,7 +357,7 @@ impl HarnessPane {
             controls.push(self.small_button(
                 ids[0],
                 "Revert",
-                cx.listener(move |this, _, _window, cx| this.revert_document(section, cx)),
+                cx.listener(move |this, _, _window, cx| this.revert_document(cx)),
                 cx,
             ));
         }
@@ -415,19 +365,18 @@ impl HarnessPane {
             controls.push(self.small_button(
                 ids[1],
                 "Save",
-                cx.listener(move |this, _, _window, cx| this.save_document(section, cx)),
+                cx.listener(move |this, _, _window, cx| this.save_document(cx)),
                 cx,
             ));
         }
         if is_markdown(&buffer.path) {
-            controls.push(self.render_mode_toggle(section, buffer.mode, cx));
+            controls.push(self.render_mode_toggle(buffer.mode, cx));
         }
         controls
     }
 
     fn render_mode_toggle(
         &self,
-        section: HarnessSection,
         current: EditorMode,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -435,7 +384,7 @@ impl HarnessPane {
         let segment = |mode: EditorMode, label: &'static str, cx: &mut Context<Self>| {
             let selected = mode == current;
             div()
-                .id(SharedString::from(format!("{section:?}-doc-{label}")))
+                .id(SharedString::from(format!("library-doc-{label}")))
                 .cursor_pointer()
                 .px(px(10.0))
                 .py(px(3.0))
@@ -452,7 +401,7 @@ impl HarnessPane {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
-                        this.set_document_mode(section, mode, window, cx);
+                        this.set_document_mode(mode, window, cx);
                     }),
                 )
         };
@@ -471,7 +420,6 @@ impl HarnessPane {
     /// which is the frame after the read lands.
     pub(super) fn render_document_editor(
         &self,
-        section: HarnessSection,
         buffer: &DocumentBuffer,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -479,10 +427,10 @@ impl HarnessPane {
         let t = theme(cx);
         Some(
             div()
-                .id(SharedString::from(format!("{section:?}-document-editor")))
+                .id("library-document-editor")
                 .key_context(EDITOR_CONTEXT)
                 .on_action(cx.listener(move |this, _: &SaveDocument, _window, cx| {
-                    this.save_document(section, cx);
+                    this.save_document(cx);
                 }))
                 .flex_1()
                 .min_h_0()
@@ -512,18 +460,10 @@ impl HarnessPane {
     }
 
     /// `●` before a tree row whose document holds unsaved edits.
-    pub(super) fn unsaved_marker(
-        &self,
-        section: HarnessSection,
-        path: &str,
-    ) -> Option<&'static str> {
-        let root = match section {
-            HarnessSection::Specs => self.specs.root_key.as_deref(),
-            HarnessSection::Knowledge => self.knowledge.root_key.as_deref(),
-            HarnessSection::Tasks | HarnessSection::Testing => return None,
-        };
-        self.documents(section)?
-            .is_dirty(root.unwrap_or_default(), path)
+    pub(super) fn unsaved_marker(&self, path: &str) -> Option<&'static str> {
+        self.library
+            .documents
+            .is_dirty(self.library.root_key.as_deref().unwrap_or_default(), path)
             .then_some("● ")
     }
 }

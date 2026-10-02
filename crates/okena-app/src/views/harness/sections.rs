@@ -1,6 +1,6 @@
 //! Chrome shared by every harness view, and the per-section dispatch.
 //!
-//! Tasks, Specs, Knowledge and Testing live in their own modules; this file holds the
+//! Tasks, Library and Testing live in their own modules; this file holds the
 //! toolbar, banners and buttons they all wear.
 
 use crate::theme::{theme, with_alpha};
@@ -82,13 +82,10 @@ impl HarnessPane {
     fn ensure_brief_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.section {
             HarnessSection::Tasks => self.tasks.new_task_body.ensure(window, cx),
-            HarnessSection::Specs => {
-                self.specs.idea_input.ensure(window, cx);
-                self.spec_refine.request.ensure(window, cx);
-            }
-            HarnessSection::Knowledge => {
+            HarnessSection::Library => {
+                self.library.idea_input.ensure(window, cx);
                 self.knowledge_draft.request.ensure(window, cx);
-                self.knowledge_refine.request.ensure(window, cx);
+                self.refine.request.ensure(window, cx);
             }
             HarnessSection::Testing => {}
         }
@@ -96,7 +93,7 @@ impl HarnessPane {
 
     /// The one action a harness view leads with: New.
     ///
-    /// Extracted because Specs and Knowledge each had their own copy and Tasks
+    /// Extracted because the Library's pages each had their own copy and Tasks
     /// had none, so the three views' primary buttons looked and sat
     /// differently. A shared shape is the only way "the same button" stays
     /// true after the next edit to one of them.
@@ -167,7 +164,7 @@ impl HarnessPane {
     /// The toolbar every harness view wears.
     ///
     /// One shape for all of them — the view's name on the left, its own
-    /// controls on the right — so moving between Tasks, Specs and Knowledge
+    /// controls on the right — so moving between Tasks and Library
     /// does not mean relearning where things are. Views differ only in what
     /// they put in `actions`.
     pub(super) fn render_toolbar(
@@ -251,7 +248,7 @@ impl HarnessPane {
     /// Open the settings modal on `page`, landing on `section` of it.
     ///
     /// For buttons that send you to settings to do one specific thing — "Add a
-    /// new root…" means the add form, not the top of the Knowledge page.
+    /// new root…" means the add form, not the top of the Library page.
     pub(super) fn open_settings_at(
         &self,
         page: &'static str,
@@ -285,8 +282,7 @@ impl Render for HarnessPane {
         // than silently falling through to a placeholder.
         let body = match self.section {
             HarnessSection::Tasks => self.render_tasks_view(cx),
-            HarnessSection::Specs => self.render_specs_view(window, cx),
-            HarnessSection::Knowledge => self.render_knowledge_view(window, cx),
+            HarnessSection::Library => self.render_library_view(window, cx),
             HarnessSection::Testing => self.render_testing_view(cx),
         };
 

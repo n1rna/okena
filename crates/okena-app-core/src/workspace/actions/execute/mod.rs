@@ -14,8 +14,10 @@ mod context;
 mod doc_refine;
 mod document_files;
 mod files;
+mod freeform;
 mod git;
 mod knowledge;
+mod library;
 mod project;
 mod project_links;
 mod project_scan;
@@ -52,13 +54,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use context::{context_catalog, read_in_scope, session_scope};
-pub use knowledge::{execute_knowledge_action, knowledge_project_sources};
+pub use knowledge::knowledge_project_sources;
+pub use library::{
+    LibraryOutcome, LibrarySources, SettingsEdit, execute_library_action, is_library_action,
+    library_sources,
+};
 pub use project::{
     MAX_FINISHED_HOOK_TERMINALS, evict_stale_hook_terminals, teardown_hook_terminal,
 };
 pub use project_links::{MapSource, map_sources, read_project_links};
 pub use project_scan::read_project_map;
-pub use specs::{execute_spec_git_action, spec_sources};
+pub use specs::spec_sources;
 
 pub use files::{
     PreparedContentSearch, execute_prepared_content_search,
@@ -93,41 +99,6 @@ impl ActionResult {
             ActionResult::Err(e) => CommandResult::Err(e),
         }
     }
-}
-
-/// Run an OpenSpec store change — register, unregister, set up, or set the
-/// machine default — which needs settings but not the workspace.
-///
-/// `None` for any other action. The daemon runs these on its blocking pool
-/// rather than under the workspace lock: setup commits with git, and every
-/// registry change may wait on the lock an `openspec` command holds.
-pub fn execute_spec_store_action(
-    action: &ActionRequest,
-    settings: &AppSettings,
-) -> Option<ActionResult> {
-    Some(match action {
-        ActionRequest::SpecStoreClone { url, path } => {
-            specs::clone_store(settings, url, path.as_deref())
-        }
-        ActionRequest::SpecStoreRegister { path, id } => {
-            specs::register_store(settings, path.clone(), id.clone())
-        }
-        ActionRequest::SpecStoreUnregister { id } => specs::unregister_store(settings, id.clone()),
-        ActionRequest::SpecStoreSetup {
-            id,
-            path,
-            remote,
-            init_git,
-        } => specs::setup_store(
-            settings,
-            id.clone(),
-            path.clone(),
-            remote.clone(),
-            *init_git,
-        ),
-        ActionRequest::SpecSetDefaultStore { id } => specs::set_default_store(settings, id.clone()),
-        _ => return None,
-    })
 }
 
 /// Run a task-provider call — a read or write against Linear or Azure DevOps —
@@ -930,152 +901,113 @@ pub fn execute_action(
         | ActionRequest::ContextRead { .. } => {
             ActionResult::Err("launch context is searched by the daemon".into())
         }
-        // ── Engineering harness: OpenSpec ──────────────────────────────────
-        // The daemon runs the listing and the store git off the workspace lock
-        // before they reach this match; these arms keep any other caller of
-        // `execute_action` correct.
-        ActionRequest::SpecStores => specs::stores(ws, settings),
-        action @ (ActionRequest::SpecSearch { .. }
-        | ActionRequest::SpecStoreFetch { .. }
-        | ActionRequest::SpecStorePull { .. }
-        | ActionRequest::SpecStoreCommit { .. }
-        | ActionRequest::SpecStorePush { .. }) => specs::execute_spec_git_action(
-            &action,
-            &specs::spec_sources(&ws.data.projects, settings),
-            settings,
-        )
-        .unwrap_or_else(|| ActionResult::Err("not an OpenSpec git action".into())),
-        ActionRequest::SpecsTree { root } => specs::tree(ws, settings, root),
-        ActionRequest::SpecRead { root, path } => specs::read(ws, settings, root, path),
-        ActionRequest::SpecWrite {
-            root,
-            path,
-            content,
-            revision,
-        } => specs::write(ws, settings, root, path, content, revision),
-        ActionRequest::SpecFileCreate {
-            root,
-            path,
-            content,
-        } => specs::create_file(ws, settings, root, path, content),
-        ActionRequest::SpecFolderCreate { root, path } => {
-            specs::create_folder(ws, settings, root, path)
-        }
-        ActionRequest::SpecFileRename { root, from, to } => {
-            specs::rename_file(ws, settings, root, from, to)
-        }
-        ActionRequest::SpecFileDelete { root, path } => {
-            specs::delete_file(ws, settings, root, path)
-        }
-        ActionRequest::SpecStoreClone { url, path } => {
-            specs::clone_store(settings, &url, path.as_deref())
-        }
-        ActionRequest::SpecStoreRegister { path, id } => specs::register_store(settings, path, id),
-        ActionRequest::SpecStoreUnregister { id } => specs::unregister_store(settings, id),
-        ActionRequest::SpecStoreSetup {
-            id,
-            path,
-            remote,
-            init_git,
-        } => specs::setup_store(settings, id, path, remote, init_git),
-        ActionRequest::SpecSetDefaultStore { id } => specs::set_default_store(settings, id),
-        ActionRequest::SpecDraftChange {
-            root,
-            idea,
-            name,
-            agent_command,
-            model,
-            context,
-        } => specs::draft_change(
-            ws,
-            window_id,
-            idea,
-            name,
-            agent_command,
-            model,
-            root,
-            context,
-            backend,
-            terminals,
-            settings,
-            cx,
-        ),
-        ActionRequest::SpecRefineDocument {
-            root,
-            path,
-            request,
-            agent_command,
-            model,
-            context,
-        } => doc_refine::refine_spec_document(
-            ws,
-            window_id,
-            root,
-            path,
-            request,
-            agent_command,
-            model,
-            context,
-            backend,
-            terminals,
-            settings,
-            cx,
-        ),
-        // ── Engineering harness: knowledge ─────────────────────────────────
+        // ── Engineering harness: Library ───────────────────────────────────
         // The daemon runs these off the workspace lock before they reach this
         // match; the arm keeps any other caller of `execute_action` correct.
-        action @ (ActionRequest::KnowledgeStores
-        | ActionRequest::KnowledgeTree { .. }
-        | ActionRequest::KnowledgeRead { .. }
-        | ActionRequest::KnowledgeSearch { .. }
-        | ActionRequest::KnowledgeWrite { .. }
-        | ActionRequest::KnowledgeFileCreate { .. }
-        | ActionRequest::KnowledgeFolderCreate { .. }
-        | ActionRequest::KnowledgeFileRename { .. }
-        | ActionRequest::KnowledgeFileDelete { .. }
-        | ActionRequest::KnowledgeOverrides { .. }
-        | ActionRequest::KnowledgeOverride { .. }
-        | ActionRequest::KnowledgeLayering
-        | ActionRequest::KnowledgeStoreClone { .. }
-        | ActionRequest::KnowledgeStoreRegister { .. }
-        | ActionRequest::KnowledgeStoreUnregister { .. }
-        | ActionRequest::KnowledgeStoreSetup { .. }
-        | ActionRequest::KnowledgeStoreFetch { .. }
-        | ActionRequest::KnowledgeStorePull { .. }
-        | ActionRequest::KnowledgeStoreCommit { .. }
-        | ActionRequest::KnowledgeStorePush { .. }) => knowledge::execute_knowledge_action(
-            &action,
-            &knowledge::knowledge_project_sources(&ws.data.projects, settings),
-            settings,
-        )
-        .unwrap_or_else(|| ActionResult::Err("not a knowledge action".into())),
-        ActionRequest::KnowledgeDraft {
+        action @ (ActionRequest::LibraryOrigins
+        | ActionRequest::LibraryTree { .. }
+        | ActionRequest::LibraryRead { .. }
+        | ActionRequest::LibrarySearch { .. }
+        | ActionRequest::LibraryWrite { .. }
+        | ActionRequest::LibraryFileCreate { .. }
+        | ActionRequest::LibraryFolderCreate { .. }
+        | ActionRequest::LibraryFileRename { .. }
+        | ActionRequest::LibraryFileDelete { .. }
+        | ActionRequest::LibraryOverrides { .. }
+        | ActionRequest::LibraryOverride { .. }
+        | ActionRequest::LibraryLayering
+        | ActionRequest::LibraryStoreClone { .. }
+        | ActionRequest::LibraryStoreRegister { .. }
+        | ActionRequest::LibraryStoreUnregister { .. }
+        | ActionRequest::LibraryStoreSetup { .. }
+        | ActionRequest::LibrarySetDefaultStore { .. }
+        | ActionRequest::LibraryStoreFetch { .. }
+        | ActionRequest::LibraryStorePull { .. }
+        | ActionRequest::LibraryStoreCommit { .. }
+        | ActionRequest::LibraryStorePush { .. }) => {
+            match library::execute_library_action(
+                &action,
+                &library::library_sources(&ws.data.projects, settings),
+                settings,
+            ) {
+                // Adding or removing a folder origin is a settings write, and
+                // settings are the daemon's to write: nothing here can save
+                // it, so say so rather than report a change that will not
+                // hold.
+                Some(LibraryOutcome {
+                    result: ActionResult::Ok(_),
+                    edit: Some(_),
+                }) => ActionResult::Err(
+                    "this change to the Library's origins is saved by the daemon — send the action to it".into(),
+                ),
+                Some(outcome) => outcome.result,
+                None => ActionResult::Err("not a library action".into()),
+            }
+        }
+        // Drafting is its origin type's own flow: a spec origin scaffolds a
+        // change and briefs an agent to fill it in, a knowledge origin briefs
+        // one to add to what is there in its layout, and a freeform origin
+        // briefs one to follow whatever the folder already does.
+        ActionRequest::LibraryDraft {
             root,
             request,
+            name,
             agent_command,
             model,
             context,
-        } => knowledge::draft(
-            ws,
-            window_id,
-            root,
-            request,
-            agent_command,
-            model,
-            context,
-            backend,
-            terminals,
-            settings,
-            cx,
-        ),
-        ActionRequest::KnowledgeRefineDocument {
+        } => match library::resolve_origin(&ws.data.projects, settings, root.as_deref()) {
+            Err(e) => ActionResult::Err(e),
+            Ok(origin) => match origin.origin_type {
+                okena_core::library::OriginType::Spec => specs::draft_change(
+                    ws,
+                    window_id,
+                    request,
+                    name,
+                    agent_command,
+                    model,
+                    Some(origin.key),
+                    context,
+                    backend,
+                    terminals,
+                    settings,
+                    cx,
+                ),
+                okena_core::library::OriginType::Knowledge => knowledge::draft(
+                    ws,
+                    window_id,
+                    Some(origin.key),
+                    request,
+                    agent_command,
+                    model,
+                    context,
+                    backend,
+                    terminals,
+                    settings,
+                    cx,
+                ),
+                okena_core::library::OriginType::Freeform => freeform::draft(
+                    ws,
+                    window_id,
+                    &origin.key,
+                    request,
+                    agent_command,
+                    model,
+                    context,
+                    backend,
+                    terminals,
+                    settings,
+                    cx,
+                ),
+            },
+        },
+        ActionRequest::LibraryRefineDocument {
             root,
             path,
             request,
             agent_command,
             model,
             context,
-        } => doc_refine::refine_knowledge_document(
+        } => doc_refine::refine_document(
             ws,
             window_id,
             root,

@@ -6,8 +6,8 @@ pub(in crate::views::overlays) enum SettingsCategory {
     Worktree,
     GitHub,
     Harness,
-    Specs,
-    Knowledge,
+    /// The Library's origins of every type: knowledge, specs and freeform.
+    Library,
     Tasks,
     Hooks,
     Extensions,
@@ -25,8 +25,7 @@ impl SettingsCategory {
             Self::Worktree => "Worktree",
             Self::GitHub => "GitHub",
             Self::Harness => "Harness",
-            Self::Specs => "Specs",
-            Self::Knowledge => "Knowledge",
+            Self::Library => "Library",
             Self::Tasks => "Tasks",
             Self::Hooks => "Hooks",
             Self::Extensions => "Extensions",
@@ -43,8 +42,7 @@ impl SettingsCategory {
             Self::Worktree,
             Self::GitHub,
             Self::Harness,
-            Self::Specs,
-            Self::Knowledge,
+            Self::Library,
             Self::Tasks,
             Self::Hooks,
             Self::Extensions,
@@ -65,8 +63,7 @@ impl SettingsCategory {
             Self::Worktree => "worktree",
             Self::GitHub => "github",
             Self::Harness => "harness",
-            Self::Specs => "specs",
-            Self::Knowledge => "knowledge",
+            Self::Library => "library",
             Self::Tasks => "tasks",
             Self::Hooks => "hooks",
             Self::Extensions => "extensions",
@@ -77,12 +74,52 @@ impl SettingsCategory {
 
     /// Resolve a slug back to a page. Unknown slugs open the default page
     /// rather than failing — a stale link should still open settings.
+    ///
+    /// `specs` and `knowledge` were the two pages Library replaced (QBL-440);
+    /// a link to either opens it.
     pub(super) fn from_slug(slug: &str) -> Option<SettingsCategory> {
-        Self::all().iter().find(|c| c.slug() == slug).cloned()
+        match slug {
+            "specs" | "knowledge" => Some(Self::Library),
+            _ => Self::all().iter().find(|c| c.slug() == slug).cloned(),
+        }
     }
 
     /// Categories available in project mode (only hooks for now)
     pub(super) fn project_categories() -> &'static [SettingsCategory] {
         &[Self::Hooks]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SettingsCategory;
+
+    #[test]
+    fn library_is_the_one_page_where_specs_and_knowledge_were() {
+        let labels: Vec<&str> = SettingsCategory::all().iter().map(|c| c.label()).collect();
+        assert!(labels.contains(&"Library"));
+        assert!(!labels.contains(&"Specs") && !labels.contains(&"Knowledge"), "{labels:?}");
+        // Sits where the two pages did, between Harness and Tasks.
+        let at = |name: &str| labels.iter().position(|l| *l == name).expect(name);
+        assert_eq!(at("Library"), at("Harness") + 1);
+        assert_eq!(at("Tasks"), at("Library") + 1);
+    }
+
+    #[test]
+    fn a_link_to_either_old_page_opens_library() {
+        for slug in ["library", "specs", "knowledge"] {
+            assert!(
+                SettingsCategory::from_slug(slug) == Some(SettingsCategory::Library),
+                "{slug}"
+            );
+        }
+        assert!(SettingsCategory::from_slug("nope").is_none());
+    }
+
+    #[test]
+    fn every_page_is_found_by_its_own_slug() {
+        for page in SettingsCategory::all() {
+            assert!(SettingsCategory::from_slug(page.slug()) == Some(page.clone()));
+        }
     }
 }

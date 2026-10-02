@@ -247,18 +247,16 @@ pub enum WorkbenchRequest {
     /// and off, configured and removed. `open` shows that extension's details,
     /// by key.
     OpenExtensionsPage { open: Option<String> },
-    /// Open Harness → Knowledge on one document: `path` inside the knowledge
-    /// root discovery keyed `root_key`. How the project info panel opens a
-    /// project map's docs.
-    OpenKnowledgeDoc { root_key: String, path: String },
-    /// Open Harness → Knowledge on a root with nothing selected: `root_key`
-    /// as discovery keys it. How a project info panel's store chip opens the
-    /// store the project follows.
-    OpenKnowledgeRoot { root_key: String },
-    /// Open Harness → Specs on one document: `path` inside the spec root
-    /// keyed `root_key`. How the project info panel opens a project's specs
-    /// and its changes' proposals.
-    OpenSpecDoc { root_key: String, path: String },
+    /// Open Harness → Library on one document: `path` inside the origin with
+    /// the Library key `root_key` (`knowledge:store:eng`,
+    /// `spec:path:/work/app`). How the project info panel opens a project
+    /// map's docs, a project's specs and its changes' proposals, and how a
+    /// launcher opens its brief.
+    OpenLibraryDoc { root_key: String, path: String },
+    /// Open Harness → Library on an origin with nothing selected, by its
+    /// Library key. How a project info panel's store chip opens the store the
+    /// project follows.
+    OpenLibraryRoot { root_key: String },
     /// Show one project's info panel, focusing its column. How a link on one
     /// project's panel opens the other project's.
     ShowProjectInfo { project_id: String },

@@ -21,6 +21,10 @@
 //! shapes that cross the wire, so a client that cannot see the filesystem can
 //! render them. Root keys use the same shapes as OpenSpec's
 //! ([`crate::specs::store_root_key`], [`crate::specs::path_root_key`]).
+//!
+//! A knowledge root is one type of Library origin ([`crate::library`]): the
+//! daemon lists it there, under a key that carries its type, and these shapes
+//! are what discovery hands it.
 
 use serde::{Deserialize, Serialize};
 
@@ -266,18 +270,6 @@ impl KnowledgeStores {
             .or_else(|| self.roots.iter().find(|r| r.healthy))
             .or_else(|| self.roots.first())
     }
-}
-
-/// A document read from a root.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KnowledgeDocument {
-    pub root_key: String,
-    /// Relative to the root, as sent.
-    pub path: String,
-    pub content: String,
-    /// What `KnowledgeWrite` must be handed back to replace this file.
-    #[serde(default)]
-    pub revision: String,
 }
 
 /// Where an entry lives, independent of any one machine's checkout path: the

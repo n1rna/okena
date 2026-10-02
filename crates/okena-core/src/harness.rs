@@ -14,21 +14,23 @@ use serde::{Deserialize, Serialize};
 /// There is no Projects view: a project's worktrees, agents and git state live
 /// in the project's own column, behind its info toggle — the same place an
 /// agent session keeps its context.
+///
+/// Library is what Specs and Knowledge became (QBL-440): both were markdown
+/// repositories you browse, edit, search, commit and hand to agents, so they
+/// are one section over typed origins — see [`crate::library`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessSection {
     Tasks,
-    Specs,
-    Knowledge,
+    Library,
     Testing,
 }
 
 impl HarnessSection {
-    pub const fn all() -> [HarnessSection; 4] {
+    pub const fn all() -> [HarnessSection; 3] {
         [
             HarnessSection::Tasks,
-            HarnessSection::Specs,
-            HarnessSection::Knowledge,
+            HarnessSection::Library,
             HarnessSection::Testing,
         ]
     }
@@ -36,15 +38,21 @@ impl HarnessSection {
     /// The section a persisted slug names. `None` for a slug this build does
     /// not know, so a layout written by a newer okena falls back to no view
     /// rather than failing to load.
+    ///
+    /// `specs` and `knowledge` are the two sections Library replaced. A window
+    /// layout saved on either reopens on Library, which is where everything
+    /// they showed now is.
     pub fn from_slug(slug: &str) -> Option<HarnessSection> {
-        HarnessSection::all().into_iter().find(|s| s.slug() == slug)
+        match slug {
+            "specs" | "knowledge" => Some(HarnessSection::Library),
+            _ => HarnessSection::all().into_iter().find(|s| s.slug() == slug),
+        }
     }
 
     pub const fn label(self) -> &'static str {
         match self {
             HarnessSection::Tasks => "Tasks",
-            HarnessSection::Specs => "Specs",
-            HarnessSection::Knowledge => "Knowledge",
+            HarnessSection::Library => "Library",
             HarnessSection::Testing => "Testing",
         }
     }
@@ -53,8 +61,7 @@ impl HarnessSection {
     pub const fn slug(self) -> &'static str {
         match self {
             HarnessSection::Tasks => "tasks",
-            HarnessSection::Specs => "specs",
-            HarnessSection::Knowledge => "knowledge",
+            HarnessSection::Library => "library",
             HarnessSection::Testing => "testing",
         }
     }
@@ -66,11 +73,8 @@ impl HarnessSection {
             HarnessSection::Tasks => {
                 "Epics, features and stories from your task manager — launch an agent on one."
             }
-            HarnessSection::Specs => {
-                "Spec documents broken down into epics, features and stories. Git-backed."
-            }
-            HarnessSection::Knowledge => {
-                "Skills, technical designs and feature docs. Git-backed collections."
+            HarnessSection::Library => {
+                "Knowledge, specs and any other markdown your agents work from. Git-backed origins."
             }
             HarnessSection::Testing => {
                 "Agents verifying their work — each run's plan, and every step as it passes or fails."
@@ -107,6 +111,19 @@ mod tests {
             assert_eq!(HarnessSection::from_slug(s.slug()), Some(s));
         }
         assert_eq!(HarnessSection::from_slug("deployments"), None);
+    }
+
+    #[test]
+    fn the_two_sections_library_replaced_open_library() {
+        // A window layout saved before QBL-440 names one of them.
+        assert_eq!(HarnessSection::from_slug("specs"), Some(HarnessSection::Library));
+        assert_eq!(
+            HarnessSection::from_slug("knowledge"),
+            Some(HarnessSection::Library)
+        );
+        // Neither is a section any more: the nav lists Library where they were.
+        let labels: Vec<_> = HarnessSection::all().iter().map(|s| s.label()).collect();
+        assert_eq!(labels, ["Tasks", "Library", "Testing"]);
     }
 
     #[test]
@@ -374,14 +391,22 @@ pub enum AgentPurpose {
     Breakdown,
     /// Rewriting a task's title and description.
     Refine,
-    /// Drafting a new OpenSpec change. `root` is the spec root's key.
+    // The six below are sessions on a Library origin. `root` is the origin's
+    // Library key (`spec:store:plans`); a session started before QBL-440
+    // recorded the key without its type, which the variant supplies — see
+    // [`AgentPurpose::origin`].
+    /// Drafting a new OpenSpec change in a spec origin.
     SpecDraft { root: String, change: String },
-    /// Changing one document of a spec root, by path relative to the root.
+    /// Changing one document of a spec origin, by path relative to it.
     SpecEdit { root: String, path: String },
-    /// Adding to a knowledge root. `root` is the root's key.
+    /// Adding to a knowledge origin.
     KnowledgeDraft { root: String },
-    /// Changing one file of a knowledge root, by path relative to the root.
+    /// Changing one file of a knowledge origin, by path relative to it.
     KnowledgeEdit { root: String, path: String },
+    /// Writing documents into a freeform origin.
+    FreeformDraft { root: String },
+    /// Changing one document of a freeform origin, by path relative to it.
+    FreeformEdit { root: String, path: String },
     /// Started by an action of an extension installed from git, about one of
     /// its items (a row's id) when it names one.
     Extension {
@@ -391,6 +416,31 @@ pub enum AgentPurpose {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item_label: Option<String>,
     },
+}
+
+impl AgentPurpose {
+    /// The Library origin this session works in, by Library key, when it is a
+    /// session on one. A key recorded before keys carried a type is given the
+    /// type its variant names.
+    pub fn origin(&self) -> Option<String> {
+        use crate::library::{OriginType, upgrade_key};
+        let key = match self {
+            AgentPurpose::SpecDraft { root, .. } | AgentPurpose::SpecEdit { root, .. } => {
+                Some(upgrade_key(OriginType::Spec, root))
+            }
+            AgentPurpose::KnowledgeDraft { root } | AgentPurpose::KnowledgeEdit { root, .. } => {
+                Some(upgrade_key(OriginType::Knowledge, root))
+            }
+            AgentPurpose::FreeformDraft { root } | AgentPurpose::FreeformEdit { root, .. } => {
+                Some(upgrade_key(OriginType::Freeform, root))
+            }
+            _ => None,
+        };
+        // A draft from before roots were recorded has none to name.
+        key.filter(|key| {
+            crate::library::split_key(key).is_some_and(|(_, inner)| !inner.is_empty())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -409,6 +459,13 @@ mod purpose_tests {
             AgentPurpose::KnowledgeDraft {
                 root: "store:eng".into(),
             },
+            AgentPurpose::FreeformDraft {
+                root: "freeform:path:/notes".into(),
+            },
+            AgentPurpose::FreeformEdit {
+                root: "freeform:path:/notes".into(),
+                path: "adr/0001.md".into(),
+            },
             AgentPurpose::Extension {
                 extension: "cli-table".into(),
                 item: Some("job-7".into()),
@@ -421,6 +478,33 @@ mod purpose_tests {
                 purpose
             );
         }
+    }
+
+    #[test]
+    fn a_session_names_its_origin_by_library_key_whenever_it_was_started() {
+        // Started after QBL-440: the key already carries its type.
+        let now = AgentPurpose::SpecEdit {
+            root: "spec:store:plans".into(),
+            path: "openspec/specs/auth/spec.md".into(),
+        };
+        assert_eq!(now.origin().as_deref(), Some("spec:store:plans"));
+        // Started before: the variant says which type the bare key was.
+        let before = AgentPurpose::KnowledgeDraft {
+            root: "store:eng".into(),
+        };
+        assert_eq!(before.origin().as_deref(), Some("knowledge:store:eng"));
+        // A draft older still recorded no root at all.
+        let oldest = AgentPurpose::SpecDraft {
+            root: String::new(),
+            change: "add-login".into(),
+        };
+        assert_eq!(oldest.origin(), None);
+        assert_eq!(AgentPurpose::Work.origin(), None);
+        let freeform = AgentPurpose::FreeformEdit {
+            root: "freeform:path:/notes".into(),
+            path: "adr/0001.md".into(),
+        };
+        assert_eq!(freeform.origin().as_deref(), Some("freeform:path:/notes"));
     }
 
     #[test]

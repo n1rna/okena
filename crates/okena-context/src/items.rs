@@ -1,5 +1,8 @@
 //! The items inside one root.
 //!
+//! A project map's entries, an OpenSpec root's specs and changes, a knowledge
+//! root's docs, skills and agents, a freeform origin's documents.
+//!
 //! Every item is addressed by its owner and a locator. A map entry's locator
 //! is its map id (`area:core`); anything else's is its path relative to the
 //! owner's *base* — the repository for a project, the store root for a store —
@@ -198,6 +201,25 @@ pub fn knowledge_items(owner: &Owner, root: &Path) -> Vec<ContextItem> {
         .collect()
 }
 
+/// The documents of the freeform origin at `root`: every markdown file it
+/// lists, as the Library lists them.
+pub fn freeform_items(owner: &Owner, root: &Path) -> Vec<ContextItem> {
+    okena_core::freeform::read_tree(root)
+        .documents
+        .into_iter()
+        .map(|doc| {
+            let path = root.join(&doc.path);
+            owner.item(
+                ContextKind::Doc,
+                owner.locator(&path),
+                doc.title,
+                first_prose_line(&path),
+                &path,
+            )
+        })
+        .collect()
+}
+
 /// The first line of prose in a Markdown file: not a heading, not blank, not
 /// frontmatter. Empty when there is none or the file cannot be read.
 fn first_prose_line(path: &Path) -> String {
@@ -314,6 +336,18 @@ infrastructure:
             "openspec/changes/archive/2026-01-01-old/proposal.md",
             "## Why\n\nLong ago.\n",
         );
+    }
+
+    pub fn freeform_folder(root: &Path) {
+        write(
+            root,
+            "workflows/release.md",
+            "---\ntitle: Cutting a release\n---\n\nTag, then publish.\n",
+        );
+        write(root, "adr/0001-two-processes.md", "# Two processes\n\nA daemon and clients.\n");
+        // Not markdown, and hidden: neither is a document.
+        write(root, "scripts/run.sh", "echo hi\n");
+        write(root, ".obsidian/workspace.md", "# Hidden\n");
     }
 
     pub fn knowledge_store(root: &Path) {

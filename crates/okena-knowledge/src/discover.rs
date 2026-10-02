@@ -158,7 +158,7 @@ fn inspect_store(store: &RegisteredStore) -> KnowledgeRoot {
                 "store_checkout_missing",
                 format!("The checkout of `{}` is gone: {}", store.id, root.path),
             )
-            .with_fix("Clone it again, or unregister it in Settings → Knowledge."),
+            .with_fix("Clone it again, or unregister it in Settings → Library."),
         );
         return root;
     }
@@ -252,7 +252,7 @@ fn follow(roots: &mut [KnowledgeRoot], source: &ProjectSource, id: &str) -> Know
                     source.name
                 ),
             )
-            .with_fix("Clone it in Settings → Knowledge."),
+            .with_fix("Clone it in Settings → Library."),
         ),
     }
     pointer

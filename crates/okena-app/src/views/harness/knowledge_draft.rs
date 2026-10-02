@@ -1,5 +1,7 @@
-//! "New" in the Knowledge view: say what to write, pick where and with which
-//! agent, and okena opens an agent session there briefed on the store layout.
+//! "New" in a knowledge or a freeform origin: say what to write, pick where
+//! and with which agent, and okena opens an agent session there — briefed on
+//! the store layout in a knowledge origin, and to follow what the folder
+//! already does in a freeform one, which has no layout.
 //!
 //! It stands in the entry panel rather than taking the whole view, the way a
 //! new spec change and a new task do. Taking the view hid the entries you are
@@ -14,13 +16,16 @@ use gpui::*;
 use gpui_component::{h_flex, v_flex};
 use okena_core::api::ActionRequest;
 use okena_core::harness::AgentPurpose;
-use okena_core::knowledge::{KnowledgeRootKind, KnowledgeStores};
+use okena_core::library::{LibraryOrigins, LibraryTree, OriginKind, OriginType};
 use okena_ui::agent_launcher::Launch;
 use std::collections::{HashMap, HashSet};
 
-/// State of the Knowledge view's "New" form.
+/// State of the "Write with an agent" form.
 pub(crate) struct DraftForm {
     pub(crate) open: bool,
+    /// Which origins it writes in: knowledge or freeform, as the origin it
+    /// was opened from.
+    pub(crate) origin_type: OriginType,
     pub(crate) request: BriefInput,
     /// Root to write in. Follows the open root until picked in the form.
     pub(crate) root: Option<String>,
@@ -28,7 +33,7 @@ pub(crate) struct DraftForm {
     pub(crate) error: Option<String>,
     /// What the last start did, shown above the view once the form closes.
     pub(crate) notice: Option<String>,
-    /// The entries each draft's root had when it started, by daemon project
+    /// The files each draft's root had when it started, by daemon project
     /// id — how its Drafting row knows the files it wrote have shown up.
     pub(crate) baselines: HashMap<String, HashSet<String>>,
     /// Projects and context for the agent, once its dialog has been opened.
@@ -42,6 +47,7 @@ impl DraftForm {
         );
         Self {
             open: false,
+            origin_type: OriginType::Knowledge,
             request,
             root: None,
             starting: false,
@@ -54,12 +60,16 @@ impl DraftForm {
 }
 
 impl HarnessPane {
-    pub(super) fn open_knowledge_draft(&mut self, cx: &mut Context<Self>) {
+    /// Open the form for origins of `origin_type`: knowledge or freeform.
+    pub(super) fn open_draft(&mut self, origin_type: OriginType, cx: &mut Context<Self>) {
         // The form takes the entry panel, so nothing is selected while it is
         // open: a highlighted entry whose text you cannot see reads as a bug.
         // Unsaved edits to it are kept, and come back when it is reopened.
-        self.knowledge.clear_selection();
+        self.library.leave_selection();
+        self.roots.open = false;
+        self.library.composing = false;
         self.knowledge_draft.open = true;
+        self.knowledge_draft.origin_type = origin_type;
         self.knowledge_draft.root = None;
         self.knowledge_draft.error = None;
         self.knowledge_draft.notice = None;
@@ -77,12 +87,13 @@ impl HarnessPane {
     /// Where the draft goes: the root picked in the form, else the open one.
     fn knowledge_draft_target(&self) -> Option<String> {
         self.knowledge_draft.root.clone().or_else(|| {
-            // The open root, unless it is okena's own — falling back to a root
-            // nothing can be written to would preselect a chip that is not
-            // even offered.
-            self.knowledge_open_root()
-                .filter(|r| !r.builtin)
-                .map(|r| r.key.clone())
+            // The open origin, when it is of the form's type and not okena's
+            // own — falling back to one nothing can be drafted in would
+            // preselect a chip that is not even offered.
+            let origin_type = self.knowledge_draft.origin_type;
+            self.library_open_origin()
+                .filter(|o| o.origin_type == origin_type && o.writable())
+                .map(|o| o.key.clone())
         })
     }
 
@@ -112,10 +123,11 @@ impl HarnessPane {
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 client
-                    .post_action(ActionRequest::KnowledgeDraft {
+                    .post_action(ActionRequest::LibraryDraft {
                         context,
                         root,
                         request,
+                        name: None,
                         agent_command: Some(agent),
                         model,
                     })
@@ -138,16 +150,21 @@ impl HarnessPane {
                                 .unwrap_or("the session");
                             // What the root holds now, so its Drafting row can
                             // tell when the files it writes have shown up.
-                            if let (Some(id), Some(tree)) = (
-                                v.get("project_id").and_then(|p| p.as_str()),
-                                this.knowledge.tree.as_ref(),
-                            ) && this.knowledge.root_key.as_deref()
-                                == v.get("root").and_then(|r| r.as_str())
+                            let before: Option<HashSet<String>> = match this.library.tree.as_ref() {
+                                Some(LibraryTree::Knowledge(tree)) => {
+                                    Some(tree.entries.iter().map(|e| e.path.clone()).collect())
+                                }
+                                Some(LibraryTree::Freeform(tree)) => {
+                                    Some(tree.documents.iter().map(|d| d.path.clone()).collect())
+                                }
+                                _ => None,
+                            };
+                            if let (Some(id), Some(before)) =
+                                (v.get("project_id").and_then(|p| p.as_str()), before)
+                                && this.library.root_key.as_deref()
+                                    == v.get("root").and_then(|r| r.as_str())
                             {
-                                this.knowledge_draft.baselines.insert(
-                                    id.to_string(),
-                                    tree.entries.iter().map(|e| e.path.clone()).collect(),
-                                );
+                                this.knowledge_draft.baselines.insert(id.to_string(), before);
                             }
                             // The session runs in its own terminal; its row in
                             // the tree opens it, and what it writes shows up
@@ -167,21 +184,21 @@ impl HarnessPane {
 
     pub(super) fn render_knowledge_draft_form(
         &self,
-        stores: &KnowledgeStores,
+        origins: &LibraryOrigins,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
 
+        let origin_type = self.knowledge_draft.origin_type;
+        let freeform = origin_type == OriginType::Freeform;
         let target = self.knowledge_draft_target();
         let mut roots = h_flex().gap(px(6.0)).flex_wrap();
-        // Never okena's own store: it is rewritten on every start, so an
+        // Origins of the form's own type only: the brief is that type's. And
+        // never okena's own store: it is rewritten on every start, so an
         // agent briefed to write there would lose its work.
-        for root in stores.roots.iter().filter(|r| r.healthy && !r.builtin) {
+        for root in origins.of_type(origin_type).filter(|o| o.writable()) {
             let key = root.key.clone();
-            let kind = match root.kind {
-                KnowledgeRootKind::Store => "store",
-                KnowledgeRootKind::Project => "project",
-            };
+            let kind = root.kind.label();
             roots = roots.child(self.choice_chip(
                 format!("knowledge-draft-root-{}", root.key),
                 format!("{} · {kind}", root.name),
@@ -190,8 +207,8 @@ impl HarnessPane {
                 cx,
             ));
         }
-        let target_hint = match target.as_deref().and_then(|k| stores.root(k)) {
-            Some(root) if root.kind == KnowledgeRootKind::Store => format!(
+        let target_hint = match target.as_deref().and_then(|k| origins.origin(k)) {
+            Some(root) if !freeform && root.kind == OriginKind::Store => format!(
                 "The agent works in {} on a new knowledge/… branch, commits when done, and does not push unless you ask.",
                 root.path
             ),
@@ -199,6 +216,7 @@ impl HarnessPane {
                 "The agent works in {}. Committing is left to you.",
                 root.path
             ),
+            None if freeform => "Pick the folder to write in.".to_string(),
             None => "Pick where the knowledge should live.".to_string(),
         };
 
@@ -242,9 +260,15 @@ impl HarnessPane {
                             )),
                     )
                     .child(self.field_hint(
-                        "okena opens an agent session in the knowledge root, briefed on its \
-                         layout — docs/, skills/, agents/ and templates/ — and on the \
-                         frontmatter people and agents pick entries by.",
+                        if freeform {
+                            "okena opens an agent session in the folder, briefed to read what \
+                             is there and follow its folders, names and conventions — a \
+                             freeform origin has no layout of its own."
+                        } else {
+                            "okena opens an agent session in the knowledge origin, briefed on its \
+                             layout — docs/, skills/, agents/ and templates/ — and on the \
+                             frontmatter people and agents pick entries by."
+                        },
                         cx,
                     )),
             )
@@ -261,8 +285,13 @@ impl HarnessPane {
                     .child(self.field_label("What to write", cx))
                     .child(self.knowledge_draft.request.render(110.0, cx))
                     .child(self.field_hint(
-                        "A new doc, a skill, a subagent or a template — or what to change in \
-                         one. This is the agent's brief, so context beats brevity.",
+                        if freeform {
+                            "A new document, or what to change across the ones there. This is \
+                             the agent's brief, so context beats brevity."
+                        } else {
+                            "A new doc, a skill, a subagent or a template — or what to change in \
+                             one. This is the agent's brief, so context beats brevity."
+                        },
                         cx,
                     )),
             );
@@ -275,7 +304,7 @@ impl HarnessPane {
         // an empty entry is something you can make without okena.
         let launcher = okena_ui::agent_launcher::AgentLauncher::new(
             "knowledge-draft-launcher",
-            match target.as_deref().and_then(|k| stores.root(k)) {
+            match target.as_deref().and_then(|k| origins.origin(k)) {
                 Some(root) => format!("Write in {}", root.name),
                 None => "Write with an agent".to_string(),
             },
@@ -288,7 +317,10 @@ impl HarnessPane {
         // The drafts already writing into this root.
         .sessions(self.launcher_sessions(
             self.sessions_for(cx, |purpose| {
-                matches!(purpose, AgentPurpose::KnowledgeDraft { root } if Some(root) == target.as_ref())
+                matches!(
+                    purpose,
+                    AgentPurpose::KnowledgeDraft { .. } | AgentPurpose::FreeformDraft { .. }
+                ) && purpose.origin() == target
             }),
             cx,
         ))
@@ -301,7 +333,11 @@ impl HarnessPane {
                 this.open_context_dialog(super::context_dialog::ContextTarget::KnowledgeDraft, cx);
             }),
         )
-        .brief(crate::views::launch_briefs::brief_for(&self.client, "knowledge-draft", cx))
+        .brief(crate::views::launch_briefs::brief_for(
+            &self.client,
+            if freeform { "freeform-draft" } else { "knowledge-draft" },
+            cx,
+        ))
         .on_open_brief(self.open_brief())
         .on_launch(cx.listener(|this, launch: &Launch, _window, cx| {
             this.start_knowledge_draft(launch.command.to_string(), launch.model.clone(), cx);

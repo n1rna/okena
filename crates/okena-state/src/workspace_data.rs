@@ -63,7 +63,7 @@ impl ProjectData {
     ///
     /// Stored rather than derived from the project's name: the name is a slug
     /// the user can rename, and a session that stops being recognizable because
-    /// someone retitled it would silently fall out of the Specs view.
+    /// someone retitled it would silently fall out of the Library.
     pub fn is_spec_session(&self) -> bool {
         self.spec_change.is_some()
     }
@@ -101,7 +101,14 @@ impl ProjectData {
             Some(AgentPurpose::SpecDraft { .. } | AgentPurpose::SpecEdit { .. }) => {
                 return Some(AgentRole::Spec);
             }
-            Some(AgentPurpose::KnowledgeDraft { .. } | AgentPurpose::KnowledgeEdit { .. }) => {
+            // A freeform origin's documents are docs too, so its sessions
+            // share the badge.
+            Some(
+                AgentPurpose::KnowledgeDraft { .. }
+                | AgentPurpose::KnowledgeEdit { .. }
+                | AgentPurpose::FreeformDraft { .. }
+                | AgentPurpose::FreeformEdit { .. },
+            ) => {
                 return Some(AgentRole::Knowledge);
             }
             _ => {}
@@ -262,7 +269,7 @@ pub enum AgentRole {
     Task,
     /// Drafting an OpenSpec change.
     Spec,
-    /// Writing into a knowledge root.
+    /// Writing into a knowledge root, or the documents of a freeform origin.
     Knowledge,
     /// Mapping a repository, or finding the links between several.
     Scan,
@@ -529,7 +536,7 @@ pub struct ProjectData {
     /// The OpenSpec change this session is drafting, if it is a spec session.
     ///
     /// Holds the change's directory name, which is its identity in OpenSpec, so
-    /// the Specs view can tie a running agent back to the change it is writing.
+    /// the Library can tie a running agent back to the change it is writing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_change: Option<String>,
     /// The title a task-drafting session is working towards, if it is one.
@@ -545,7 +552,7 @@ pub struct ProjectData {
     /// Holds the root's key. Stored rather than derived from the session's
     /// goal text for the same reason `spec_change` is: a session that stopped
     /// being recognizable because someone reworded it would silently fall out
-    /// of the Knowledge view.
+    /// of the Library.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge_root: Option<String>,
     /// What a scanning session maps, if it is one: the repository's name
@@ -2720,6 +2727,15 @@ mod agent_role_tests {
             },
         }));
         assert_eq!(spec.agent_role(), Some(AgentRole::Spec));
+        let freeform = project(serde_json::json!({
+            "custom_session": "adr/0001.md: tighten",
+            "agent_purpose": {
+                "kind": "freeform_edit",
+                "root": "freeform:path:/notes",
+                "path": "adr/0001.md",
+            },
+        }));
+        assert_eq!(freeform.agent_role(), Some(AgentRole::Knowledge));
     }
 
     #[test]

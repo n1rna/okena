@@ -44,6 +44,36 @@ pub struct DaemonConfig {
     publish_palette: Arc<dyn Fn(ThemeColors) + Send + Sync>,
 }
 
+/// Edits and persists the daemon's settings from outside the command loop.
+/// See [`DaemonConfig::editor`].
+#[derive(Clone)]
+pub struct SettingsEditor {
+    settings: Arc<Mutex<AppSettings>>,
+    persist_settings: SettingsPersister,
+}
+
+impl SettingsEditor {
+    /// Apply `edit` to the held settings and persist the result. On a save
+    /// failure the held value is rolled back, so the daemon's settings and
+    /// `settings.json` never disagree.
+    pub fn edit<T>(
+        &self,
+        edit: impl FnOnce(&mut AppSettings) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let before = self.settings.lock().clone();
+        let (value, next) = {
+            let mut held = self.settings.lock();
+            let value = edit(&mut held)?;
+            (value, held.clone())
+        };
+        if let Err(e) = (self.persist_settings)(&next) {
+            *self.settings.lock() = before;
+            return Err(e);
+        }
+        Ok(value)
+    }
+}
+
 impl DaemonConfig {
     /// Build the handler over the daemon's single shared settings cell.
     ///
@@ -114,17 +144,20 @@ impl DaemonConfig {
         &mut self,
         edit: impl FnOnce(&mut AppSettings) -> Result<T, String>,
     ) -> Result<T, String> {
-        let before = self.settings.lock().clone();
-        let (value, next) = {
-            let mut held = self.settings.lock();
-            let value = edit(&mut held)?;
-            (value, held.clone())
-        };
-        if let Err(e) = (self.persist_settings)(&next) {
-            *self.settings.lock() = before;
-            return Err(e);
+        self.editor().edit(edit)
+    }
+
+    /// A handle that makes the same kind of edit from a worker.
+    ///
+    /// For an action that runs off the command loop — a Library clone takes as
+    /// long as the network does — and has a settings change to save once it is
+    /// done: it cannot borrow the loop's `DaemonConfig`, and must still write
+    /// through the one path that persists and rolls back.
+    pub fn editor(&self) -> SettingsEditor {
+        SettingsEditor {
+            settings: self.settings.clone(),
+            persist_settings: self.persist_settings.clone(),
         }
-        Ok(value)
     }
 
     /// Validate a patch without persisting it or changing the shared settings.

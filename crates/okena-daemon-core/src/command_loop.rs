@@ -139,6 +139,33 @@ fn bump_state(state_version: &watch::Sender<u64>) {
     state_version.send_modify(|version| *version = version.wrapping_add(1));
 }
 
+/// What a Library action came to, with the settings change it asked for
+/// saved.
+///
+/// A folder origin exists only as a line in its space's settings, so an add
+/// that could not be saved did not add anything: the reply is the failure,
+/// naming the folder that is nonetheless on disk. Clients are told through the
+/// state version, as for any other settings change.
+fn save_library_outcome(
+    outcome: Option<okena_app_core::workspace::actions::execute::LibraryOutcome>,
+    editor: &crate::daemon_config::SettingsEditor,
+    state_version: &watch::Sender<u64>,
+) -> CommandResult {
+    use okena_app_core::workspace::actions::execute::ActionResult;
+    let Some(outcome) = outcome else {
+        return CommandResult::Err("not a library action".into());
+    };
+    if let (ActionResult::Ok(_), Some(edit)) = (&outcome.result, &outcome.edit) {
+        if let Err(e) = editor.edit(|settings| edit.apply(settings)) {
+            return CommandResult::Err(format!(
+                "the origin could not be saved to this space's settings: {e}"
+            ));
+        }
+        bump_state(state_version);
+    }
+    outcome.result.into_command_result()
+}
+
 /// A `CommandResult` carrying `value` as JSON.
 fn json_ok<T: ?Sized + serde::Serialize>(value: &T) -> CommandResult {
     match serde_json::to_value(value) {
@@ -3038,80 +3065,45 @@ pub async fn daemon_command_loop(
                 });
                 continue;
             }
-            // ── OpenSpec store changes: off the queue and the workspace lock ──
-            // A clone is network-bound and unbounded, store setup runs
-            // `git init` and a commit (the user's hooks may run), and every
-            // registry change may wait up to 5 s on the lock an `openspec`
-            // command holds. None of them touch the workspace, so they
-            // run on the blocking pool with a settings snapshot and reply when
-            // done instead of stalling every other action behind them.
-            RemoteCommand::Action(
-                action @ (ActionRequest::SpecStoreClone { .. }
-                | ActionRequest::SpecStoreRegister { .. }
-                | ActionRequest::SpecStoreUnregister { .. }
-                | ActionRequest::SpecStoreSetup { .. }
-                | ActionRequest::SpecSetDefaultStore { .. }),
-            ) => {
+            // ── Library: off the queue and the workspace lock ──
+            // Every Library action but the two that start an agent session.
+            // They run git — `status` in each checkout even for a listing,
+            // `clone`, `fetch` and `push` over the network, `commit` with the
+            // user's hooks — a search reads every origin's files, and a change
+            // to a spec origin may wait up to 5 s on the lock an `openspec`
+            // command holds. None of them changes the workspace, so what
+            // discovery needs is copied under a brief lock and the work runs
+            // on the blocking pool with a settings snapshot.
+            //
+            // Adding or removing a folder origin is the one thing that has to
+            // be written back: a folder is a line in the space's settings. The
+            // worker says what to write and it is saved here, once the work is
+            // done, through the same path every other settings write takes.
+            RemoteCommand::Action(action)
+                if okena_app_core::workspace::actions::execute::is_library_action(&action) =>
+            {
                 let app_settings = settings.lock().clone();
-                let worker_runtime = runtime.clone();
-                let _task = runtime.spawn(async move {
-                    let result = worker_runtime
-                        .spawn_blocking(move || {
-                            okena_app_core::workspace::actions::execute::execute_spec_store_action(
-                                &action,
-                                &app_settings,
-                            )
-                            .map(|r| r.into_command_result())
-                            .unwrap_or_else(|| {
-                                CommandResult::Err("not an OpenSpec store action".into())
-                            })
-                        })
-                        .await
-                        .unwrap_or_else(|e| {
-                            CommandResult::Err(format!("OpenSpec store worker failed: {e}"))
-                        });
-                    if let Some(reply) = reply {
-                        let _ = reply.send(result);
-                    }
-                });
-                continue;
-            }
-            // ── OpenSpec store git: off the queue and the workspace lock ──
-            // The listing runs `git status` in every store checkout; fetch,
-            // pull and push reach the network, commit runs the user's hooks,
-            // and a search reads every root's documents. None of them changes
-            // the workspace, so discovery's sources are copied under a brief
-            // lock, as knowledge's are.
-            RemoteCommand::Action(
-                action @ (ActionRequest::SpecStores
-                | ActionRequest::SpecSearch { .. }
-                | ActionRequest::SpecStoreFetch { .. }
-                | ActionRequest::SpecStorePull { .. }
-                | ActionRequest::SpecStoreCommit { .. }
-                | ActionRequest::SpecStorePush { .. }),
-            ) => {
-                let app_settings = settings.lock().clone();
-                let sources = okena_app_core::workspace::actions::execute::spec_sources(
+                let sources = okena_app_core::workspace::actions::execute::library_sources(
                     &workspace.lock().data.projects,
                     &app_settings,
                 );
+                let editor = daemon_config.editor();
+                let state_version = state_version.clone();
                 let worker_runtime = runtime.clone();
                 let _task = runtime.spawn(async move {
                     let result = worker_runtime
                         .spawn_blocking(move || {
-                            okena_app_core::workspace::actions::execute::execute_spec_git_action(
-                                &action,
-                                &sources,
-                                &app_settings,
-                            )
-                            .map(|r| r.into_command_result())
-                            .unwrap_or_else(|| {
-                                CommandResult::Err("not an OpenSpec git action".into())
-                            })
+                            let outcome =
+                                okena_app_core::workspace::actions::execute::execute_library_action(
+                                    &action,
+                                    &sources,
+                                    &app_settings,
+                                );
+                            save_library_outcome(outcome, &editor, &state_version)
                         })
                         .await
                         .unwrap_or_else(|e| {
-                            CommandResult::Err(format!("OpenSpec git worker failed: {e}"))
+                            CommandResult::Err(format!("library worker failed: {e}"))
                         });
                     if let Some(reply) = reply {
                         let _ = reply.send(result);
@@ -3147,62 +3139,6 @@ pub async fn daemon_command_loop(
                 };
                 let _task = runtime.spawn(async move {
                     let result = crate::extensions::run(host, action, cx).await;
-                    if let Some(reply) = reply {
-                        let _ = reply.send(result);
-                    }
-                });
-                continue;
-            }
-            // ── Knowledge: off the queue and the workspace lock ──
-            // Every knowledge action runs git — `status` in each store even for
-            // a listing, `clone`, `fetch` and `push` over the network, `commit`
-            // with the user's hooks — and none of them changes the workspace.
-            // The project list is copied under a brief lock; the work runs on
-            // the blocking pool with a settings snapshot.
-            RemoteCommand::Action(
-                action @ (ActionRequest::KnowledgeStores
-                | ActionRequest::KnowledgeTree { .. }
-                | ActionRequest::KnowledgeRead { .. }
-                | ActionRequest::KnowledgeSearch { .. }
-                | ActionRequest::KnowledgeWrite { .. }
-                | ActionRequest::KnowledgeFileCreate { .. }
-                | ActionRequest::KnowledgeFolderCreate { .. }
-                | ActionRequest::KnowledgeFileRename { .. }
-                | ActionRequest::KnowledgeFileDelete { .. }
-                | ActionRequest::KnowledgeOverrides { .. }
-                | ActionRequest::KnowledgeOverride { .. }
-                | ActionRequest::KnowledgeLayering
-                | ActionRequest::KnowledgeStoreClone { .. }
-                | ActionRequest::KnowledgeStoreRegister { .. }
-                | ActionRequest::KnowledgeStoreUnregister { .. }
-                | ActionRequest::KnowledgeStoreSetup { .. }
-                | ActionRequest::KnowledgeStoreFetch { .. }
-                | ActionRequest::KnowledgeStorePull { .. }
-                | ActionRequest::KnowledgeStoreCommit { .. }
-                | ActionRequest::KnowledgeStorePush { .. }),
-            ) => {
-                let app_settings = settings.lock().clone();
-                let sources =
-                    okena_app_core::workspace::actions::execute::knowledge_project_sources(
-                        &workspace.lock().data.projects,
-                        &app_settings,
-                    );
-                let worker_runtime = runtime.clone();
-                let _task = runtime.spawn(async move {
-                    let result = worker_runtime
-                        .spawn_blocking(move || {
-                            okena_app_core::workspace::actions::execute::execute_knowledge_action(
-                                &action,
-                                &sources,
-                                &app_settings,
-                            )
-                            .map(|r| r.into_command_result())
-                            .unwrap_or_else(|| CommandResult::Err("not a knowledge action".into()))
-                        })
-                        .await
-                        .unwrap_or_else(|e| {
-                            CommandResult::Err(format!("knowledge worker failed: {e}"))
-                        });
                     if let Some(reply) = reply {
                         let _ = reply.send(result);
                     }
@@ -5588,6 +5524,105 @@ mod tests {
                 None,
             ))
         }
+    }
+
+    #[test]
+    fn a_folder_origin_is_saved_to_the_space_it_was_added_from() {
+        use okena_app_core::workspace::actions::execute::{
+            ActionResult, LibraryOutcome, SettingsEdit,
+        };
+        let settings = Arc::new(Mutex::new(default_settings()));
+        {
+            let mut held = settings.lock();
+            held.ensure_spaces();
+            held.spaces
+                .push(okena_core::spaces::SpaceData::new("client-a", "Client A"));
+        }
+        let saves = Arc::new(Mutex::new(Vec::<AppSettings>::new()));
+        let recorded = saves.clone();
+        let config = DaemonConfig::with_persistence(
+            settings.clone(),
+            Arc::new(move |s| {
+                recorded.lock().push(s.clone());
+                Ok(())
+            }),
+        );
+        let (state_version, _rx) = watch::channel(0u64);
+        let added = |folder: &str| {
+            Some(LibraryOutcome {
+                result: ActionResult::Ok(Some(serde_json::json!({ "root": folder }))),
+                edit: Some(SettingsEdit::AddFreeformFolder {
+                    space: "client-a".into(),
+                    folder: folder.into(),
+                }),
+            })
+        };
+
+        let reply = save_library_outcome(added("/notes"), &config.editor(), &state_version);
+        assert!(matches!(reply, CommandResult::Ok(Some(_))));
+        let held = settings.lock().clone();
+        assert_eq!(
+            held.space("client-a").unwrap().library.freeform.folders,
+            ["/notes"]
+        );
+        assert!(
+            held.active_space().library.freeform.folders.is_empty(),
+            "the active space was not the one the origin was added from"
+        );
+        assert_eq!(saves.lock().len(), 1, "written to settings.json once");
+        assert_eq!(*state_version.borrow(), 1, "clients are told");
+
+        // An action with nothing to save writes nothing and announces nothing.
+        let plain = Some(LibraryOutcome {
+            result: ActionResult::Ok(None),
+            edit: None,
+        });
+        save_library_outcome(plain, &config.editor(), &state_version);
+        // Neither does one that failed, whatever it would have asked for.
+        let failed = Some(LibraryOutcome {
+            result: ActionResult::Err("clone failed".into()),
+            edit: Some(SettingsEdit::AddFreeformFolder {
+                space: "client-a".into(),
+                folder: "/never".into(),
+            }),
+        });
+        assert!(matches!(
+            save_library_outcome(failed, &config.editor(), &state_version),
+            CommandResult::Err(_)
+        ));
+        assert_eq!(saves.lock().len(), 1);
+        assert_eq!(*state_version.borrow(), 1);
+    }
+
+    #[test]
+    fn an_origin_that_could_not_be_saved_is_reported_and_not_kept() {
+        use okena_app_core::workspace::actions::execute::{
+            ActionResult, LibraryOutcome, SettingsEdit,
+        };
+        let settings = Arc::new(Mutex::new(default_settings()));
+        let config = DaemonConfig::with_persistence(
+            settings.clone(),
+            Arc::new(|_| Err("disk full".to_string())),
+        );
+        let (state_version, _rx) = watch::channel(0u64);
+        let outcome = Some(LibraryOutcome {
+            result: ActionResult::Ok(Some(serde_json::json!({ "root": "/notes" }))),
+            edit: Some(SettingsEdit::AddFreeformFolder {
+                space: "default".into(),
+                folder: "/notes".into(),
+            }),
+        });
+        let CommandResult::Err(e) =
+            save_library_outcome(outcome, &config.editor(), &state_version)
+        else {
+            panic!("a save that failed must not read as an origin added");
+        };
+        assert!(e.contains("disk full"), "{e}");
+        assert!(
+            settings.lock().active_space().library.freeform.folders.is_empty(),
+            "the held settings were rolled back with the file"
+        );
+        assert_eq!(*state_version.borrow(), 0);
     }
 
     fn harness() -> Harness {

@@ -1,6 +1,6 @@
 //! The search island on the harness pages (QBL-436).
 //!
-//! Tasks, Specs and Knowledge each float the same island the Projects and
+//! Tasks and Library each float the same island the Projects and
 //! Agents overviews do (`views/components/island.rs` draws it): a search box
 //! and that page's filters, closing to a pill. What each page's island holds
 //! is drawn by the page; this is what they share — whether it is open, where
@@ -22,20 +22,14 @@ impl HarnessPane {
     fn island_input(&self) -> Option<&Entity<SimpleInputState>> {
         match self.section {
             HarnessSection::Tasks => (!self.tasks.tasks.is_empty()).then_some(&self.tasks.search),
-            // With no roots there is an empty state where the sidebar would
+            // With no origins there is an empty state where the sidebar would
             // be, and nothing to search.
-            HarnessSection::Specs => self
-                .specs
-                .stores
+            HarnessSection::Library => self
+                .library
+                .origins
                 .as_ref()
-                .is_some_and(|s| !s.roots.is_empty())
-                .then_some(&self.spec_search.input),
-            HarnessSection::Knowledge => self
-                .knowledge
-                .stores
-                .as_ref()
-                .is_some_and(|s| !s.roots.is_empty())
-                .then_some(&self.knowledge_search.input),
+                .is_some_and(|o| !o.origins.is_empty())
+                .then_some(&self.search.input),
             HarnessSection::Testing => None,
         }
     }
@@ -48,10 +42,10 @@ impl HarnessPane {
                 let (shown, total) = self.tasks_shown_of_total();
                 (!self.tasks.filter.is_empty(), shown, total)
             }
-            section => self.doc_search(section).map_or((false, 0, 0), |search| {
-                let (shown, total) = search.state.shown_of_total();
-                (search.state.filter.is_active(), shown, total)
-            }),
+            _ => {
+                let (shown, total) = self.search.state.shown_of_total();
+                (self.search.state.filter.is_active(), shown, total)
+            }
         }
     }
 
@@ -180,7 +174,7 @@ impl HarnessPane {
         let content = if self.island_open {
             match self.section {
                 HarnessSection::Tasks => self.render_tasks_island(cx),
-                section => self.render_doc_island(section, cx)?,
+                _ => self.render_doc_island(cx)?,
             }
         } else {
             let (active, shown, total) = self.island_counts();

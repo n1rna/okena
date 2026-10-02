@@ -1,15 +1,15 @@
-//! Changing one open document with an agent: a spec, a change file or a
-//! knowledge entry.
+//! Changing one open Library document with an agent: a spec, a change file, a
+//! knowledge entry or a freeform document.
 //!
-//! The same session in both sections — rooted at the document's root, briefed
-//! with `doc-refine`, committing nothing — so the two differ only in how the
-//! root and the path are checked. Both are checked against what discovery
-//! found: these actions are reachable by any paired client, and must not
-//! become a way to point an agent at an arbitrary file.
+//! The same session whatever the origin's type — rooted at the document's
+//! origin, briefed with `doc-refine`, committing nothing — so the types differ
+//! only in how the origin and the path are checked. Both are checked against
+//! what discovery found: this action is reachable by any paired client, and
+//! must not become a way to point an agent at an arbitrary file.
 
 use super::ActionResult;
 use super::briefs::{self, PromptRoots};
-use crate::workspace::persistence::{AppSettings, get_config_dir};
+use crate::workspace::persistence::AppSettings;
 use crate::workspace::state::{WindowId, Workspace};
 use okena_core::harness::AgentPurpose;
 use okena_knowledge::prompts::{Flow, Vars};
@@ -32,9 +32,10 @@ struct Target {
     knowledge_root: Option<String>,
 }
 
-/// Start an agent on one document of a spec root.
+/// Start an agent on one document of the origin `root` names, whatever its
+/// type.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn refine_spec_document(
+pub(super) fn refine_document(
     ws: &mut Workspace,
     window_id: WindowId,
     root: String,
@@ -47,6 +48,45 @@ pub(super) fn refine_spec_document(
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
     cx: &mut impl WorkspaceCx,
+) -> ActionResult {
+    use okena_core::library::{OriginType, split_key};
+    let refine = match split_key(&root).map(|(origin_type, _)| origin_type) {
+        Some(OriginType::Spec) => refine_spec_document,
+        Some(OriginType::Knowledge) => refine_knowledge_document,
+        Some(OriginType::Freeform) => refine_freeform_document,
+        None => return ActionResult::Err(super::library::unknown_origin(&root)),
+    };
+    refine(
+        ws,
+        window_id,
+        root,
+        path,
+        request,
+        agent_command,
+        model,
+        context_refs,
+        backend,
+        terminals,
+        settings,
+        cx,
+    )
+}
+
+/// Start an agent on one document of a spec origin.
+#[allow(clippy::too_many_arguments)]
+fn refine_spec_document<Cx: WorkspaceCx>(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    root: String,
+    path: String,
+    request: String,
+    agent_command: Option<String>,
+    model: Option<String>,
+    context_refs: Vec<okena_core::context::ContextRef>,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut Cx,
 ) -> ActionResult {
     let root = match super::specs::resolve_root(&ws.data.projects, settings, Some(&root)) {
         Ok(r) => r,
@@ -85,9 +125,9 @@ pub(super) fn refine_spec_document(
     )
 }
 
-/// Start an agent on one file of a knowledge root.
+/// Start an agent on one file of a knowledge origin.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn refine_knowledge_document(
+fn refine_knowledge_document<Cx: WorkspaceCx>(
     ws: &mut Workspace,
     window_id: WindowId,
     root: String,
@@ -99,9 +139,9 @@ pub(super) fn refine_knowledge_document(
     backend: &dyn TerminalBackend,
     terminals: &TerminalsRegistry,
     settings: &AppSettings,
-    cx: &mut impl WorkspaceCx,
+    cx: &mut Cx,
 ) -> ActionResult {
-    let registry = okena_knowledge::registry::registry_path(&get_config_dir());
+    let registry = super::knowledge::registry();
     // Refining rewrites the file, so okena's own store is refused here for the
     // same reason a save is: the next start would undo whatever the agent did.
     let projects = super::knowledge::knowledge_project_sources(&ws.data.projects, settings);
@@ -127,6 +167,59 @@ pub(super) fn refine_knowledge_document(
         path,
         file,
         knowledge_root: Some(root.key.clone()),
+    };
+    start(
+        ws,
+        window_id,
+        target,
+        request,
+        agent_command,
+        model,
+        context_refs,
+        backend,
+        terminals,
+        settings,
+        cx,
+    )
+}
+
+/// Start an agent on one document of a freeform origin.
+#[allow(clippy::too_many_arguments)]
+fn refine_freeform_document<Cx: WorkspaceCx>(
+    ws: &mut Workspace,
+    window_id: WindowId,
+    root: String,
+    path: String,
+    request: String,
+    agent_command: Option<String>,
+    model: Option<String>,
+    context_refs: Vec<okena_core::context::ContextRef>,
+    backend: &dyn TerminalBackend,
+    terminals: &TerminalsRegistry,
+    settings: &AppSettings,
+    cx: &mut Cx,
+) -> ActionResult {
+    let origin = match super::freeform::resolve_listed(settings, &root) {
+        Ok(o) => o,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let file = match existing_file(
+        okena_core::freeform::resolve_document(Path::new(&origin.path), &path),
+        &path,
+    ) {
+        Ok(f) => f,
+        Err(e) => return ActionResult::Err(e),
+    };
+    let target = Target {
+        root_path: origin.path.clone(),
+        what: "a markdown document".to_string(),
+        purpose: AgentPurpose::FreeformEdit {
+            root: origin.key.clone(),
+            path: path.clone(),
+        },
+        path,
+        file,
+        knowledge_root: None,
     };
     start(
         ws,
@@ -291,6 +384,31 @@ mod tests {
             spec_document_kind("openspec/changes/archive/2026-01-01-x/proposal.md"),
             "an OpenSpec document"
         );
+    }
+
+    #[test]
+    fn a_freeform_document_is_refined_with_the_same_brief() {
+        let target = Target {
+            root_path: "/notes".into(),
+            path: "workflows/release.md".into(),
+            file: PathBuf::from("/notes/workflows/release.md"),
+            what: "a markdown document".into(),
+            purpose: AgentPurpose::FreeformEdit {
+                root: "freeform:path:/notes".into(),
+                path: "workflows/release.md".into(),
+            },
+            knowledge_root: None,
+        };
+        let brief = document_brief("add the hotfix path", &target, &[], false, &Vec::new());
+        for needle in [
+            "add the hotfix path",
+            "`workflows/release.md`",
+            "`/notes/workflows/release.md`",
+            "a markdown document",
+            "Do not commit",
+        ] {
+            assert!(brief.contains(needle), "missing {needle:?}:\n{brief}");
+        }
     }
 
     #[test]

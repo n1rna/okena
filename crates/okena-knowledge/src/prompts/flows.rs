@@ -14,7 +14,7 @@ use std::fmt;
 /// The folder a root keeps its launch briefs in, relative to the root.
 ///
 /// Named here because it is the one place that decides it: the built-ins are
-/// materialized into it, resolution reads from it, and the Knowledge view
+/// materialized into it, resolution reads from it, and the Library
 /// shows it as a directory of its own.
 pub const BRIEFS_DIR: &str = "templates/briefs";
 
@@ -53,8 +53,11 @@ pub enum Flow {
     SpecDraft,
     /// Adding to or updating a knowledge root.
     KnowledgeDraft,
-    /// Changing one open document — a spec, a change file or a knowledge
-    /// entry — at the user's request, without committing.
+    /// Writing or updating the documents of a freeform origin, which has no
+    /// layout to brief the agent on.
+    FreeformDraft,
+    /// Changing one open document — a spec, a change file, a knowledge entry
+    /// or a freeform document — at the user's request, without committing.
     DocumentRefine,
     /// A free-form session against a goal the user typed.
     AgentSession,
@@ -88,6 +91,7 @@ impl Flow {
             Flow::TaskRefine => "task-refine",
             Flow::SpecDraft => "spec-draft",
             Flow::KnowledgeDraft => "knowledge-draft",
+            Flow::FreeformDraft => "freeform-draft",
             Flow::DocumentRefine => "doc-refine",
             Flow::AgentSession => "agent-session",
             Flow::ExtensionBuild => "extension-build",
@@ -109,6 +113,7 @@ impl Flow {
             Flow::TaskRefine => "Refine a task",
             Flow::SpecDraft => "Draft a spec change",
             Flow::KnowledgeDraft => "Write knowledge",
+            Flow::FreeformDraft => "Write documents",
             Flow::DocumentRefine => "Change a document",
             Flow::AgentSession => "Free-form session",
             Flow::ExtensionBuild => "Build an extension",
@@ -224,6 +229,7 @@ impl Flow {
                 "context",
             ],
             Flow::KnowledgeDraft => &["request", "path", "what", "commit_note", "context"],
+            Flow::FreeformDraft => &["request", "path", "context"],
             Flow::AgentSession => &["goal", "projects", "context"],
             // `summary` rather than `goal`: it is optional, and what it
             // describes is the extension, not the session.
@@ -255,6 +261,7 @@ impl Flow {
             Flow::TaskRefine,
             Flow::SpecDraft,
             Flow::KnowledgeDraft,
+            Flow::FreeformDraft,
             Flow::DocumentRefine,
             Flow::AgentSession,
             Flow::ExtensionBuild,

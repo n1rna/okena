@@ -1,11 +1,11 @@
-//! A store checkout's git, as the Specs and Knowledge views show it: where the
-//! branch stands, Fetch, Pull and Push with the reason any of them is
-//! unavailable, and the uncommitted files with a box to commit them.
+//! An origin checkout's git, as the Library shows it: where the branch
+//! stands, Fetch, Pull and Push with the reason any of them is unavailable,
+//! and the uncommitted files with a box to commit them.
 //!
-//! Both views render this one panel over the same `StoreGitStatus` (ADR-0004);
-//! they differ only in the actions posted and the view refreshed after. Every
-//! operation goes through the daemon, which resolves the root key itself and
-//! refuses to commit any path its own status did not list.
+//! One panel over the same `StoreGitStatus` (ADR-0004) and the same four
+//! actions, whatever the origin's type. Every operation goes through the
+//! daemon, which resolves the origin's key itself and refuses to commit any
+//! path its own status did not list.
 
 use super::HarnessPane;
 use crate::theme::theme;
@@ -19,14 +19,7 @@ use okena_core::store_git::{
     MAX_LISTED_CHANGES, StoreChange, StoreChangeKind, StoreGitStatus, default_commit_message,
 };
 
-/// Which view's open store an operation acts on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StoreSection {
-    Specs,
-    Knowledge,
-}
-
-/// Element ids for one view's controls.
+/// Element ids for the panel's controls.
 struct Ids {
     fetch: &'static str,
     pull: &'static str,
@@ -34,24 +27,12 @@ struct Ids {
     commit: &'static str,
 }
 
-impl StoreSection {
-    fn ids(self) -> Ids {
-        match self {
-            StoreSection::Specs => Ids {
-                fetch: "spec-store-fetch",
-                pull: "spec-store-pull",
-                push: "spec-store-push",
-                commit: "spec-store-commit",
-            },
-            StoreSection::Knowledge => Ids {
-                fetch: "knowledge-fetch",
-                pull: "knowledge-pull",
-                push: "knowledge-push",
-                commit: "knowledge-commit",
-            },
-        }
-    }
-}
+const IDS: Ids = Ids {
+    fetch: "library-origin-fetch",
+    pull: "library-origin-pull",
+    push: "library-origin-push",
+    commit: "library-origin-commit",
+};
 
 /// A git operation on the open store.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,30 +44,16 @@ pub(crate) enum StoreOp {
 }
 
 impl StoreOp {
-    pub(crate) fn into_request(self, section: StoreSection, root: String) -> ActionRequest {
-        match (section, self) {
-            (StoreSection::Specs, StoreOp::Fetch) => ActionRequest::SpecStoreFetch { root },
-            (StoreSection::Specs, StoreOp::Pull) => ActionRequest::SpecStorePull { root },
-            (StoreSection::Specs, StoreOp::Commit { paths, message }) => {
-                ActionRequest::SpecStoreCommit {
-                    root,
-                    paths,
-                    message,
-                }
-            }
-            (StoreSection::Specs, StoreOp::Push) => ActionRequest::SpecStorePush { root },
-            (StoreSection::Knowledge, StoreOp::Fetch) => {
-                ActionRequest::KnowledgeStoreFetch { root }
-            }
-            (StoreSection::Knowledge, StoreOp::Pull) => ActionRequest::KnowledgeStorePull { root },
-            (StoreSection::Knowledge, StoreOp::Commit { paths, message }) => {
-                ActionRequest::KnowledgeStoreCommit {
-                    root,
-                    paths,
-                    message,
-                }
-            }
-            (StoreSection::Knowledge, StoreOp::Push) => ActionRequest::KnowledgeStorePush { root },
+    pub(crate) fn into_request(self, root: String) -> ActionRequest {
+        match self {
+            StoreOp::Fetch => ActionRequest::LibraryStoreFetch { root },
+            StoreOp::Pull => ActionRequest::LibraryStorePull { root },
+            StoreOp::Commit { paths, message } => ActionRequest::LibraryStoreCommit {
+                root,
+                paths,
+                message,
+            },
+            StoreOp::Push => ActionRequest::LibraryStorePush { root },
         }
     }
 
@@ -231,53 +198,25 @@ fn change_mark(kind: StoreChangeKind) -> &'static str {
 // ─── Actions ────────────────────────────────────────────────────────────────
 
 impl HarnessPane {
-    fn store_panel(&self, section: StoreSection) -> &StoreGitPanel {
-        match section {
-            StoreSection::Specs => &self.specs.git,
-            StoreSection::Knowledge => &self.knowledge.git,
-        }
-    }
-
-    fn store_panel_mut(&mut self, section: StoreSection) -> &mut StoreGitPanel {
-        match section {
-            StoreSection::Specs => &mut self.specs.git,
-            StoreSection::Knowledge => &mut self.knowledge.git,
-        }
-    }
-
-    /// The open root's key, and the sync state the view last listed for it.
-    fn open_store(&self, section: StoreSection) -> Option<(String, Option<StoreGitStatus>)> {
-        match section {
-            StoreSection::Specs => {
-                let key = self.specs.root_key.clone()?;
-                let git = self
-                    .specs
-                    .stores
-                    .as_ref()
-                    .and_then(|s| s.root(&key))
-                    .and_then(|r| r.git.clone());
-                Some((key, git))
-            }
-            StoreSection::Knowledge => {
-                let key = self.knowledge.root_key.clone()?;
-                let git = self
-                    .knowledge
-                    .stores
-                    .as_ref()
-                    .and_then(|s| s.root(&key))
-                    .and_then(|r| r.git.clone());
-                Some((key, git))
-            }
-        }
+    /// The open origin's key, and the sync state the view last listed for it.
+    fn open_store(&self) -> Option<(String, Option<StoreGitStatus>)> {
+        let key = self.library.root_key.clone()?;
+        let git = self
+            .library
+            .origins
+            .as_ref()
+            .and_then(|o| o.origin(&key))
+            .and_then(|o| o.git.clone());
+        Some((key, git))
     }
 
     /// Run `op` on the open store, then re-list so the badge, the changes and
     /// the entries catch up.
-    fn run_store_op(&mut self, section: StoreSection, op: StoreOp, cx: &mut Context<Self>) {
-        let Some((root, before)) = self.open_store(section) else {
+    fn run_store_op(&mut self, op: StoreOp, cx: &mut Context<Self>) {
+        let Some((root, before)) = self.open_store() else {
             return;
         };
-        let panel = self.store_panel_mut(section);
+        let panel = &mut self.library.git;
         if panel.running.is_some() {
             return;
         }
@@ -288,7 +227,7 @@ impl HarnessPane {
         cx.notify();
 
         let client = self.client.clone();
-        let request = op.clone().into_request(section, root);
+        let request = op.clone().into_request(root);
         cx.spawn(async move |this, cx| {
             let result = smol::unblock(move || {
                 client
@@ -303,7 +242,7 @@ impl HarnessPane {
 
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
-                    let panel = this.store_panel_mut(section);
+                    let panel = &mut this.library.git;
                     panel.running = None;
                     let committed = match &result {
                         Ok(after) => {
@@ -322,10 +261,7 @@ impl HarnessPane {
                     // Re-list after a failure too: a pull that fetched first,
                     // or a push refused after its commit, still changed what
                     // there is to show.
-                    match section {
-                        StoreSection::Specs => this.refresh_specs(cx),
-                        StoreSection::Knowledge => this.refresh_knowledge(cx),
-                    }
+                    this.refresh_library(cx);
                     cx.notify();
                 });
             });
@@ -335,8 +271,8 @@ impl HarnessPane {
 
     /// Commit every committable change listed for the open store, with the
     /// typed message or else the default one the hint offers.
-    fn commit_store(&mut self, section: StoreSection, cx: &mut Context<Self>) {
-        let Some((_, Some(git))) = self.open_store(section) else {
+    fn commit_store(&mut self, cx: &mut Context<Self>) {
+        let Some((_, Some(git))) = self.open_store() else {
             return;
         };
         let changes = committable(&git);
@@ -344,7 +280,8 @@ impl HarnessPane {
             return;
         }
         let typed = self
-            .store_panel(section)
+            .library
+            .git
             .commit_message
             .read(cx)
             .value()
@@ -356,7 +293,7 @@ impl HarnessPane {
             typed
         };
         let paths = changes.into_iter().map(|c| c.path).collect();
-        self.run_store_op(section, StoreOp::Commit { paths, message }, cx);
+        self.run_store_op(StoreOp::Commit { paths, message }, cx);
     }
 }
 
@@ -410,15 +347,14 @@ impl HarnessPane {
     /// why each is unavailable, and the uncommitted files with a commit box.
     pub(super) fn render_store_git(
         &self,
-        section: StoreSection,
         git: &StoreGitStatus,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        let ids = section.ids();
-        let panel = self.store_panel(section);
+        let ids = IDS;
+        let panel = &self.library.git;
         let busy = panel.running.is_some();
-        let open_root = self.open_store(section).map(|(key, _)| key);
+        let open_root = self.open_store().map(|(key, _)| key);
         let own_result = panel.root.is_some() && panel.root == open_root;
 
         let state = match sync_badge(git) {
@@ -443,21 +379,21 @@ impl HarnessPane {
                 ids.fetch,
                 "Fetch",
                 !busy && git.upstream.is_some(),
-                move |this, cx| this.run_store_op(section, StoreOp::Fetch, cx),
+                move |this, cx| this.run_store_op(StoreOp::Fetch, cx),
                 cx,
             ))
             .child(self.store_button(
                 ids.pull,
                 "Pull",
                 !busy && git.can_fast_forward(),
-                move |this, cx| this.run_store_op(section, StoreOp::Pull, cx),
+                move |this, cx| this.run_store_op(StoreOp::Pull, cx),
                 cx,
             ))
             .child(self.store_button(
                 ids.push,
                 "Push",
                 !busy && git.can_push(),
-                move |this, cx| this.run_store_op(section, StoreOp::Push, cx),
+                move |this, cx| this.run_store_op(StoreOp::Push, cx),
                 cx,
             ));
         if let Some(label) = panel.running {
@@ -486,19 +422,18 @@ impl HarnessPane {
             }
         }
         if git.dirty {
-            col = col.child(self.render_store_changes(section, git, cx));
+            col = col.child(self.render_store_changes(git, cx));
         }
         col.into_any_element()
     }
 
     fn render_store_changes(
         &self,
-        section: StoreSection,
         git: &StoreGitStatus,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
-        let panel = self.store_panel(section);
+        let panel = &self.library.git;
         let mut col = v_flex().gap(px(3.0)).pt(px(8.0)).child(
             div()
                 .pb(px(2.0))
@@ -598,10 +533,10 @@ impl HarnessPane {
                     cx,
                 ))
                 .child(h_flex().child(self.store_button(
-                    section.ids().commit,
+                    IDS.commit,
                     &label,
                     panel.running.is_none(),
-                    move |this, cx| this.commit_store(section, cx),
+                    move |this, cx| this.commit_store(cx),
                     cx,
                 ))),
         )
@@ -613,7 +548,7 @@ impl HarnessPane {
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{StoreOp, StoreSection, committable, fetched_ago, outcome, sync_badge};
+    use super::{StoreOp, committable, fetched_ago, outcome, sync_badge};
     use okena_core::api::ActionRequest;
     use okena_core::store_git::{StoreChange, StoreChangeKind, StoreGitStatus};
 
@@ -702,19 +637,21 @@ mod tests {
     }
 
     #[test]
-    fn each_section_posts_its_own_actions() {
-        let root = "store:x".to_string();
-        assert!(matches!(
-            StoreOp::Push.into_request(StoreSection::Specs, root.clone()),
-            ActionRequest::SpecStorePush { .. }
-        ));
-        assert!(matches!(
-            StoreOp::Commit {
-                paths: vec!["a".into()],
-                message: "m".into()
-            }
-            .into_request(StoreSection::Knowledge, root),
-            ActionRequest::KnowledgeStoreCommit { ref paths, .. } if paths == &["a".to_string()]
-        ));
+    fn every_origin_type_posts_the_same_four_actions() {
+        // The key says which origin; nothing about the action says its type.
+        for root in ["spec:store:x", "knowledge:store:x", "freeform:path:/x"] {
+            assert!(matches!(
+                StoreOp::Push.into_request(root.to_string()),
+                ActionRequest::LibraryStorePush { root: ref r } if r == root
+            ));
+            assert!(matches!(
+                StoreOp::Commit {
+                    paths: vec!["a".into()],
+                    message: "m".into()
+                }
+                .into_request(root.to_string()),
+                ActionRequest::LibraryStoreCommit { ref paths, .. } if paths == &["a".to_string()]
+            ));
+        }
     }
 }

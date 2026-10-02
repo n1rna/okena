@@ -308,7 +308,13 @@ pub(super) fn render_action(
     let owned: Vars = vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
     let brief = build(flow, &prompt_roots(projects, settings), &owned);
     let source = match &brief.source {
-        prompts::Source::Root { key, path } => serde_json::json!({ "root": key, "path": path }),
+        // Named by the key the Library lists the origin under, so a launcher
+        // can open the brief's own file there. Briefs resolve across knowledge
+        // origins only.
+        prompts::Source::Root { key, path } => serde_json::json!({
+            "root": okena_core::library::upgrade_key(okena_core::library::OriginType::Knowledge, key),
+            "path": path,
+        }),
         prompts::Source::Builtin => serde_json::json!({ "builtin": true }),
     };
     super::ActionResult::Ok(Some(serde_json::json!({

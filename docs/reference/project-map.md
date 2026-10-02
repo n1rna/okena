@@ -30,7 +30,7 @@ The map lives in the repository's knowledge root: the folder
 ```
 
 The docs are ordinary knowledge docs, with `title`, `description` and `tags`
-frontmatter, so they list in Harness → Knowledge. The manifest sits outside the
+frontmatter, so they list in Harness → Library. The manifest sits outside the
 kind folders, so it is never listed as a doc.
 
 ## The manifest
@@ -291,7 +291,7 @@ not.
   - **CI/CD** pipelines, with provider and files;
   - **Infrastructure**, with kind and files.
 - **Docs:** the project, an area or a concept with a `doc` opens that doc in
-  Harness → Knowledge, in the repository's knowledge root.
+  Harness → Library, in the repository's knowledge root.
 - **Refresh:** an open panel reads the map again every 3 seconds, so a scan's
   result shows up without reopening it.
 - **LINKS:** what this project uses and what uses it, each with its source and

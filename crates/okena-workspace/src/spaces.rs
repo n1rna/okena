@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(s.spaces.len(), 2);
         assert_eq!(s.spaces[0].id, DEFAULT_SPACE_ID);
         assert_eq!(s.space_position("client-a"), Some(2));
-        assert!(space.specs.folders.is_empty());
+        assert!(space.library.spec.folders.is_empty());
         // Adding a space does not switch to it; that is the caller's move.
         assert_eq!(s.active_space, DEFAULT_SPACE_ID);
     }

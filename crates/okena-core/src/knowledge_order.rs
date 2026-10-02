@@ -8,7 +8,7 @@
 //! it and could not be moved.
 //!
 //! The order is now one saved list of root keys, top first, kept with the
-//! user's settings (`harness.knowledge.order`). Only the list is a preference;
+//! user's settings (`spaces[].library.knowledge.order`). Only the list is a preference;
 //! the checkout paths stay machine state in the registry (ADR-0003), so a
 //! settings file synced between machines carries an order that means the same
 //! thing on each and no paths that exist on only one.
@@ -31,16 +31,50 @@
 //! ignored here and dropped by [`normalize`] the next time the order is saved.
 
 use crate::knowledge::KnowledgeRoot;
+use crate::library::LibraryOrigin;
+
+/// Something that layers: a knowledge root as discovery lists it, or the same
+/// root as a Library origin.
+///
+/// The saved order is written in the keys discovery gives (`store:<id>`,
+/// `path:<absolute path>`), which is what a settings file from before the
+/// Library holds, so that is the key each side is asked for.
+pub trait Layer {
+    /// The root's key as the saved order names it.
+    fn order_key(&self) -> &str;
+    /// okena's own `okena-defaults`.
+    fn is_builtin(&self) -> bool;
+}
+
+impl Layer for KnowledgeRoot {
+    fn order_key(&self) -> &str {
+        crate::library::split_key(&self.key).map_or(self.key.as_str(), |(_, inner)| inner)
+    }
+
+    fn is_builtin(&self) -> bool {
+        self.builtin
+    }
+}
+
+impl Layer for LibraryOrigin {
+    fn order_key(&self) -> &str {
+        self.inner_key()
+    }
+
+    fn is_builtin(&self) -> bool {
+        self.builtin
+    }
+}
 
 /// Where `root` sits: its band, then its place within the band.
 ///
 /// The bands are what makes a new root land at the bottom rather than at the
 /// top, and okena's defaults land below even that.
-fn rank(root: &KnowledgeRoot, order: &[String]) -> (u8, usize) {
-    if root.builtin {
+fn rank(root: &impl Layer, order: &[String]) -> (u8, usize) {
+    if root.is_builtin() {
         return (2, 0);
     }
-    match order.iter().position(|key| *key == root.key) {
+    match order.iter().position(|key| key == root.order_key()) {
         Some(at) => (0, at),
         None => (1, 0),
     }
@@ -51,7 +85,7 @@ fn rank(root: &KnowledgeRoot, order: &[String]) -> (u8, usize) {
 /// Stable, so roots the order doesn't name keep the order discovery found them
 /// in — which is the order they used to layer in, and the one thing a user who
 /// has never arranged anything should not see change.
-pub fn apply(roots: &mut [KnowledgeRoot], order: &[String]) {
+pub fn apply<L: Layer>(roots: &mut [L], order: &[String]) {
     roots.sort_by_key(|root| rank(root, order));
 }
 
@@ -62,10 +96,13 @@ pub fn apply(roots: &mut [KnowledgeRoot], order: &[String]) {
 /// left the workspace. `okena-defaults` is left out because it is not part of
 /// the order; an unhealthy root is kept, because it is still a root and its
 /// checkout may well come back.
-pub fn normalize(roots: &[KnowledgeRoot], order: &[String]) -> Vec<String> {
-    let mut listed: Vec<&KnowledgeRoot> = roots.iter().filter(|root| !root.builtin).collect();
-    listed.sort_by_key(|root| rank(root, order));
-    listed.into_iter().map(|root| root.key.clone()).collect()
+pub fn normalize<L: Layer>(roots: &[L], order: &[String]) -> Vec<String> {
+    let mut listed: Vec<&L> = roots.iter().filter(|root| !root.is_builtin()).collect();
+    listed.sort_by_key(|root| rank(*root, order));
+    listed
+        .into_iter()
+        .map(|root| root.order_key().to_string())
+        .collect()
 }
 
 /// The order after dropping the root keyed `key` onto the row at `onto`.
@@ -212,6 +249,16 @@ mod tests {
         // panicking, because a stale drag must not take the window down.
         assert_eq!(at(moved(&list, "a", 9)), ["b", "c", "a"]);
         assert_eq!(at(moved(&list, "zz", 0)), ["zz", "a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_root_carrying_a_library_key_is_still_found_by_the_key_the_order_holds() {
+        // The daemon lists roots under Library keys (`knowledge:store:a`); the
+        // order was saved, and still is, in the keys discovery gives.
+        let mut roots = vec![root("knowledge:store:a"), root("knowledge:store:b")];
+        apply(&mut roots, &order(&["store:b", "store:a"]));
+        assert_eq!(keys(&roots), ["knowledge:store:b", "knowledge:store:a"]);
+        assert_eq!(normalize(&roots, &[]), ["store:b", "store:a"]);
     }
 
     #[test]

@@ -18,19 +18,18 @@ use std::path::Path;
 const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Every root context can come from in this workspace: each repository's map,
-/// and the knowledge and OpenSpec roots discovery finds — the same ones the
-/// Knowledge and Specs sections list.
+/// and the Library's origins of every type — the same ones the Library lists,
+/// under the same keys.
 pub fn context_catalog(projects: &[ProjectData], settings: &AppSettings) -> Catalog {
-    let knowledge = okena_knowledge::discover::discover(&super::knowledge::knowledge_sources(
+    let knowledge = super::knowledge::discovered(&super::knowledge::knowledge_sources(
         &okena_knowledge::registry::registry_path(&get_config_dir()),
         &super::knowledge::knowledge_project_sources(projects, settings),
         settings,
     ));
-    let specs = okena_openspec::discover::discover(
-        &super::specs::dirs(settings),
-        &super::specs::spec_sources(projects, settings),
-    );
-    Catalog::build(catalog_projects(projects), &knowledge, &specs)
+    let specs =
+        super::specs::discovered(&super::specs::spec_sources(projects, settings), settings);
+    let freeform = super::freeform::discover(&settings.active_space().freeform_folders());
+    Catalog::build(catalog_projects(projects), &knowledge, &specs, &freeform)
 }
 
 /// The projects context can come from: repositories, never a worktree (a
@@ -251,6 +250,7 @@ mod tests {
                 ..Default::default()
             },
             &Default::default(),
+            &[],
         )
     }
 

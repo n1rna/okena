@@ -377,6 +377,16 @@ mod tests {
             let back: WindowState = serde_json::from_str(&json).expect("decode");
             assert_eq!(back.harness_section, Some(section));
         }
+        // A layout saved before the Library reopens on it: Specs and
+        // Knowledge are where its origins used to be shown (QBL-440).
+        for old in ["specs", "knowledge"] {
+            let back: WindowState =
+                serde_json::from_str(&format!(r#"{{"harness_section":"{old}"}}"#)).expect("decode");
+            assert_eq!(back.harness_section, Some(HarnessSection::Library), "{old}");
+            // And it is saved back under the name it has now.
+            let json = serde_json::to_string(&back).expect("encode");
+            assert!(json.contains(r#""harness_section":"library""#), "got {json}");
+        }
         // A section a newer okena wrote must not cost the whole layout file.
         let back: WindowState =
             serde_json::from_str(r#"{"harness_section":"deployments","sidebar_open":true}"#)

@@ -479,7 +479,7 @@ mod tests {
         let expected = |flow: Flow| match flow {
             TaskStart | TasksStart | TaskCoordinate | TasksCoordinate | TaskVerify => Some("opus"),
             TaskBreakDown | TaskCreate | TaskRefine | SpecDraft | DocumentRefine
-            | KnowledgeDraft | ProjectScan | ProjectsScan => Some("sonnet"),
+            | KnowledgeDraft | FreeformDraft | ProjectScan | ProjectsScan => Some("sonnet"),
             // Building an extension is implementation work, not a helper.
             ExtensionBuild => Some("opus"),
             AgentSession => None,

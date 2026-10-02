@@ -59,36 +59,33 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         // full tree) per selected project, each running its creation hooks.
         // The fast bucket's 10 s cannot cover one worktree, let alone several.
         ActionRequest::TaskStartWork { .. } => ActionClientKind::LongMutation,
-        // Drafting a change creates a project — which runs the user's
-        // project-creation hooks — and launches an agent. Hooks are arbitrary
-        // shell with no bound, so the fast bucket is the wrong budget.
-        ActionRequest::SpecDraftChange { .. } => ActionClientKind::LongMutation,
-        // Store setup runs `git init` and a commit — which may run the user's
-        // commit hooks — and both may wait up to 5 s on the registry lock an
-        // `openspec` command is holding.
-        ActionRequest::SpecStoreSetup { .. } | ActionRequest::SpecStoreRegister { .. } => {
+        // Drafting in the Library — a spec change, a knowledge entry — creates
+        // a project, which runs the user's project-creation hooks, and
+        // launches an agent. Hooks are arbitrary shell with no bound, so the
+        // fast bucket is the wrong budget. Refining an open document is the
+        // same shape.
+        ActionRequest::LibraryDraft { .. } | ActionRequest::LibraryRefineDocument { .. } => {
             ActionClientKind::LongMutation
         }
-        // Same shape as drafting a change: creates a project, runs its hooks,
-        // and launches an agent. Hooks are arbitrary shell with no bound.
+        // Adding or removing an origin, whatever its type. A clone is
+        // network-bound and unbounded; setup runs `git init` and a commit,
+        // which may run the user's commit hooks; and every change to a spec
+        // origin may wait up to 5 s on the registry lock an `openspec` command
+        // is holding.
+        ActionRequest::LibraryStoreClone { .. }
+        | ActionRequest::LibraryStoreSetup { .. }
+        | ActionRequest::LibraryStoreRegister { .. }
+        | ActionRequest::LibraryStoreUnregister { .. }
+        | ActionRequest::LibrarySetDefaultStore { .. } => ActionClientKind::LongMutation,
+        // An origin's git: a push is network-bound and unbounded, a pull
+        // fetches first, and a commit runs the user's commit hooks.
+        ActionRequest::LibraryStoreFetch { .. }
+        | ActionRequest::LibraryStorePull { .. }
+        | ActionRequest::LibraryStoreCommit { .. }
+        | ActionRequest::LibraryStorePush { .. } => ActionClientKind::LongMutation,
+        // Same shape as drafting in the Library: creates a project, runs its
+        // hooks, and launches an agent. Hooks are arbitrary shell with no bound.
         ActionRequest::AgentStartSession { .. } => ActionClientKind::LongMutation,
-        // A clone and a push are network-bound and unbounded, a pull fetches
-        // first, and setup and commit run the user's commit hooks. The same
-        // holds for the store git of both sections.
-        ActionRequest::SpecStoreClone { .. }
-        | ActionRequest::KnowledgeStoreClone { .. }
-        | ActionRequest::KnowledgeStoreFetch { .. }
-        | ActionRequest::KnowledgeStorePull { .. }
-        | ActionRequest::KnowledgeStoreCommit { .. }
-        | ActionRequest::KnowledgeStorePush { .. }
-        | ActionRequest::KnowledgeStoreSetup { .. }
-        | ActionRequest::SpecStoreFetch { .. }
-        | ActionRequest::SpecStorePull { .. }
-        | ActionRequest::SpecStoreCommit { .. }
-        | ActionRequest::SpecStorePush { .. } => ActionClientKind::LongMutation,
-        // Same shape as drafting a spec change: creates a project, runs its
-        // hooks, and launches an agent.
-        ActionRequest::KnowledgeDraft { .. } => ActionClientKind::LongMutation,
         // Installing clones and may build from source for minutes; an
         // action may start an agent; an agent's destructive call waits for
         // the user for up to ten minutes.
@@ -101,10 +98,6 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         | ActionRequest::ExtensionRunAction { .. }
         | ActionRequest::ExtensionAgentCall { .. } => ActionClientKind::LongMutation,
         ActionRequest::ExtensionQuery { .. } => ActionClientKind::Search,
-        // Refining an open document is the same shape again, in either section.
-        ActionRequest::SpecRefineDocument { .. } | ActionRequest::KnowledgeRefineDocument { .. } => {
-            ActionClientKind::LongMutation
-        }
         // Same again: a scan creates a session project, runs its hooks, and
         // launches an agent. Reading a map stays in the fast bucket — one
         // small file.
@@ -113,17 +106,15 @@ fn client_kind_for(action: &ActionRequest) -> ActionClientKind {
         }
         // Reads the map of every repository okena has open.
         ActionRequest::ProjectLinks => ActionClientKind::Search,
-        // A listing runs `git status` in every store, a tree reads the head
-        // of every entry and a search reads every file of every root: more
-        // than the fast bucket allows on a large store.
+        // A listing runs `git status` in every origin's checkout, a tree reads
+        // the head of every entry and a search reads every file of every
+        // origin: more than the fast bucket allows on a large one.
         // A context search runs discovery and reads the roots it has not
         // cached yet: a first search over a large workspace outlasts the fast
         // bucket.
-        ActionRequest::KnowledgeStores
-        | ActionRequest::KnowledgeTree { .. }
-        | ActionRequest::KnowledgeSearch { .. }
-        | ActionRequest::SpecStores
-        | ActionRequest::SpecSearch { .. }
+        ActionRequest::LibraryOrigins
+        | ActionRequest::LibraryTree { .. }
+        | ActionRequest::LibrarySearch { .. }
         | ActionRequest::ContextSearch { .. } => ActionClientKind::Search,
         // Task-provider calls cross the internet. The provider's own HTTP
         // timeout is 20 s, so the fast bucket would abandon the request before
@@ -836,36 +827,24 @@ mod action_timeout_tests {
     }
 
     #[test]
-    fn drafting_a_spec_gets_the_long_mutation_budget() {
-        // It creates a project (running its hooks) and launches an agent.
-        let action = ActionRequest::SpecDraftChange {
-            root: None,
-            idea: "add login".into(),
-            name: None,
-            agent_command: None,
-            model: None,
-            context: Vec::new(),
-        };
-        assert!(matches!(
-            client_kind_for(&action),
-            ActionClientKind::LongMutation
-        ));
-    }
-
-    #[test]
-    fn store_setup_and_register_outlast_git_and_the_registry_lock() {
-        // Setup commits (hooks may run) and both may wait 5 s on a lock an
-        // `openspec` command holds.
+    fn drafting_and_refining_in_the_library_get_the_long_mutation_budget() {
+        // Each creates a project (running its hooks) and launches an agent.
         for action in [
-            ActionRequest::SpecStoreSetup {
-                id: "team-plans".into(),
-                path: "~/openspec/team-plans".into(),
-                remote: None,
-                init_git: true,
+            ActionRequest::LibraryDraft {
+                root: None,
+                request: "add login".into(),
+                name: None,
+                agent_command: None,
+                model: None,
+                context: Vec::new(),
             },
-            ActionRequest::SpecStoreRegister {
-                path: "~/openspec/team-plans".into(),
-                id: None,
+            ActionRequest::LibraryRefineDocument {
+                root: "knowledge:store:eng".into(),
+                path: "docs/ci.md".into(),
+                request: "tighten it".into(),
+                agent_command: None,
+                model: None,
+                context: Vec::new(),
             },
         ] {
             assert!(matches!(
@@ -876,20 +855,49 @@ mod action_timeout_tests {
     }
 
     #[test]
-    fn store_git_outlasts_the_network_and_commit_hooks() {
+    fn adding_an_origin_outlasts_git_and_the_registry_lock_whatever_its_type() {
+        // A clone reaches a remote, setup commits (hooks may run), and a spec
+        // origin may wait 5 s on a lock an `openspec` command holds.
+        use okena_core::library::OriginType;
+        for origin_type in OriginType::all() {
+            for action in [
+                ActionRequest::LibraryStoreSetup {
+                    origin_type,
+                    id: "team-plans".into(),
+                    path: "~/openspec/team-plans".into(),
+                    name: None,
+                    description: None,
+                    remote: None,
+                    init_git: true,
+                },
+                ActionRequest::LibraryStoreRegister {
+                    origin_type,
+                    path: "~/openspec/team-plans".into(),
+                    id: None,
+                },
+                ActionRequest::LibraryStoreClone {
+                    origin_type,
+                    url: "git@example.com:acme/plans.git".into(),
+                    path: None,
+                },
+            ] {
+                assert!(
+                    matches!(client_kind_for(&action), ActionClientKind::LongMutation),
+                    "{action:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn origin_git_outlasts_the_network_and_commit_hooks() {
         // Fetch, pull and push reach a remote; commit runs the user's hooks;
-        // a listing runs `git status` in every store checkout.
+        // a listing runs `git status` in every origin's checkout.
         for action in [
-            ActionRequest::SpecStoreFetch { root: "k".into() },
-            ActionRequest::SpecStorePull { root: "k".into() },
-            ActionRequest::SpecStorePush { root: "k".into() },
-            ActionRequest::KnowledgeStorePush { root: "k".into() },
-            ActionRequest::SpecStoreCommit {
-                root: "k".into(),
-                paths: vec!["a".into()],
-                message: "m".into(),
-            },
-            ActionRequest::KnowledgeStoreCommit {
+            ActionRequest::LibraryStoreFetch { root: "k".into() },
+            ActionRequest::LibraryStorePull { root: "k".into() },
+            ActionRequest::LibraryStorePush { root: "k".into() },
+            ActionRequest::LibraryStoreCommit {
                 root: "k".into(),
                 paths: vec!["a".into()],
                 message: "m".into(),
@@ -900,21 +908,32 @@ mod action_timeout_tests {
                 ActionClientKind::LongMutation
             ));
         }
-        assert!(matches!(
-            client_kind_for(&ActionRequest::SpecStores),
-            ActionClientKind::Search
-        ));
+        for action in [
+            ActionRequest::LibraryOrigins,
+            ActionRequest::LibraryTree { root: None },
+            ActionRequest::LibrarySearch {
+                query: "x".into(),
+                roots: Vec::new(),
+                types: Vec::new(),
+                kinds: Vec::new(),
+            },
+        ] {
+            assert!(matches!(client_kind_for(&action), ActionClientKind::Search));
+        }
     }
 
     #[test]
-    fn reading_specs_stays_in_the_fast_bucket() {
-        // All local filesystem reads; borrowing a longer budget would only
-        // delay how fast a broken connection is reported.
+    fn reading_and_writing_one_file_stays_in_the_fast_bucket() {
+        // One local file; borrowing a longer budget would only delay how fast
+        // a broken connection is reported.
         for action in [
-            ActionRequest::SpecsTree { root: None },
-            ActionRequest::SpecRead {
-                root: Some("store:team-plans".into()),
+            ActionRequest::LibraryRead {
+                root: Some("spec:store:team-plans".into()),
                 path: "openspec/specs/auth/spec.md".into(),
+            },
+            ActionRequest::LibraryFileDelete {
+                root: Some("freeform:path:/notes".into()),
+                path: "old.md".into(),
             },
         ] {
             assert!(matches!(client_kind_for(&action), ActionClientKind::Fast));

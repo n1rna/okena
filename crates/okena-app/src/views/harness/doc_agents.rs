@@ -1,13 +1,13 @@
-//! Agents on documents: the card under an open spec or knowledge file that
-//! starts one to change it, and the Drafting rows a new change or a knowledge
-//! draft shows in the tree while its agent writes.
+//! Agents on Library documents: the card under an open document that starts
+//! one to change it, and the Drafting rows a new change, a knowledge draft or
+//! a freeform draft shows in the tree while its agent writes.
 //!
 //! Every card and row lists only the sessions started for its own target, read
 //! from the purpose the daemon records when it starts one. A session shows
 //! where it belongs rather than in a catch-all list under the tree, which
 //! listed every spec or knowledge session whatever it was writing.
 
-use super::{HarnessPane, HarnessSection};
+use super::HarnessPane;
 use crate::theme::{theme, with_alpha};
 use crate::ui::tokens::{ui_text_md, ui_text_ms};
 use crate::views::components::source_editor::BriefInput;
@@ -17,6 +17,7 @@ use gpui_component::h_flex;
 use okena_core::api::ActionRequest;
 use okena_core::harness::AgentPurpose;
 use okena_core::knowledge::KnowledgeTree;
+use okena_core::library::FreeformTree;
 use okena_core::specs::SpecChange;
 use okena_ui::agent_launcher::Launch;
 use std::collections::HashSet;
@@ -42,33 +43,39 @@ impl DocRefine {
 }
 
 /// Whether a session started for `purpose` belongs on the card of `path` in
-/// root `root` of `section`.
+/// the origin keyed `root`.
+///
+/// The purpose names its origin by Library key, so a spec session can never
+/// land on a knowledge file that happens to share a store id and a path.
 ///
 /// A change's drafting agent belongs on every file of that change: that is
 /// what it is writing, and once those files are in the tree the Drafting row
 /// that stood in for them is gone.
-pub(crate) fn serves_document(
-    section: HarnessSection,
-    purpose: &AgentPurpose,
-    root: &str,
-    path: &str,
-) -> bool {
-    match (section, purpose) {
-        (HarnessSection::Specs, AgentPurpose::SpecEdit { root: r, path: p })
-        | (HarnessSection::Knowledge, AgentPurpose::KnowledgeEdit { root: r, path: p }) => {
-            r == root && p == path
+pub(crate) fn serves_document(purpose: &AgentPurpose, root: &str, path: &str) -> bool {
+    match purpose {
+        AgentPurpose::SpecEdit { path: p, .. }
+        | AgentPurpose::KnowledgeEdit { path: p, .. }
+        | AgentPurpose::FreeformEdit { path: p, .. } => {
+            purpose.origin().as_deref() == Some(root) && p == path
         }
-        (HarnessSection::Specs, AgentPurpose::SpecDraft { root: r, change }) => {
-            in_root(r, root) && change_of(path) == Some(change.as_str())
+        AgentPurpose::SpecDraft { change, .. } => {
+            drafts_in(purpose, root) && change_of(path) == Some(change.as_str())
         }
         _ => false,
     }
 }
 
-/// Whether a draft recorded in `recorded` is in `root`. A draft from before
-/// the root was recorded has none, and is shown wherever its change is.
-fn in_root(recorded: &str, root: &str) -> bool {
-    recorded.is_empty() || recorded == root
+/// Whether the spec draft `purpose` is in the origin keyed `root`. A draft
+/// from before its origin was recorded names none, and is shown wherever its
+/// change is — in a spec origin, since that is all a change can be in.
+pub(crate) fn drafts_in(purpose: &AgentPurpose, root: &str) -> bool {
+    match purpose.origin() {
+        Some(origin) => origin == root,
+        None => {
+            okena_core::library::split_key(root).map(|(t, _)| t)
+                == Some(okena_core::library::OriginType::Spec)
+        }
+    }
 }
 
 /// The change a path of a spec root is inside, if any. Archived changes are
@@ -90,7 +97,17 @@ pub(crate) fn only_scaffolded(change: &SpecChange) -> bool {
 /// that was not there when it started. Without a record of what was there — a
 /// draft started elsewhere, or before a restart — it cannot tell, and says no.
 pub(crate) fn draft_landed(before: Option<&HashSet<String>>, tree: &KnowledgeTree) -> bool {
-    before.is_some_and(|before| tree.entries.iter().any(|e| !before.contains(&e.path)))
+    any_new(before, tree.entries.iter().map(|e| e.path.as_str()))
+}
+
+/// The same for a freeform draft: the tree lists a document that was not
+/// there when it started.
+pub(crate) fn freeform_draft_landed(before: Option<&HashSet<String>>, tree: &FreeformTree) -> bool {
+    any_new(before, tree.documents.iter().map(|d| d.path.as_str()))
+}
+
+fn any_new<'a>(before: Option<&HashSet<String>>, mut now: impl Iterator<Item = &'a str>) -> bool {
+    before.is_some_and(|before| now.any(|path| !before.contains(path)))
 }
 
 impl HarnessPane {
@@ -109,50 +126,23 @@ impl HarnessPane {
             .collect()
     }
 
-    fn doc_refine_mut(&mut self, section: HarnessSection) -> &mut DocRefine {
-        match section {
-            HarnessSection::Specs => &mut self.spec_refine,
-            _ => &mut self.knowledge_refine,
-        }
-    }
-
-    /// Root key and path of the document `section` has open, and whether it
-    /// holds unsaved edits.
-    fn open_document(&self, section: HarnessSection) -> Option<(String, String, bool)> {
-        let (root, path, documents) = match section {
-            HarnessSection::Specs => (
-                self.specs.root_key.clone()?,
-                self.specs.selected.clone()?,
-                &self.specs.documents,
-            ),
-            HarnessSection::Knowledge => (
-                self.knowledge.root_key.clone()?,
-                self.knowledge.selected.clone()?,
-                &self.knowledge.documents,
-            ),
-            HarnessSection::Tasks | HarnessSection::Testing => return None,
-        };
-        let dirty = documents.is_dirty(&root, &path);
+    /// Origin key and path of the open document, and whether it holds
+    /// unsaved edits.
+    fn open_document(&self) -> Option<(String, String, bool)> {
+        let root = self.library.root_key.clone()?;
+        let path = self.library.selected.clone()?;
+        let dirty = self.library.documents.is_dirty(&root, &path);
         Some((root, path, dirty))
     }
 
     /// The card under an open document: say what to change, start an agent on
     /// it, and see the agents already on this file.
-    pub(super) fn render_document_agent(
-        &self,
-        section: HarnessSection,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let (root, path, dirty) = self.open_document(section)?;
+    pub(super) fn render_document_agent(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (root, path, dirty) = self.open_document()?;
         let t = theme(cx);
-        let state = match section {
-            HarnessSection::Specs => &self.spec_refine,
-            _ => &self.knowledge_refine,
-        };
+        let state = &self.refine;
         let sessions = self.launcher_sessions(
-            self.sessions_for(cx, |purpose| {
-                serves_document(section, purpose, &root, &path)
-            }),
+            self.sessions_for(cx, |purpose| serves_document(purpose, &root, &path)),
             cx,
         );
         // A request can run to a few lines, so the box shows a few.
@@ -160,7 +150,7 @@ impl HarnessPane {
 
         Some(
             okena_ui::agent_launcher::AgentLauncher::new(
-                format!("{}-document-agent", section.slug()),
+                "library-document-agent",
                 "Refine with agent",
             )
             .options(crate::views::agent_session::launch_options(
@@ -181,11 +171,7 @@ impl HarnessPane {
             .on_configure(
                 "Choose projects and context…",
                 cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                    let target = match section {
-                        HarnessSection::Specs => super::context_dialog::ContextTarget::SpecRefine,
-                        _ => super::context_dialog::ContextTarget::KnowledgeRefine,
-                    };
-                    this.open_context_dialog(target, cx);
+                    this.open_context_dialog(super::context_dialog::ContextTarget::Refine, cx);
                 }),
             )
             .brief(crate::views::launch_briefs::brief_for(
@@ -195,12 +181,7 @@ impl HarnessPane {
             ))
             .on_open_brief(self.open_brief())
             .on_launch(cx.listener(move |this, launch: &Launch, _window, cx| {
-                this.start_document_refine(
-                    section,
-                    launch.command.to_string(),
-                    launch.model.clone(),
-                    cx,
-                );
+                this.start_document_refine(launch.command.to_string(), launch.model.clone(), cx);
             }))
             .on_open(cx.listener(|this, id: &SharedString, _window, cx| {
                 this.open_session(id.to_string(), cx);
@@ -211,15 +192,14 @@ impl HarnessPane {
 
     fn start_document_refine(
         &mut self,
-        section: HarnessSection,
         agent: String,
         model: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some((root, path, dirty)) = self.open_document(section) else {
+        let Some((root, path, dirty)) = self.open_document() else {
             return;
         };
-        if self.doc_refine_mut(section).starting {
+        if self.refine.starting {
             return;
         }
         // Checked again here, not only on the card: a save can fail between
@@ -228,36 +208,23 @@ impl HarnessPane {
             self.report_error("Save your edits first.", cx);
             return;
         }
-        let request = self.doc_refine_mut(section).request.value(cx).trim().to_string();
+        let request = self.refine.request.value(cx).trim().to_string();
         if request.is_empty() {
             self.report_error("Say what to change first.", cx);
             return;
         }
-        self.doc_refine_mut(section).starting = true;
+        self.refine.starting = true;
         cx.notify();
 
         let agent_command = Some(agent);
-        let context = super::context_dialog::picked_context(
-            self.doc_refine_mut(section).pickers.as_ref(),
-            cx,
-        );
-        let action = match section {
-            HarnessSection::Specs => ActionRequest::SpecRefineDocument {
-                context,
-                root,
-                path,
-                request,
-                agent_command,
-                model,
-            },
-            _ => ActionRequest::KnowledgeRefineDocument {
-                context,
-                root,
-                path,
-                request,
-                agent_command,
-                model,
-            },
+        let context = super::context_dialog::picked_context(self.refine.pickers.as_ref(), cx);
+        let action = ActionRequest::LibraryRefineDocument {
+            context,
+            root,
+            path,
+            request,
+            agent_command,
+            model,
         };
         let client = self.client.clone();
         cx.spawn(async move |this, cx| {
@@ -269,14 +236,14 @@ impl HarnessPane {
             .await;
             cx.update(|cx| {
                 let _ = this.update(cx, |this, cx| {
-                    let state = this.doc_refine_mut(section);
+                    let state = &mut this.refine;
                     state.starting = false;
                     let pickers = state.pickers.clone();
                     // Not opening it: the card lists it, and you are reading
                     // the file it is about to change.
                     match result {
                         Ok(_) => {
-                            this.doc_refine_mut(section).request.clear();
+                            this.refine.request.clear();
                             super::context_dialog::clear_picked_context(pickers, cx);
                         }
                         Err(e) => this.report_error(e, cx),
@@ -389,37 +356,65 @@ impl HarnessPane {
         if change.archived || !only_scaffolded(change) {
             return Vec::new();
         }
-        let root = self.specs.root_key.clone().unwrap_or_default();
+        let root = self.library.root_key.clone().unwrap_or_default();
         self.sessions_for(cx, |purpose| {
-            matches!(purpose, AgentPurpose::SpecDraft { root: r, change: c }
-                if in_root(r, &root) && *c == change.name)
+            matches!(purpose, AgentPurpose::SpecDraft { change: c, .. } if *c == change.name)
+                && drafts_in(purpose, &root)
         })
         .iter()
         .filter_map(|id| self.render_drafting_row(id, change.name.clone(), 12.0, cx))
         .collect()
     }
 
-    /// Drafting rows for knowledge drafts into the open root whose files have
-    /// not shown up yet.
+    /// Drafting rows for knowledge drafts into the open origin whose files
+    /// have not shown up yet.
     pub(super) fn render_knowledge_drafts(
         &self,
         tree: &KnowledgeTree,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let Some(root) = self.knowledge.root_key.clone() else {
+        self.render_draft_rows(
+            |purpose| matches!(purpose, AgentPurpose::KnowledgeDraft { .. }),
+            |before| draft_landed(before, tree),
+            "Knowledge: ",
+            cx,
+        )
+    }
+
+    /// Drafting rows for freeform drafts into the open origin whose documents
+    /// have not shown up yet.
+    pub(super) fn render_freeform_drafts(
+        &self,
+        tree: &FreeformTree,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        self.render_draft_rows(
+            |purpose| matches!(purpose, AgentPurpose::FreeformDraft { .. }),
+            |before| freeform_draft_landed(before, tree),
+            "Documents: ",
+            cx,
+        )
+    }
+
+    /// Drafting rows for the sessions of one kind writing into the open
+    /// origin, until `landed` says what they wrote is in the tree.
+    /// `goal_prefix` is what the daemon puts before the request in the
+    /// session's goal.
+    fn render_draft_rows(
+        &self,
+        is_draft: impl Fn(&AgentPurpose) -> bool,
+        landed: impl Fn(Option<&HashSet<String>>) -> bool,
+        goal_prefix: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(root) = self.library.root_key.clone() else {
             return Vec::new();
         };
-        let ids = self.sessions_for(
-            cx,
-            |purpose| matches!(purpose, AgentPurpose::KnowledgeDraft { root: r } if *r == root),
-        );
+        let ids = self.sessions_for(cx, |purpose| {
+            is_draft(purpose) && purpose.origin().as_deref() == Some(root.as_str())
+        });
         ids.iter()
-            .filter(|id| {
-                !draft_landed(
-                    self.knowledge_draft.baselines.get(&self.daemon_id(id)),
-                    tree,
-                )
-            })
+            .filter(|id| !landed(self.knowledge_draft.baselines.get(&self.daemon_id(id))))
             .filter_map(|id| {
                 // The request, which is what the user will recognize it by.
                 let title = self
@@ -428,7 +423,7 @@ impl HarnessPane {
                     .project(id)
                     .and_then(|p| p.custom_session.clone())
                     .map(|goal| {
-                        goal.strip_prefix("Knowledge: ")
+                        goal.strip_prefix(goal_prefix)
                             .map(str::to_string)
                             .unwrap_or(goal)
                     })
@@ -443,8 +438,11 @@ impl HarnessPane {
 mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
-    use super::{change_of, draft_landed, only_scaffolded, serves_document};
-    use okena_core::harness::{AgentPurpose, HarnessSection};
+    use super::{
+        change_of, draft_landed, drafts_in, freeform_draft_landed, only_scaffolded,
+        serves_document,
+    };
+    use okena_core::harness::AgentPurpose;
     use okena_core::knowledge::{KnowledgeEntry, KnowledgeKind, KnowledgeTree};
     use okena_core::specs::{SpecChange, SpecDoc};
     use std::collections::HashSet;
@@ -454,63 +452,109 @@ mod tests {
     #[test]
     fn a_document_card_lists_only_its_own_file() {
         let edit = AgentPurpose::SpecEdit {
-            root: "store:plans".into(),
+            root: "spec:store:plans".into(),
             path: "openspec/specs/auth/spec.md".into(),
         };
-        let s = HarnessSection::Specs;
         assert!(serves_document(
-            s,
             &edit,
-            "store:plans",
+            "spec:store:plans",
             "openspec/specs/auth/spec.md"
         ));
         assert!(!serves_document(
-            s,
             &edit,
-            "store:plans",
+            "spec:store:plans",
             "openspec/specs/billing/spec.md"
         ));
         assert!(!serves_document(
-            s,
             &edit,
-            "store:other",
+            "spec:store:other",
             "openspec/specs/auth/spec.md"
         ));
-        // The same root key and path in the other section is another file.
+        // The same store id and path in a knowledge origin is another file.
         assert!(!serves_document(
-            HarnessSection::Knowledge,
             &edit,
-            "store:plans",
+            "knowledge:store:plans",
             "openspec/specs/auth/spec.md"
         ));
     }
 
     #[test]
+    fn a_freeform_document_s_card_lists_the_sessions_refining_it() {
+        let edit = AgentPurpose::FreeformEdit {
+            root: "freeform:path:/notes".into(),
+            path: "workflows/release.md".into(),
+        };
+        assert!(serves_document(&edit, "freeform:path:/notes", "workflows/release.md"));
+        assert!(!serves_document(&edit, "freeform:path:/notes", "README.md"));
+        assert!(!serves_document(&edit, "freeform:path:/other", "workflows/release.md"));
+        // A draft writes wherever it likes, so it is on no one document.
+        let draft = AgentPurpose::FreeformDraft {
+            root: "freeform:path:/notes".into(),
+        };
+        assert!(!serves_document(&draft, "freeform:path:/notes", "README.md"));
+    }
+
+    #[test]
+    fn a_freeform_draft_has_landed_once_a_new_document_appears() {
+        use okena_core::library::{FreeformDoc, FreeformTree};
+        let tree = |paths: &[&str]| FreeformTree {
+            documents: paths
+                .iter()
+                .map(|p| FreeformDoc {
+                    path: (*p).to_string(),
+                    title: (*p).to_string(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let before: HashSet<String> = ["README.md".to_string()].into();
+        assert!(!freeform_draft_landed(Some(&before), &tree(&["README.md"])));
+        assert!(freeform_draft_landed(
+            Some(&before),
+            &tree(&["README.md", "workflows/release.md"])
+        ));
+        // Nothing recorded: it cannot tell, and keeps the row.
+        assert!(!freeform_draft_landed(None, &tree(&["README.md", "x.md"])));
+    }
+
+    #[test]
+    fn a_session_from_before_typed_keys_still_lists_on_its_document() {
+        // Recorded as `store:eng` by a session started before the Library;
+        // the purpose's kind says it was a knowledge origin.
+        let edit = AgentPurpose::KnowledgeEdit {
+            root: "store:eng".into(),
+            path: "docs/ci.md".into(),
+        };
+        assert!(serves_document(&edit, "knowledge:store:eng", "docs/ci.md"));
+        assert!(!serves_document(&edit, "spec:store:eng", "docs/ci.md"));
+    }
+
+    #[test]
     fn a_change_s_drafting_agent_is_on_every_file_of_that_change() {
         let draft = AgentPurpose::SpecDraft {
-            root: "store:plans".into(),
+            root: "spec:store:plans".into(),
             change: "add-login".into(),
         };
-        let s = HarnessSection::Specs;
-        assert!(serves_document(s, &draft, "store:plans", PROPOSAL));
+        assert!(serves_document(&draft, "spec:store:plans", PROPOSAL));
         assert!(serves_document(
-            s,
             &draft,
-            "store:plans",
+            "spec:store:plans",
             "openspec/changes/add-login/specs/auth/spec.md"
         ));
         assert!(!serves_document(
-            s,
             &draft,
-            "store:plans",
+            "spec:store:plans",
             "openspec/changes/add-login-v2/proposal.md"
         ));
-        // A draft from before roots were recorded is shown in any root.
+        // A draft from before origins were recorded is shown in any spec
+        // origin, and in no other type's.
         let legacy = AgentPurpose::SpecDraft {
             root: String::new(),
             change: "add-login".into(),
         };
-        assert!(serves_document(s, &legacy, "store:other", PROPOSAL));
+        assert!(serves_document(&legacy, "spec:store:other", PROPOSAL));
+        assert!(drafts_in(&legacy, "spec:path:/repo"));
+        assert!(!drafts_in(&legacy, "knowledge:store:other"));
     }
 
     #[test]

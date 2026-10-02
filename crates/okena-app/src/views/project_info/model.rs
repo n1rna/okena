@@ -6,7 +6,7 @@
 use crate::workspace::state::{ProjectData, Workspace};
 use okena_core::api::{ApiGitStatus, CiStatus, PrState, RepoPullRequest};
 use okena_core::context::{ContextItem, ContextKind, ContextOwner};
-use okena_core::knowledge::KnowledgeStores;
+use okena_core::library::{LibraryOrigins, OriginType};
 use okena_core::project_map::{InterfaceKind, ProjectLinks};
 use std::collections::HashSet;
 use std::path::Path;
@@ -455,8 +455,8 @@ pub(super) fn compact_links(links: &ProjectLinks, me: &str) -> CompactLinks {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreChip {
     pub name: String,
-    /// The root to open Knowledge on. `None` when the store is not on this
-    /// machine: the chip is muted and opens nothing.
+    /// The origin to open the Library on, by its Library key. `None` when the
+    /// store is not on this machine: the chip is muted and opens nothing.
     pub root_key: Option<String>,
     /// Why it is unavailable, for the tooltip.
     pub reason: Option<String>,
@@ -464,14 +464,16 @@ pub struct StoreChip {
 
 /// One chip per store the project at `project_path` names in its
 /// `.okena/knowledge.yaml`, in the order it names them.
-pub(super) fn store_chips(stores: &KnowledgeStores, project_path: &str) -> Vec<StoreChip> {
+pub(super) fn store_chips(origins: &LibraryOrigins, project_path: &str) -> Vec<StoreChip> {
     let project = okena_core::fs::expand_home(project_path);
-    stores
+    origins
         .pointers
         .iter()
-        .filter(|p| Path::new(&p.path) == project)
+        // The knowledge stores it follows; a `store:` pointer in its OpenSpec
+        // config is a different thing and is not a chip here.
+        .filter(|p| p.origin_type == OriginType::Knowledge && Path::new(&p.path) == project)
         .map(|p| {
-            let root = p.root_key.as_deref().and_then(|key| stores.root(key));
+            let root = p.root_key.as_deref().and_then(|key| origins.origin(key));
             StoreChip {
                 name: root.map_or(p.store_id.clone(), |r| r.name.clone()),
                 root_key: p.root_key.clone(),
@@ -486,35 +488,23 @@ pub(super) fn store_chips(stores: &KnowledgeStores, project_path: &str) -> Vec<S
         .collect()
 }
 
-/// Which harness section a file opens in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RootSection {
-    Knowledge,
-    Specs,
-}
-
-/// Where a file opens: the root holding it, and its path inside that root.
+/// Where a file opens in the Library: the origin holding it, and its path
+/// inside that origin.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileTarget {
-    pub section: RootSection,
+    /// The origin's Library key, which says its type.
     pub root_key: String,
     pub path: String,
 }
 
-/// The root an absolute `path` lies in, among knowledge and spec roots given
-/// as `(key, directory)`. The deepest wins: a project's knowledge folder sits
-/// inside the repository its spec root is.
-pub(super) fn locate_file(
-    path: &str,
-    knowledge: &[(String, String)],
-    specs: &[(String, String)],
-) -> Option<FileTarget> {
+/// The origin an absolute `path` lies in, among origins given as
+/// `(key, directory)`. The deepest wins: a project's knowledge folder sits
+/// inside the repository its spec origin is.
+pub(super) fn locate_file(path: &str, origins: &[(String, String)]) -> Option<FileTarget> {
     let file = Path::new(path);
-    knowledge
+    origins
         .iter()
-        .map(|root| (RootSection::Knowledge, root))
-        .chain(specs.iter().map(|root| (RootSection::Specs, root)))
-        .filter_map(|(section, (key, dir))| {
+        .filter_map(|(key, dir)| {
             let rel = file.strip_prefix(dir).ok()?;
             let rel: Vec<String> = rel
                 .components()
@@ -524,7 +514,6 @@ pub(super) fn locate_file(
                 (
                     Path::new(dir).components().count(),
                     FileTarget {
-                        section,
                         root_key: key.clone(),
                         path: rel.join("/"),
                     },
@@ -540,13 +529,13 @@ mod tests {
     // Not `use super::*`: the gpui glob would shadow `#[test]` with
     // `gpui::test`, which expands into itself forever.
     use super::{
-        FileTarget, MenuGroup, MenuPick, RootSection, compact_links, entry_matches, locate_file,
+        FileTarget, MenuGroup, MenuPick, compact_links, entry_matches, locate_file,
         menu_entries, pr_caption, pull_requests_of, sessions_working, store_chips, task_ids,
     };
     use crate::workspace::state::ProjectData;
     use okena_core::api::{ApiGitStatus, PrInfo, PrState, RepoPullRequest};
     use okena_core::context::{ContextItem, ContextKind, ContextOwner, ContextRef};
-    use okena_core::knowledge::KnowledgeStores;
+    use okena_core::library::LibraryOrigins;
     use okena_core::project_map::ProjectLinks;
     use std::collections::HashSet;
 
@@ -883,17 +872,21 @@ mod tests {
         assert_eq!(compact_links(&ProjectLinks::default(), "shop"), Default::default());
     }
 
-    fn stores() -> KnowledgeStores {
+    fn stores() -> LibraryOrigins {
         serde_json::from_value(serde_json::json!({
-            "roots": [
-                { "key": "store:acme-eng", "kind": "store", "name": "acme-eng", "path": "/kb/acme", "healthy": true },
+            "origins": [
+                { "key": "knowledge:store:acme-eng", "type": "knowledge", "kind": "store",
+                  "name": "acme-eng", "path": "/kb/acme", "healthy": true },
             ],
             "pointers": [
-                { "project": "shop", "path": "/r/shop", "store_id": "acme-eng", "root_key": "store:acme-eng" },
-                { "project": "billing", "path": "/r/billing", "store_id": "acme-eng", "root_key": "store:acme-eng" },
-                { "project": "shop", "path": "/r/shop", "store_id": "design",
+                { "type": "knowledge", "project": "shop", "path": "/r/shop", "store_id": "acme-eng", "root_key": "knowledge:store:acme-eng" },
+                { "type": "knowledge", "project": "billing", "path": "/r/billing", "store_id": "acme-eng", "root_key": "knowledge:store:acme-eng" },
+                { "type": "knowledge", "project": "shop", "path": "/r/shop", "store_id": "design",
                   "status": [{ "severity": "warning", "code": "store-not-registered", "message": "design is not cloned here." }] },
-                { "project": "shop", "path": "/r/shop", "store_id": "ops" },
+                { "type": "knowledge", "project": "shop", "path": "/r/shop", "store_id": "ops" },
+                // An OpenSpec `store:` pointer of the same project is not a
+                // knowledge store it follows.
+                { "type": "spec", "project": "shop", "path": "/r/shop", "store_id": "plans", "root_key": "spec:store:plans" },
             ],
         }))
         .unwrap()
@@ -909,7 +902,7 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("acme-eng", Some("store:acme-eng"), None),
+                ("acme-eng", Some("knowledge:store:acme-eng"), None),
                 ("design", None, Some("design is not cloned here.")),
                 ("ops", None, Some("ops isn't on this machine.")),
             ]
@@ -918,32 +911,34 @@ mod tests {
     }
 
     #[test]
-    fn a_file_opens_in_the_deepest_root_holding_it() {
-        let knowledge = [
-            ("path:/r/shop/.okena/knowledge".to_string(), "/r/shop/.okena/knowledge".to_string()),
-            ("store:acme".to_string(), "/kb/acme".to_string()),
+    fn a_file_opens_in_the_deepest_origin_holding_it() {
+        let origins = [
+            (
+                "knowledge:path:/r/shop/.okena/knowledge".to_string(),
+                "/r/shop/.okena/knowledge".to_string(),
+            ),
+            ("knowledge:store:acme".to_string(), "/kb/acme".to_string()),
+            ("spec:path:/r/shop".to_string(), "/r/shop".to_string()),
         ];
-        let specs = [("path:/r/shop".to_string(), "/r/shop".to_string())];
-        let at = |p: &str| locate_file(p, &knowledge, &specs);
+        let at = |p: &str| locate_file(p, &origins);
+        // The key says which type of origin it opens in.
         assert_eq!(
             at("/r/shop/.okena/knowledge/docs/cart.md"),
             Some(FileTarget {
-                section: RootSection::Knowledge,
-                root_key: "path:/r/shop/.okena/knowledge".into(),
+                root_key: "knowledge:path:/r/shop/.okena/knowledge".into(),
                 path: "docs/cart.md".into(),
             })
         );
         assert_eq!(
             at("/r/shop/openspec/changes/x/proposal.md"),
             Some(FileTarget {
-                section: RootSection::Specs,
-                root_key: "path:/r/shop".into(),
+                root_key: "spec:path:/r/shop".into(),
                 path: "openspec/changes/x/proposal.md".into(),
             })
         );
         // A sibling whose name only starts the same is not inside.
         assert_eq!(at("/r/shopping/openspec/specs/a/spec.md"), None);
-        assert_eq!(at("/r/shop"), None, "a root itself is not a file in it");
+        assert_eq!(at("/r/shop"), None, "an origin itself is not a file in it");
     }
 
     #[test]

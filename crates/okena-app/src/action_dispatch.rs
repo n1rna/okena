@@ -1183,126 +1183,59 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             terminal_id: s(&terminal_id),
             path,
         },
-        // Spec actions carry no ids — root keys and paths are the daemon's
-        // own, discovered and checked on its side.
         // Carries no ids, so nothing to strip.
         ActionRequest::PromptRender { flow, vars } => ActionRequest::PromptRender { flow, vars },
-        ActionRequest::SpecStores => ActionRequest::SpecStores,
-        ActionRequest::SpecsTree { root } => ActionRequest::SpecsTree { root },
-        ActionRequest::SpecRead { root, path } => ActionRequest::SpecRead { root, path },
-        ActionRequest::SpecSearch { query, roots } => ActionRequest::SpecSearch { query, roots },
-        ActionRequest::SpecWrite {
+        // Library actions carry no ids — origin keys, paths and URLs are the
+        // daemon's own, discovered and checked on its side.
+        passthrough @ (ActionRequest::LibraryOrigins
+        | ActionRequest::LibraryTree { .. }
+        | ActionRequest::LibraryRead { .. }
+        | ActionRequest::LibrarySearch { .. }
+        | ActionRequest::LibraryWrite { .. }
+        | ActionRequest::LibraryFileCreate { .. }
+        | ActionRequest::LibraryFolderCreate { .. }
+        | ActionRequest::LibraryFileRename { .. }
+        | ActionRequest::LibraryFileDelete { .. }
+        | ActionRequest::LibraryOverrides { .. }
+        | ActionRequest::LibraryOverride { .. }
+        | ActionRequest::LibraryLayering
+        | ActionRequest::LibraryStoreClone { .. }
+        | ActionRequest::LibraryStoreRegister { .. }
+        | ActionRequest::LibraryStoreUnregister { .. }
+        | ActionRequest::LibraryStoreSetup { .. }
+        | ActionRequest::LibrarySetDefaultStore { .. }
+        | ActionRequest::LibraryStoreFetch { .. }
+        | ActionRequest::LibraryStorePull { .. }
+        | ActionRequest::LibraryStoreCommit { .. }
+        | ActionRequest::LibraryStorePush { .. }) => passthrough,
+        // The two that start an agent carry the context picked for it, whose
+        // refs name projects by this client's ids.
+        ActionRequest::LibraryRefineDocument {
             root,
             path,
-            content,
-            revision,
-        } => ActionRequest::SpecWrite {
+            request,
+            agent_command,
+            model,
+            context,
+        } => ActionRequest::LibraryRefineDocument {
             root,
             path,
-            content,
-            revision,
+            request,
+            agent_command,
+            model,
+            context: strip_context_refs(context, s),
         },
-        ActionRequest::SpecStoreClone { url, path } => ActionRequest::SpecStoreClone { url, path },
-        ActionRequest::SpecStoreRegister { path, id } => {
-            ActionRequest::SpecStoreRegister { path, id }
-        }
-        ActionRequest::SpecStoreUnregister { id } => ActionRequest::SpecStoreUnregister { id },
-        ActionRequest::SpecStoreSetup {
-            id,
-            path,
-            remote,
-            init_git,
-        } => ActionRequest::SpecStoreSetup {
-            id,
-            path,
-            remote,
-            init_git,
-        },
-        ActionRequest::SpecSetDefaultStore { id } => ActionRequest::SpecSetDefaultStore { id },
-        ActionRequest::SpecDraftChange {
+        ActionRequest::LibraryDraft {
             root,
-            idea,
+            request,
             name,
             agent_command,
             model,
             context,
-        } => ActionRequest::SpecDraftChange {
+        } => ActionRequest::LibraryDraft {
             root,
-            idea,
+            request,
             name,
-            agent_command,
-            model,
-            context: strip_context_refs(context, s),
-        },
-        passthrough @ (ActionRequest::SpecStoreFetch { .. }
-        | ActionRequest::SpecStorePull { .. }
-        | ActionRequest::SpecStoreCommit { .. }
-        | ActionRequest::SpecStorePush { .. }
-        | ActionRequest::SpecFileCreate { .. }
-        | ActionRequest::SpecFolderCreate { .. }
-        | ActionRequest::SpecFileRename { .. }
-        | ActionRequest::SpecFileDelete { .. }) => passthrough,
-        ActionRequest::SpecRefineDocument {
-            root,
-            path,
-            request,
-            agent_command,
-            model,
-            context,
-        } => ActionRequest::SpecRefineDocument {
-            root,
-            path,
-            request,
-            agent_command,
-            model,
-            context: strip_context_refs(context, s),
-        },
-        // Knowledge actions likewise carry only root keys the daemon
-        // discovered, paths and URLs.
-        passthrough @ (ActionRequest::KnowledgeStores
-        | ActionRequest::KnowledgeTree { .. }
-        | ActionRequest::KnowledgeRead { .. }
-        | ActionRequest::KnowledgeSearch { .. }
-        | ActionRequest::KnowledgeWrite { .. }
-        | ActionRequest::KnowledgeFileCreate { .. }
-        | ActionRequest::KnowledgeFolderCreate { .. }
-        | ActionRequest::KnowledgeFileRename { .. }
-        | ActionRequest::KnowledgeFileDelete { .. }
-        | ActionRequest::KnowledgeOverrides { .. }
-        | ActionRequest::KnowledgeOverride { .. }
-        | ActionRequest::KnowledgeLayering
-        | ActionRequest::KnowledgeStoreClone { .. }
-        | ActionRequest::KnowledgeStoreRegister { .. }
-        | ActionRequest::KnowledgeStoreUnregister { .. }
-        | ActionRequest::KnowledgeStoreSetup { .. }
-        | ActionRequest::KnowledgeStoreFetch { .. }
-        | ActionRequest::KnowledgeStorePull { .. }
-        | ActionRequest::KnowledgeStoreCommit { .. }
-        | ActionRequest::KnowledgeStorePush { .. }) => passthrough,
-        ActionRequest::KnowledgeRefineDocument {
-            root,
-            path,
-            request,
-            agent_command,
-            model,
-            context,
-        } => ActionRequest::KnowledgeRefineDocument {
-            root,
-            path,
-            request,
-            agent_command,
-            model,
-            context: strip_context_refs(context, s),
-        },
-        ActionRequest::KnowledgeDraft {
-            root,
-            request,
-            agent_command,
-            model,
-            context,
-        } => ActionRequest::KnowledgeDraft {
-            root,
-            request,
             agent_command,
             model,
             context: strip_context_refs(context, s),
