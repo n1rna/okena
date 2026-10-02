@@ -122,6 +122,7 @@ mod tests {
             hooks: Default::default(),
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -144,6 +145,7 @@ mod tests {
         );
         let mut workspace = Workspace::new(WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["worktree".into()],
             folders: Vec::new(),

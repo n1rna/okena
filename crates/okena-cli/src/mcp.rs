@@ -2002,6 +2002,7 @@ mod tests {
             cols: None,
             rows: None,
             agent: false,
+            show_name_when_inactive: false,
         }
     }
 

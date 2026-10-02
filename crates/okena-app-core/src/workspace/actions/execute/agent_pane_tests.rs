@@ -168,6 +168,7 @@ fn project(session: bool, default_shell: Option<ShellType>, layout: LayoutNode) 
         is_closing: false,
         creating_progress: None,
         verification_runs: Vec::new(),
+        agent_sessions: Default::default(),
     }
 }
 
@@ -181,6 +182,7 @@ fn workspace(project: ProjectData) -> Workspace {
         hook_panel_heights: HashMap::new(),
         main_window: WindowState::default(),
         extra_windows: Vec::new(),
+        agent_session_history: Default::default(),
     })
 }
 
@@ -192,6 +194,8 @@ fn pane(terminal_id: Option<&str>, agent: bool) -> LayoutNode {
         shell_type: ShellType::Default,
         zoom_level: 1.0,
         agent,
+        pending_agent_resume: None,
+        show_name_when_inactive: false,
     }
 }
 

@@ -10,6 +10,7 @@
 //! | [`status`]   | working-tree status, diff stats, HEAD/branch reads, ahead/behind |
 //! | `diff_memo`  | private: per-file diff counts remembered across status walks |
 //! | [`ci`]       | GitHub PR info + CI check aggregation |
+//! | [`pull_requests`] | open PRs offered as worktree sources, searchable |
 //! | [`github`]   | GitHub base-repo resolution, token cache, REST/GraphQL client |
 //! | `gh`         | finding the `gh` binary: Settings path, `PATH`, then install directories |
 //! | [`paths`]    | repo-root resolution and worktree/project path computation |
@@ -29,6 +30,7 @@ pub(crate) mod gh;
 pub(crate) mod github;
 pub mod init;
 pub mod paths;
+pub mod pull_requests;
 pub mod status;
 pub mod upstream;
 pub mod worktree;
@@ -46,7 +48,7 @@ pub use branch::{
 };
 pub use ci::{
     CiFetch, PrFetch, RepoPrsFetch, fetch_ci_checks, fetch_open_pull_requests, fetch_pr_by_branch,
-    fetch_pr_by_number, fetch_pr_by_number_with_head, fetch_pr_info, list_pull_requests,
+    fetch_pr_by_number, fetch_pr_by_number_with_head, fetch_pr_info,
 };
 pub use clone::{
     CloneProgress, clone_dir_name, clone_repository, finish_clone_repository, is_complete_checkout,
@@ -61,6 +63,7 @@ pub use paths::{
     compute_target_paths, get_repo_common_dir, get_repo_root, normalize_path, path_identity,
     project_path_in_worktree, resolve_git_root_and_subdir,
 };
+pub use pull_requests::list_pull_requests;
 pub use status::{
     DirtyCheck, HeadSnapshot, StatusFetch, apply_pr_base, count_ahead_behind,
     count_ahead_behind_vs, count_unpushed_commits, get_current_branch, get_head_sha,
@@ -182,6 +185,18 @@ pub(crate) mod test_support {
             args,
             String::from_utf8_lossy(&status.stderr)
         );
+    }
+    /// A repo whose `main` is pushed to a bare `origin`. The second tempdir owns
+    /// the remote and must stay alive for the repo's lifetime.
+    pub(crate) fn repo_with_origin() -> (tempfile::TempDir, PathBuf, tempfile::TempDir) {
+        let (tmp, repo) = init_temp_repo();
+        let remote_tmp = tempfile::tempdir().expect("create remote tempdir");
+        let remote = remote_tmp.path().join("remote.git");
+        let remote_str = remote.to_str().expect("remote path is utf-8");
+        git_in(&repo, &["init", "--bare", "-b", "main", remote_str]);
+        git_in(&repo, &["remote", "add", "origin", remote_str]);
+        git_in(&repo, &["push", "-q", "origin", "main"]);
+        (tmp, repo, remote_tmp)
     }
 }
 

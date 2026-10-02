@@ -14,6 +14,7 @@ behaviour.
 - [`spaces.md`](spaces.md) — spaces: the selector, what a switch changes, per-space task connections and filters, per-space roots, and what every client shows.
 - [`configuration.md`](configuration.md) — settings file, keybindings, per-project config.
 - [`hooks.md`](hooks.md) — lifecycle hooks: events, config shape, execution.
+- [`agent-status.md`](agent-status.md) — agent lifecycle, conversation identities, Claude Code hooks and resume.
 - [`services.md`](services.md) — Docker Compose integration and port detection.
 - [`worktrees.md`](worktrees.md) — git worktree projects: create, close, parent linkage.
 - [`extensions.md`](extensions.md) — extensions from git: manifest, permissions, dependency check, UI components, actions, agent launch, MCP, building, library layout.

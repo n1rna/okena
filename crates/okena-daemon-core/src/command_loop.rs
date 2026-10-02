@@ -4928,6 +4928,18 @@ pub async fn daemon_command_loop(
                         .collect()
                 };
 
+                // Agent status is runtime-only and lives on the terminal
+                // registry, so gather it alongside the terminal sizes.
+                let agent_statuses: HashMap<String, okena_core::agent_status::AgentStatus> = {
+                    let registry = terminals.lock();
+                    registry
+                        .iter()
+                        .filter_map(|(id, term)| {
+                            term.agent_status().map(|status| (id.clone(), status))
+                        })
+                        .collect()
+                };
+
                 // Source of truth for runtime visibility (per-window viewport).
                 let hidden_project_ids = &data.main_window.hidden_project_ids;
 
@@ -4988,6 +5000,7 @@ pub async fn daemon_command_loop(
                     hidden_project_ids,
                     &size_map,
                     &agent_activity.activities(),
+                    &agent_statuses,
                     windows,
                     hooks,
                 );
@@ -7000,6 +7013,8 @@ mod tests {
             },
             zoom_level: 1.0,
             agent: false,
+            pending_agent_resume: None,
+            show_name_when_inactive: false,
         });
         {
             let mut ws = h.workspace.lock();
@@ -7096,6 +7111,8 @@ mod tests {
                 },
                 zoom_level: 1.0,
                 agent: false,
+                pending_agent_resume: None,
+                show_name_when_inactive: false,
             });
             project
         };
@@ -7448,11 +7465,13 @@ mod tests {
             path: path.to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: None,
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
                 agent: false,
+                show_name_when_inactive: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),
@@ -7476,6 +7495,7 @@ mod tests {
             hooks: Default::default(),
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -7487,6 +7507,7 @@ mod tests {
         };
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -7883,6 +7904,7 @@ mod tests {
                             RemoteCommand::Action(ActionRequest::GitListPullRequests {
                                 project_id: "missing".to_string(),
                                 limit: 5,
+                                query: String::new(),
                             }),
                             "list pull requests",
                         )
@@ -8182,11 +8204,13 @@ mod tests {
             path: path.to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: None,
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
                 agent: false,
+                show_name_when_inactive: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),
@@ -8216,6 +8240,7 @@ mod tests {
             },
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -8227,6 +8252,7 @@ mod tests {
         };
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -8947,11 +8973,13 @@ mod tests {
             path: "/tmp".to_string(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some(terminal_id.to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
                 agent: false,
+                show_name_when_inactive: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),
@@ -8975,6 +9003,7 @@ mod tests {
             hooks: Default::default(),
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -8986,6 +9015,7 @@ mod tests {
         };
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![project],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -9206,11 +9236,13 @@ mod tests {
                 path: "/tmp".to_string(),
                 layout: Some(LayoutNode::Terminal {
                     terminal_id: None,
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
                     agent: false,
+                    show_name_when_inactive: false,
                 }),
                 terminal_names: Default::default(),
                 hidden_terminals: Default::default(),
@@ -9234,6 +9266,7 @@ mod tests {
                 hooks: Default::default(),
                 connection_id: None,
                 service_terminals: Default::default(),
+                agent_sessions: Default::default(),
                 default_shell: None,
                 hook_terminals: Default::default(),
                 pinned: false,
@@ -9258,6 +9291,7 @@ mod tests {
         );
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![parent, child],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),
@@ -9318,19 +9352,23 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("active-in-checkout".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
                     agent: false,
+                    show_name_when_inactive: false,
                 },
                 LayoutNode::Terminal {
                     terminal_id: Some("second-in-checkout".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
                     agent: false,
+                    show_name_when_inactive: false,
                 },
             ],
         });
@@ -9851,11 +9889,13 @@ mod tests {
         nested.terminal_names.clear();
         nested.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("live-in-nested-directory".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         });
         let mut unaffected = data.projects[0].clone();
         unaffected.id = "unaffected".to_string();
@@ -9865,11 +9905,13 @@ mod tests {
         unaffected.terminal_names.clear();
         unaffected.layout = Some(LayoutNode::Terminal {
             terminal_id: Some("unaffected-live".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         });
         data.projects.push(nested);
         data.projects.push(unaffected);
@@ -10856,11 +10898,13 @@ mod tests {
             path: repo_path.clone(),
             layout: Some(LayoutNode::Terminal {
                 terminal_id: Some("parent-term".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 1.0,
                 agent: false,
+                show_name_when_inactive: false,
             }),
             terminal_names: Default::default(),
             hidden_terminals: Default::default(),
@@ -10890,6 +10934,7 @@ mod tests {
             },
             connection_id: None,
             service_terminals: Default::default(),
+            agent_sessions: Default::default(),
             default_shell: None,
             hook_terminals: Default::default(),
             pinned: false,
@@ -10901,6 +10946,7 @@ mod tests {
         };
         let data = WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects: vec![parent],
             project_order: vec!["p1".to_string()],
             folders: Vec::new(),

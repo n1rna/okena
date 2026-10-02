@@ -1204,6 +1204,8 @@ mod tests {
             },
             zoom_level: 1.0,
             agent: true,
+            pending_agent_resume: None,
+            show_name_when_inactive: false,
         });
         project
     }

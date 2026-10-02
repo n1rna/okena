@@ -163,17 +163,21 @@ pub struct CopilotUsage {
     popover_visible: bool,
     trigger_bounds: Bounds<Pixels>,
     hover_token: Arc<AtomicU64>,
+    chart_state: Entity<okena_usage::HistoryChartState>,
 }
 
 impl CopilotUsage {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let data = CopilotUsageData::shared(cx);
         cx.observe(&data, |_, _, cx| cx.notify()).detach();
+        let chart_state = cx.new(|_| okena_usage::HistoryChartState::default());
+        cx.observe(&chart_state, |_, _, cx| cx.notify()).detach();
         Self {
             data,
             popover_visible: false,
             trigger_bounds: Bounds::default(),
             hover_token: Arc::new(AtomicU64::new(0)),
+            chart_state,
         }
     }
 
@@ -220,6 +224,11 @@ impl CopilotUsage {
                         marker_id: "copilot-marker-month".into(),
                     },
                     working,
+                    // Copilot's usage is not recorded over time, so the chart
+                    // has no past samples to draw.
+                    &okena_usage::history::History::default(),
+                    "premium_requests",
+                    &self.chart_state,
                 ))
                 .child(usage_kv_row(
                     t,

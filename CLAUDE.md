@@ -20,7 +20,7 @@ On Windows, build from **x64 Native Tools Command Prompt for VS 2022** to avoid 
 
 ```
 src/                        # Thin `okena` binary entry point (main.rs, assets.rs, smoke_tests.rs)
-crates/                     # All logic — 42 crates, see below
+crates/                     # All logic — 43 crates, see below
 docs/                       # Project docs (see "Docs" at the bottom)
 mobile/                     # Mobile app — React Native UI (mobile/rn) over the Rust core via uniffi (crates/okena-mobile-ffi)
 web/                        # Web client (React + TypeScript + xterm.js)
@@ -84,6 +84,7 @@ Everything lives in `crates/`; `src/` is only the binary entry point.
 | `okena-cli` | `okena <subcommand>` — controls a running instance over the remote HTTP API. Gated before GUI startup in `main.rs`. |
 | `okena-tui` | Proof-of-concept terminal UI client for a running daemon. |
 | `okena-usage` | Shared usage-bar UI + working-days logic behind the Claude and Codex usage widgets. |
+| `okena-agent-harnesses` | Built-in `AgentHarness` implementations (resume argv per agent id reported over `OSC 9001`) and their registry install. GPUI-free so the daemon links the same ones. See `docs/reference/agent-status.md`. |
 
 ## Module-Specific Context
 
