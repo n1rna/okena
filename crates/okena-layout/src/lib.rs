@@ -23,6 +23,9 @@ fn default_zoom_level() -> f32 {
 pub enum LayoutNode {
     Terminal {
         terminal_id: Option<String>,
+        /// A restored session awaiting successful PTY creation. Travels with this leaf.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_agent_resume: Option<okena_core::agent_session::AgentSession>,
         #[serde(default)]
         minimized: bool,
         #[serde(default)]
@@ -40,6 +43,8 @@ pub enum LayoutNode {
         /// back.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         agent: bool,
+        #[serde(default)]
+        show_name_when_inactive: bool,
     },
     Split {
         direction: SplitDirection,
@@ -54,6 +59,16 @@ pub enum LayoutNode {
 }
 
 impl LayoutNode {
+    pub fn pending_agent_resume(&self) -> Option<&okena_core::agent_session::AgentSession> {
+        match self {
+            Self::Terminal {
+                pending_agent_resume,
+                ..
+            } => pending_agent_resume.as_ref(),
+            _ => None,
+        }
+    }
+
     /// Returns true if this node is effectively hidden (all terminals within it are minimized or detached).
     pub fn is_all_hidden(&self) -> bool {
         match self {
@@ -138,11 +153,13 @@ impl LayoutNode {
     pub fn new_terminal() -> Self {
         LayoutNode::Terminal {
             terminal_id: None,
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         }
     }
 
@@ -164,11 +181,13 @@ impl LayoutNode {
 
         LayoutNode::Terminal {
             terminal_id: None,
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::for_command(full_cmd),
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         }
     }
 
@@ -915,14 +934,17 @@ impl LayoutNode {
             LayoutNode::Terminal {
                 shell_type,
                 zoom_level,
+                show_name_when_inactive,
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: None,
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: shell_type.clone(),
                 zoom_level: *zoom_level,
                 agent: false,
+                show_name_when_inactive: *show_name_when_inactive,
             },
             LayoutNode::Split {
                 direction,
@@ -1156,14 +1178,17 @@ impl LayoutNode {
                 detached,
                 shell_type,
                 agent,
+                show_name_when_inactive,
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.clone(),
+                pending_agent_resume: None,
                 minimized: *minimized,
                 detached: *detached,
                 shell_type: shell_type.clone(),
                 zoom_level: 1.0,
                 agent: *agent,
+                show_name_when_inactive: *show_name_when_inactive,
             },
             okena_core::api::ApiLayoutNode::Split {
                 direction,
@@ -1194,14 +1219,17 @@ impl LayoutNode {
                 detached,
                 shell_type,
                 agent,
+                show_name_when_inactive,
                 ..
             } => LayoutNode::Terminal {
                 terminal_id: terminal_id.as_ref().map(|id| format!("{}:{}", prefix, id)),
+                pending_agent_resume: None,
                 minimized: *minimized,
                 detached: *detached,
                 shell_type: shell_type.clone(),
                 zoom_level: 1.0,
                 agent: *agent,
+                show_name_when_inactive: *show_name_when_inactive,
             },
             okena_core::api::ApiLayoutNode::Split {
                 direction,
@@ -1245,6 +1273,7 @@ impl LayoutNode {
                 detached,
                 shell_type,
                 agent,
+                show_name_when_inactive,
                 ..
             } => {
                 let (cols, rows) = terminal_id
@@ -1257,6 +1286,7 @@ impl LayoutNode {
                     minimized: *minimized,
                     detached: *detached,
                     shell_type: shell_type.clone(),
+                    show_name_when_inactive: *show_name_when_inactive,
                     cols,
                     rows,
                     agent: *agent,
@@ -1291,39 +1321,116 @@ impl LayoutNode {
 #[cfg(test)]
 mod tests {
     use super::{LayoutNode, SplitDirection};
+
+    #[test]
+    fn fresh_layouts_and_api_mirrors_do_not_inherit_pending_resumes() {
+        let node = LayoutNode::Terminal {
+            terminal_id: None,
+            pending_agent_resume: Some(okena_core::agent_session::AgentSession {
+                agent: "claude-code".into(),
+                session_id: "11111111-2222-3333-4444-555555555555".into(),
+                transcript_path: None,
+            }),
+            minimized: false,
+            detached: false,
+            shell_type: Default::default(),
+            zoom_level: 1.0,
+            agent: false,
+            show_name_when_inactive: false,
+        };
+        assert!(node.clone_structure().pending_agent_resume().is_none());
+        assert!(
+            LayoutNode::from_api(&node.to_api())
+                .pending_agent_resume()
+                .is_none()
+        );
+    }
     use okena_core::shell::ShellType;
     use std::collections::HashSet;
 
     fn terminal(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         }
     }
 
     fn terminal_minimized(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            pending_agent_resume: None,
             minimized: true,
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         }
+    }
+
+    #[test]
+    fn name_overlay_defaults_off_in_older_layouts_and_snapshots() {
+        let json = r#"{"type":"terminal","terminal_id":"t1","minimized":false,"detached":false}"#;
+        let stored: LayoutNode = serde_json::from_str(json).unwrap();
+        let api: okena_core::api::ApiLayoutNode = serde_json::from_str(json).unwrap();
+        assert_eq!(stored, terminal("t1"));
+        assert_eq!(LayoutNode::from_api(&api), terminal("t1"));
+    }
+
+    #[test]
+    fn name_overlay_survives_persistence_and_remote_snapshots() {
+        let mut enabled = terminal("t1");
+        if let LayoutNode::Terminal {
+            show_name_when_inactive,
+            ..
+        } = &mut enabled
+        {
+            *show_name_when_inactive = true;
+        }
+        let stored = serde_json::to_string(&enabled).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LayoutNode>(&stored).unwrap(),
+            enabled
+        );
+
+        let api = enabled.to_api();
+        assert_eq!(LayoutNode::from_api(&api), enabled);
+        let mut prefixed = enabled.clone();
+        prefixed.replace_terminal_id("t1", "remote:c1:t1");
+        assert_eq!(LayoutNode::from_api_prefixed(&api, "remote:c1"), prefixed);
+
+        let disabled = terminal("t1");
+        assert_eq!(LayoutNode::merge_visual_state(&enabled, &disabled), enabled);
+        assert_eq!(
+            LayoutNode::merge_visual_state(&disabled, &enabled),
+            disabled
+        );
+        assert!(matches!(
+            enabled.clone_structure(),
+            LayoutNode::Terminal {
+                terminal_id: None,
+                show_name_when_inactive: true,
+                ..
+            }
+        ));
     }
 
     fn terminal_detached(id: &str) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: true,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         }
     }
 
@@ -1372,11 +1479,13 @@ mod tests {
             terminal("a"),
             LayoutNode::Terminal {
                 terminal_id: Some("b".to_string()),
+                pending_agent_resume: None,
                 minimized: false,
                 detached: false,
                 shell_type: ShellType::Default,
                 zoom_level: 2.5,
                 agent: false,
+                show_name_when_inactive: false,
             },
         ]);
         let node = tree.find_terminal_node("b").expect("b present");
@@ -2220,6 +2329,7 @@ mod tests {
     fn merge_matching_terminals_preserves_visual_flags() {
         let server = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Custom {
@@ -2228,14 +2338,17 @@ mod tests {
             },
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         };
         let local = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            pending_agent_resume: None,
             minimized: true,
             detached: true,
             shell_type: ShellType::Default,
             zoom_level: 1.75,
             agent: false,
+            show_name_when_inactive: false,
         };
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match merged {
@@ -2268,6 +2381,7 @@ mod tests {
     fn api_layout_preserves_daemon_shell_type() {
         let node = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Custom {
@@ -2276,6 +2390,7 @@ mod tests {
             },
             zoom_level: 2.0,
             agent: false,
+            show_name_when_inactive: false,
         };
 
         let restored = LayoutNode::from_api(&node.to_api());
@@ -2399,11 +2514,13 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    pending_agent_resume: None,
                     minimized: false,
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.75,
                     agent: false,
+                    show_name_when_inactive: false,
                 },
                 terminal_minimized("t2"),
             ],
@@ -2507,11 +2624,13 @@ mod tests {
             children: vec![
                 LayoutNode::Terminal {
                     terminal_id: Some("t1".to_string()),
+                    pending_agent_resume: None,
                     minimized: true,
                     detached: false,
                     shell_type: ShellType::Default,
                     zoom_level: 1.0,
                     agent: false,
+                    show_name_when_inactive: false,
                 },
                 LayoutNode::Tabs {
                     children: vec![terminal("t2"), terminal("t3")],
@@ -2544,11 +2663,13 @@ mod tests {
         let server = hsplit(vec![terminal("t1"), terminal("t2")]);
         let local = LayoutNode::Terminal {
             terminal_id: Some("t1".to_string()),
+            pending_agent_resume: None,
             minimized: true,
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.5,
             agent: false,
+            show_name_when_inactive: false,
         };
         let merged = LayoutNode::merge_visual_state(&server, &local);
         match &merged {
@@ -2644,11 +2765,13 @@ mod tests {
     fn single_terminal_is_none_for_zero_or_several() {
         let empty = LayoutNode::Terminal {
             terminal_id: None,
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         };
         assert_eq!(empty.single_terminal(), None);
 
@@ -2681,11 +2804,13 @@ mod tests {
     fn agent(id: Option<&str>) -> LayoutNode {
         LayoutNode::Terminal {
             terminal_id: id.map(str::to_string),
+            pending_agent_resume: None,
             minimized: false,
             detached: false,
             shell_type: ShellType::Default,
             zoom_level: 1.0,
             agent: true,
+            show_name_when_inactive: false,
         }
     }
 

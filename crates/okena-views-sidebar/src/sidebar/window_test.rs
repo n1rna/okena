@@ -180,6 +180,8 @@ fn renaming_a_terminal_keeps_the_spaces_typed(cx: &mut TestAppContext) {
         shell_type: Default::default(),
         zoom_level: 1.0,
         agent: false,
+        pending_agent_resume: None,
+        show_name_when_inactive: false,
     });
     data.projects.push(solo);
     data.project_order.push("solo".into());

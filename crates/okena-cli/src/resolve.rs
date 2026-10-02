@@ -292,6 +292,7 @@ mod tests {
             cols: None,
             rows: None,
             agent: false,
+            show_name_when_inactive: false,
         }
     }
 
@@ -308,6 +309,7 @@ mod tests {
             show_in_overview: true,
             layout,
             terminal_names,
+            terminal_agent_status: std::collections::HashMap::new(),
             git_status: None,
             folder_color: FolderColor::Default,
             services: vec![],

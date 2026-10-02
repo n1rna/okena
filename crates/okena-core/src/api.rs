@@ -461,6 +461,11 @@ pub struct ApiProject {
     pub show_in_overview: bool,
     pub layout: Option<ApiLayoutNode>,
     pub terminal_names: std::collections::HashMap<String, String>,
+    /// Per-terminal agent status (`OSC 9001`) for terminals in this project that
+    /// currently have one. Lets remote / mobile clients show the same agent
+    /// indicators as the desktop. Runtime-only; omitted when empty.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub terminal_agent_status: std::collections::HashMap<String, crate::agent_status::AgentStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_status: Option<ApiGitStatus>,
     #[serde(default)]
@@ -793,6 +798,8 @@ pub enum ApiLayoutNode {
         detached: bool,
         #[serde(default)]
         shell_type: ShellType,
+        #[serde(default)]
+        show_name_when_inactive: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cols: Option<u16>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1117,6 +1124,11 @@ pub enum ActionRequest {
         terminal_id: String,
         name: String,
     },
+    SetTerminalNameOverlay {
+        project_id: String,
+        terminal_id: String,
+        enabled: bool,
+    },
     /// Switch the shell of an existing terminal: the daemon kills the old PTY
     /// and respawns at the same layout path with `shell` (resolving Default →
     /// project default → global default and applying shell-wrapper/on_create
@@ -1189,6 +1201,9 @@ pub enum ActionRequest {
         project_id: String,
         #[serde(default = "default_pull_request_limit")]
         limit: usize,
+        /// Search text; empty lists the newest open PRs.
+        #[serde(default)]
+        query: String,
     },
     GitFileContents {
         project_id: String,
@@ -2972,6 +2987,7 @@ mod tests {
                             cols: None,
                             rows: None,
                             agent: false,
+                            show_name_when_inactive: false,
                         },
                         ApiLayoutNode::Tabs {
                             active_tab: 0,
@@ -2983,11 +2999,24 @@ mod tests {
                                 cols: None,
                                 rows: None,
                                 agent: false,
+                                show_name_when_inactive: false,
                             }],
                         },
                     ],
                 }),
                 terminal_names: [("t1".into(), "bash".into())].into_iter().collect(),
+                terminal_agent_status: [(
+                    "t1".to_string(),
+                    crate::agent_status::AgentStatus {
+                        lifecycle: crate::agent_status::AgentLifecycle::Working,
+                        custom: Some("running tests 3/5".into()),
+                        labels: [("stage".to_string(), "verify".to_string())]
+                            .into_iter()
+                            .collect(),
+                    },
+                )]
+                .into_iter()
+                .collect(),
                 git_status: None,
                 folder_color: FolderColor::Blue,
                 services: vec![],
@@ -3362,6 +3391,11 @@ mod tests {
                 terminal_id: "t1".into(),
                 name: "my-term".into(),
             },
+            ActionRequest::SetTerminalNameOverlay {
+                project_id: "p1".into(),
+                terminal_id: "t1".into(),
+                enabled: true,
+            },
             ActionRequest::SwitchTerminalShell {
                 project_id: "p1".into(),
                 terminal_id: "t1".into(),
@@ -3415,6 +3449,7 @@ mod tests {
             ActionRequest::GitListPullRequests {
                 project_id: "p1".into(),
                 limit: 20,
+                query: "#42".into(),
             },
             ActionRequest::GitFileContents {
                 project_id: "p1".into(),
@@ -3758,6 +3793,22 @@ mod tests {
     }
 
     #[test]
+    fn list_pull_requests_defaults_query_and_limit_when_absent() {
+        let parsed: ActionRequest =
+            serde_json::from_str(r#"{"action":"git_list_pull_requests","project_id":"p1"}"#)
+                .unwrap();
+        let ActionRequest::GitListPullRequests {
+            project_id,
+            limit,
+            query,
+        } = parsed
+        else {
+            panic!("expected GitListPullRequests, got {parsed:?}");
+        };
+        assert_eq!((project_id.as_str(), limit, query.as_str()), ("p1", 20, ""));
+    }
+
+    #[test]
     fn api_layout_node_collect_terminal_ids() {
         let layout = ApiLayoutNode::Split {
             direction: SplitDirection::Horizontal,
@@ -3771,6 +3822,7 @@ mod tests {
                     cols: None,
                     rows: None,
                     agent: false,
+                    show_name_when_inactive: false,
                 },
                 ApiLayoutNode::Tabs {
                     active_tab: 0,
@@ -3783,6 +3835,7 @@ mod tests {
                             cols: None,
                             rows: None,
                             agent: false,
+                            show_name_when_inactive: false,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: None,
@@ -3792,6 +3845,7 @@ mod tests {
                             cols: None,
                             rows: None,
                             agent: false,
+                            show_name_when_inactive: false,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: Some("t3".into()),
@@ -3801,6 +3855,7 @@ mod tests {
                             cols: None,
                             rows: None,
                             agent: false,
+                            show_name_when_inactive: false,
                         },
                     ],
                 },

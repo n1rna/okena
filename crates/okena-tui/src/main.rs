@@ -1018,6 +1018,7 @@ mod tests {
                 cols: None,
                 rows: None,
                 agent: false,
+                show_name_when_inactive: false,
             }),
             ..serde_json::from_value(serde_json::json!({
                 "id": id, "name": id, "path": format!("/tmp/{id}"),

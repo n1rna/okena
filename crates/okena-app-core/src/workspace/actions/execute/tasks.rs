@@ -4437,6 +4437,7 @@ mod delete_workspace_tests {
             folders: Vec::new(),
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
+            agent_session_history: Default::default(),
         });
         Fixture {
             _dir: dir,

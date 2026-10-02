@@ -5,22 +5,16 @@
 //! HTTP bus ([`super::github`]) instead of a subprocess per query.
 //! `fetch_open_pull_requests` lists every open PR of a repository, with each
 //! one's checks and readiness, for the poller. The payload mapping is pure and
-//! unit-tested. `list_pull_requests` still shells out to `gh`.
+//! unit-tested.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use okena_core::process::safe_output_with_timeout;
 use serde_json::{Value, json};
 
 use super::github::{ApiError, GithubClient, GithubRepo, origin_repo, resolve_base_repo};
-use super::status::get_pushed_sha;
-
-/// Hard cap on the remaining `gh` invocation. `gh` can hang indefinitely —
-/// auth prompts or a stalled network — and the bus kills the process when
-/// this elapses.
-const GH_TIMEOUT: Duration = Duration::from_secs(15);
+use super::status::get_upstream_ref;
 
 /// Outcome of a PR lookup. `RateLimited` is kept distinct from "no PR" so the
 /// poller can park its whole GitHub fan-out instead of hammering a closed door.
@@ -59,72 +53,6 @@ pub enum RepoPrsFetch {
     /// No answer, or only part of one. A list with a page missing would drop
     /// PRs that are still open, so the caller keeps the list it has.
     Failed,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GhPullRequest {
-    number: u32,
-    title: String,
-    head_ref_name: String,
-}
-
-/// List open pull requests that can be checked out as worktrees.
-pub fn list_pull_requests(
-    path: &Path,
-    limit: usize,
-) -> Result<Vec<okena_core::api::WorktreePullRequest>, String> {
-    let limit = limit.clamp(1, 100).to_string();
-    let mut gh = super::gh::gh_command();
-    gh.args([
-        "pr",
-        "list",
-        "--json",
-        "number,title,headRefName",
-        "--limit",
-        &limit,
-    ])
-    .current_dir(path);
-    if let Some(repo) = gh_repo_override(resolve_base_repo(path).as_ref()) {
-        gh.args(["--repo", &repo]);
-    }
-    let output = safe_output_with_timeout(&mut gh, GH_TIMEOUT)
-    .map_err(|error| format!("Failed to run GitHub CLI: {error}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "GitHub CLI failed to list pull requests".to_string()
-        } else {
-            stderr
-        });
-    }
-
-    parse_pull_request_list(&String::from_utf8_lossy(&output.stdout))
-}
-
-/// `--repo HOST/OWNER/NAME` for a checkout whose repository is on a host
-/// other than github.com: gh only picks remotes on hosts it is logged into or
-/// `GH_HOST`, so a host known from Settings alone would find no repository.
-/// github.com is left to gh's own resolution, as before.
-fn gh_repo_override(repo: Option<&GithubRepo>) -> Option<String> {
-    repo.filter(|repo| repo.host != "github.com")
-        .map(|repo| format!("{}/{}/{}", repo.host, repo.owner, repo.name))
-}
-
-fn parse_pull_request_list(
-    json: &str,
-) -> Result<Vec<okena_core::api::WorktreePullRequest>, String> {
-    let pull_requests: Vec<GhPullRequest> = serde_json::from_str(json)
-        .map_err(|error| format!("Failed to parse pull requests: {error}"))?;
-    Ok(pull_requests
-        .into_iter()
-        .map(|pull_request| okena_core::api::WorktreePullRequest {
-            number: pull_request.number,
-            title: pull_request.title,
-            branch: pull_request.head_ref_name,
-        })
-        .collect())
 }
 
 /// Base repository plus an authenticated client, or `None` when the checkout
@@ -358,6 +286,33 @@ struct PrNode {
     readiness: ReadinessNode,
 }
 
+/// The pushed commit that belongs to *this* branch, or `None` when the branch
+/// tracks somebody else's.
+///
+/// Git records an upstream whenever a branch starts from a remote-tracking ref,
+/// and a worktree branch starts from `origin/<default>`. Until it is pushed,
+/// its upstream is therefore the default branch, and a lookup keyed on that
+/// commit answers with the default branch's CI: a nightly deploy reported as a
+/// failure against a worktree that never triggered it, and a PR head compared
+/// against a commit from another branch.
+///
+/// A branch that deliberately tracks a differently named remote branch still
+/// gets its own answer. Only the default branch is treated as a base rather
+/// than a counterpart, which is the case Okena creates itself.
+fn branch_pushed_sha(path: &Path) -> Option<String> {
+    let upstream = get_upstream_ref(path)?;
+    let branch = super::status::get_current_branch(path)?;
+    if upstream.branch == branch {
+        return Some(upstream.sha);
+    }
+    // Only reached for the mismatch, so the default-branch lookup stays off the
+    // path every well-tracked branch takes.
+    match super::branch::get_default_branch(path) {
+        Some(default) if default == upstream.branch => None,
+        _ => Some(upstream.sha),
+    }
+}
+
 /// Get PR info for the current branch (if any PR exists).
 ///
 /// Matches by head branch name in the base repository, like `gh pr list
@@ -369,7 +324,7 @@ pub fn fetch_pr_info(path: &Path) -> PrFetch {
         return PrFetch::Fetched(None);
     };
     let current_sha = super::status::get_head_sha(path);
-    let pushed_sha = get_pushed_sha(path);
+    let pushed_sha = branch_pushed_sha(path);
     // No token or no GitHub remote to ask: nothing was learned, so a PR the
     // caller already knows must not be read as gone.
     let Some((mut client, repo)) = github_client(path) else {
@@ -1044,9 +999,9 @@ fn rollup_status(failed: usize, pending: usize) -> crate::CiStatus {
 ///
 /// With a known PR number, reads the PR's status-check rollup (Actions +
 /// external status checks aggregated by the PR, as `gh pr checks` does).
-/// Otherwise falls back to `check-runs` + `status` on the current upstream
-/// commit, which works for any pushed branch — including default branches
-/// without a PR.
+/// Otherwise falls back to `check-runs` + `status` on the branch's own pushed
+/// commit (see `branch_pushed_sha`), which works for any pushed branch,
+/// default branches without a PR included.
 ///
 /// `unchanged_sha` is the upstream commit a *settled* cached summary describes.
 /// Checks on a given commit only move while something is running, so when the
@@ -1062,7 +1017,7 @@ pub fn fetch_ci_checks(
     unchanged_sha: Option<&str>,
 ) -> CiFetch {
     // Read locally (gix, no network) before deciding to spend a request.
-    let sha = get_pushed_sha(path);
+    let sha = branch_pushed_sha(path);
     if let (Some(sha), Some(cached)) = (sha.as_deref(), unchanged_sha)
         && sha == cached
     {
@@ -1590,40 +1545,6 @@ fn branch_ci_summary(check_runs: &[Value], statuses: &[Value]) -> Option<crate::
 mod tests {
     use super::*;
 
-    #[test]
-    fn from_pr_names_the_repository_to_gh_only_off_github_com() {
-        let repo = |host: &str| GithubRepo {
-            host: host.into(),
-            owner: "team".into(),
-            name: "app".into(),
-        };
-        assert_eq!(gh_repo_override(Some(&repo("github.com"))), None);
-        assert_eq!(gh_repo_override(None), None);
-        assert_eq!(
-            gh_repo_override(Some(&repo("acme.ghe.com"))).as_deref(),
-            Some("acme.ghe.com/team/app")
-        );
-        assert_eq!(
-            gh_repo_override(Some(&repo("github.acme.corp"))).as_deref(),
-            Some("github.acme.corp/team/app")
-        );
-    }
-
-    #[test]
-    fn parse_worktree_pull_requests() {
-        let json = r#"[{"number":12,"title":"Remote worktree","headRefName":"feature/remote"}]"#;
-        let pull_requests = super::parse_pull_request_list(json).expect("should parse");
-        assert_eq!(pull_requests.len(), 1);
-        assert_eq!(pull_requests[0].number, 12);
-        assert_eq!(pull_requests[0].title, "Remote worktree");
-        assert_eq!(pull_requests[0].branch, "feature/remote");
-    }
-
-    #[test]
-    fn malformed_worktree_pull_requests_are_rejected() {
-        assert!(super::parse_pull_request_list("not json").is_err());
-    }
-
     // ─── PR node mapping tests ─────────────────────────────────────────
 
     fn pr_node(json: &str) -> PrNode {
@@ -2061,10 +1982,62 @@ mod tests {
         );
         super::super::test_support::git_in(&repo, &["push", "-u", "origin", "main"]);
 
-        let sha = super::get_pushed_sha(&repo).expect("branch has an upstream");
+        let sha = super::super::status::get_pushed_sha(&repo).expect("branch has an upstream");
         assert_eq!(
             super::fetch_ci_checks(&repo, None, Some(&sha)),
             super::CiFetch::Unchanged
+        );
+    }
+
+    /// The exact shape a worktree branch had before `--no-track`: it tracks the
+    /// default branch, so its "upstream commit" is main's tip. A lookup keyed
+    /// on that commit answers with main's CI, which is how a nightly deploy
+    /// failure ended up reported against a feature worktree.
+    #[test]
+    fn a_branch_tracking_the_default_branch_is_not_asked_about() {
+        let (_tmp, repo, _remote) = super::super::test_support::repo_with_origin();
+        super::super::test_support::git_in(&repo, &["checkout", "-q", "-b", "feat/x"]);
+        // What `git worktree add -b feat/x <path> origin/main` used to record.
+        super::super::test_support::git_in(&repo, &["config", "branch.feat/x.remote", "origin"]);
+        super::super::test_support::git_in(
+            &repo,
+            &["config", "branch.feat/x.merge", "refs/heads/main"],
+        );
+
+        assert!(
+            super::branch_pushed_sha(&repo).is_none(),
+            "main's tip is not this branch's pushed commit"
+        );
+        // And no request is spent finding that out.
+        assert_eq!(
+            super::fetch_ci_checks(&repo, None, None),
+            super::CiFetch::Fetched {
+                sha: None,
+                summary: None
+            }
+        );
+    }
+
+    /// A branch that tracks its own counterpart still gets its own answer, and
+    /// so does one deliberately tracking a differently named remote branch.
+    #[test]
+    fn a_branch_tracking_its_own_remote_keeps_its_commit() {
+        let (_tmp, repo, _remote) = super::super::test_support::repo_with_origin();
+        super::super::test_support::git_in(&repo, &["checkout", "-q", "-b", "feat/x"]);
+        super::super::test_support::git_in(&repo, &["push", "-q", "-u", "origin", "feat/x"]);
+        let own = super::branch_pushed_sha(&repo).expect("its own upstream counts");
+
+        // Now point it at a non-default remote branch under another name.
+        super::super::test_support::git_in(&repo, &["push", "-q", "origin", "feat/x:other"]);
+        super::super::test_support::git_in(&repo, &["fetch", "-q", "origin"]);
+        super::super::test_support::git_in(
+            &repo,
+            &["config", "branch.feat/x.merge", "refs/heads/other"],
+        );
+        assert_eq!(
+            super::branch_pushed_sha(&repo).as_deref(),
+            Some(own.as_str()),
+            "tracking another branch on purpose is still this branch's answer"
         );
     }
 

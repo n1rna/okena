@@ -195,6 +195,7 @@ mod tests {
                 cols: None,
                 rows: None,
                 agent: false,
+                show_name_when_inactive: false,
             })
         } else {
             Some(ApiLayoutNode::Split {
@@ -210,6 +211,7 @@ mod tests {
                         cols: None,
                         rows: None,
                         agent: false,
+                        show_name_when_inactive: false,
                     })
                     .collect(),
             })
@@ -222,6 +224,7 @@ mod tests {
             show_in_overview: true,
             layout,
             terminal_names: Default::default(),
+            terminal_agent_status: Default::default(),
             git_status: None,
             folder_color: Default::default(),
             services: vec![],
@@ -416,6 +419,7 @@ mod tests {
                     cols: None,
                     rows: None,
                     agent: false,
+                    show_name_when_inactive: false,
                 },
                 ApiLayoutNode::Terminal {
                     terminal_id: None,
@@ -425,6 +429,7 @@ mod tests {
                     cols: None,
                     rows: None,
                     agent: false,
+                    show_name_when_inactive: false,
                 },
                 ApiLayoutNode::Split {
                     direction: SplitDirection::Vertical,
@@ -438,6 +443,7 @@ mod tests {
                             cols: None,
                             rows: None,
                             agent: false,
+                            show_name_when_inactive: false,
                         },
                         ApiLayoutNode::Terminal {
                             terminal_id: Some("t3".to_string()),
@@ -447,6 +453,7 @@ mod tests {
                             cols: None,
                             rows: None,
                             agent: false,
+                            show_name_when_inactive: false,
                         },
                     ],
                 },
@@ -476,6 +483,7 @@ mod tests {
                         cols: Some(120),
                         rows: Some(40),
                         agent: false,
+                        show_name_when_inactive: false,
                     },
                     ApiLayoutNode::Terminal {
                         terminal_id: Some("t2".into()),
@@ -485,10 +493,12 @@ mod tests {
                         cols: None,
                         rows: None,
                         agent: false,
+                        show_name_when_inactive: false,
                     },
                 ],
             }),
             terminal_names: Default::default(),
+            terminal_agent_status: Default::default(),
             git_status: None,
             folder_color: FolderColor::default(),
             services: Vec::new(),

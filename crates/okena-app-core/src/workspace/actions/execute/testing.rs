@@ -709,6 +709,7 @@ mod round_trip_tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
         let wire = serde_json::to_string(&api).expect("encode");
         let received: ApiProject = serde_json::from_str(&wire).expect("decode");

@@ -259,6 +259,7 @@ impl Fixture {
             hook_panel_heights: HashMap::new(),
             main_window: WindowState::default(),
             extra_windows: Vec::new(),
+            agent_session_history: Default::default(),
         });
 
         let mut settings = AppSettings::default();

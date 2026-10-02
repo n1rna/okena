@@ -2,6 +2,7 @@
 
 pub mod activity_order;
 pub mod agent_card;
+pub mod agents_list;
 pub mod change_path_dialog;
 pub mod color_picker;
 pub mod context_menu;

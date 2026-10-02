@@ -161,6 +161,7 @@ fn prepare_layout_terminals(
     shell_wrapper: Option<&str>,
     on_create: Option<&str>,
     env: &std::collections::HashMap<String, String>,
+    agent_sessions: &mut std::collections::HashMap<String, okena_core::agent_session::AgentSession>,
     path: &mut Vec<usize>,
     launches: &mut Vec<PreparedTerminalLaunch>,
 ) {
@@ -175,6 +176,7 @@ fn prepare_layout_terminals(
             terminal_id,
             shell_type,
             agent,
+            pending_agent_resume,
             ..
         } => {
             let project_default_shell = if *agent {
@@ -186,6 +188,9 @@ fn prepare_layout_terminals(
             let id = terminal_id
                 .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
                 .clone();
+            if let Some(session) = pending_agent_resume.take() {
+                agent_sessions.insert(id.clone(), session);
+            }
             let launch_plan = if persisted {
                 TerminalLaunchPlan::for_shell(
                     shell_type
@@ -199,6 +204,12 @@ fn prepare_layout_terminals(
                     &settings.default_shell,
                     shell_wrapper,
                     on_create,
+                    // Restoring a saved session builds fresh panes: the session
+                    // identity is carried over above so the pane still shows it
+                    // and can be resumed by hand, but nothing is auto-launched
+                    // here — the user asked to open a session, not to re-run
+                    // whatever agent last lived in each pane.
+                    None,
                     env,
                 )
             };
@@ -223,6 +234,7 @@ fn prepare_layout_terminals(
                     shell_wrapper,
                     on_create,
                     env,
+                    agent_sessions,
                     path,
                     launches,
                 );
@@ -247,6 +259,9 @@ pub fn prepare_workspace_replacement(
                 .retain(|terminal_id, _| !stale.contains(terminal_id));
             project
                 .hidden_terminals
+                .retain(|terminal_id, _| !stale.contains(terminal_id));
+            project
+                .agent_sessions
                 .retain(|terminal_id, _| !stale.contains(terminal_id));
             project.hook_terminals.clear();
         }
@@ -293,6 +308,7 @@ pub fn prepare_workspace_replacement(
                 shell_wrapper.as_deref(),
                 on_create.as_deref(),
                 &env,
+                &mut project.agent_sessions,
                 &mut Vec::new(),
                 &mut ordinary,
             );
@@ -555,6 +571,7 @@ pub fn finish_workspace_replacement(
             if project.hook_terminals.remove(terminal_id).is_some() {
                 project.terminal_names.remove(terminal_id);
                 project.hidden_terminals.remove(terminal_id);
+                project.agent_sessions.remove(terminal_id);
                 break;
             }
         }
@@ -1026,6 +1043,7 @@ mod tests {
             },
             connection_id: None,
             service_terminals: HashMap::new(),
+            agent_sessions: HashMap::new(),
             default_shell: None,
             hook_terminals,
             pinned: false,
@@ -1045,6 +1063,7 @@ mod tests {
         let project_order = projects.iter().map(|project| project.id.clone()).collect();
         WorkspaceData {
             version: 1,
+            agent_session_history: Default::default(),
             projects,
             project_order,
             service_panel_heights: HashMap::new(),
@@ -1063,6 +1082,8 @@ mod tests {
             shell_type: ShellType::Default,
             zoom_level: 1.0,
             agent,
+            pending_agent_resume: None,
+            show_name_when_inactive: false,
         }
     }
 
@@ -1310,11 +1331,13 @@ mod tests {
         let mut cx = TestCx { runner, monitor };
         let terminal_node = |id: &str| LayoutNode::Terminal {
             terminal_id: Some(id.to_string()),
+            pending_agent_resume: None,
             shell_type: ShellType::Default,
             minimized: false,
             detached: false,
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         };
 
         let mut outgoing = project("old", "outgoing-hook", None);
@@ -1410,11 +1433,13 @@ mod tests {
         failed.path = failed_cwd.to_string_lossy().into_owned();
         failed.layout = Some(LayoutNode::Terminal {
             terminal_id: None,
+            pending_agent_resume: None,
             shell_type: ShellType::Default,
             minimized: false,
             detached: false,
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         });
         let mut successful = project(
             "successful",
@@ -1424,11 +1449,13 @@ mod tests {
         successful.path = successful_cwd.to_string_lossy().into_owned();
         successful.layout = Some(LayoutNode::Terminal {
             terminal_id: None,
+            pending_agent_resume: None,
             shell_type: ShellType::Default,
             minimized: false,
             detached: false,
             zoom_level: 1.0,
             agent: false,
+            show_name_when_inactive: false,
         });
 
         let result = replace_workspace_with(
