@@ -4,7 +4,10 @@ mod shell_selector;
 
 use crate::ActionDispatch;
 use crate::actions::Cancel;
-use crate::layout::layout_container::{LayoutContainer, is_renaming, rename_input};
+use crate::layout::layout_container::{
+    LayoutContainer, NewTerminalMenu, NewTerminalTarget, is_renaming, rename_input,
+};
+use crate::layout::new_terminal_menu::default_choice;
 use crate::layout::pane_drag::{PaneDrag, PaneDragView};
 use crate::simple_input::SimpleInput;
 use crate::terminal_view_settings;
@@ -14,7 +17,7 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{h_flex, v_flex};
 use okena_files::theme::theme;
 use okena_terminal::terminal::TerminalProgressState;
-use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base};
+use okena_ui::header_buttons::{ButtonSize, HeaderAction, header_button_base, header_button_plain};
 use okena_ui::theme::with_alpha;
 use okena_ui::tokens::{ui_text_md, ui_text_sm};
 use okena_workspace::state::{LayoutNode, SplitDirection};
@@ -77,9 +80,6 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
 
         let terminal_id_for_close = terminal_id.clone();
 
-        let ctx_split_v = ctx.clone();
-        let ctx_split_h = ctx.clone();
-        let ctx_add_tab = ctx.clone();
         let ctx_close = ctx.clone();
 
         let standalone = ctx.standalone;
@@ -102,109 +102,74 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             cx,
         );
 
+        // A split or new-tab button: a click opens the pane on the last kind of
+        // session chosen, and hovering opens the strip to choose another. No
+        // tooltip, which would sit on top of that strip.
+        let new_pane_button =
+            |action: HeaderAction, target: NewTerminalTarget, cx: &mut Context<Self>| {
+                let index = target.button_index();
+                let menu = NewTerminalMenu {
+                    target: target.clone(),
+                    layout_path: ctx.layout_path.clone(),
+                };
+                let hover_path = ctx.layout_path.clone();
+                let entity = cx.entity().downgrade();
+                header_button_plain(action, &id_suffix, ButtonSize::COMPACT, &t)
+                    .relative()
+                    .child(
+                        canvas(
+                            move |bounds, _window, app| {
+                                if let Some(entity) = entity.upgrade() {
+                                    entity.update(app, |this, _| {
+                                        this.new_terminal_anchors[index] = bounds;
+                                    });
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
+                    .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                        this.hover_new_terminal_button(
+                            target.clone(),
+                            hover_path.clone(),
+                            *hovered,
+                            cx,
+                        );
+                    }))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        let choice = default_choice(cx);
+                        this.create_new_terminal(menu.clone(), choice, cx);
+                    }))
+            };
+
         div()
             .flex()
             .flex_none()
             .items_center()
             .gap(px(2.0))
             .px(px(4.0))
-            .child(
-                header_button_base(
-                    HeaderAction::SplitVertical,
-                    &id_suffix,
-                    ButtonSize::COMPACT,
-                    &t,
-                    Some("Split vertically (right-click to choose a shell or agent)"),
-                    None,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|this, _, _window, cx| {
-                        this.open_new_terminal_menu(
-                            crate::layout::layout_container::NewTerminalTarget::Split(
-                                SplitDirection::Vertical,
-                            ),
-                            cx,
-                        );
-                    }),
-                )
-                .on_click(move |_, _window, cx| {
-                    if let Some(ref dispatcher) = ctx_split_v.action_dispatcher {
-                        dispatcher.dispatch(
-                            okena_core::api::ActionRequest::SplitTerminal {
-                                project_id: ctx_split_v.project_id.clone(),
-                                path: ctx_split_v.layout_path.clone(),
-                                direction: SplitDirection::Vertical,
-                                shell_type: None,
-                            },
-                            cx,
-                        );
-                    }
-                }),
-            )
-            .child(
-                header_button_base(
-                    HeaderAction::SplitHorizontal,
-                    &id_suffix,
-                    ButtonSize::COMPACT,
-                    &t,
-                    Some("Split horizontally (right-click to choose a shell or agent)"),
-                    None,
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|this, _, _window, cx| {
-                        this.open_new_terminal_menu(
-                            crate::layout::layout_container::NewTerminalTarget::Split(
-                                SplitDirection::Horizontal,
-                            ),
-                            cx,
-                        );
-                    }),
-                )
-                .on_click(move |_, _window, cx| {
-                    if let Some(ref dispatcher) = ctx_split_h.action_dispatcher {
-                        dispatcher.dispatch(
-                            okena_core::api::ActionRequest::SplitTerminal {
-                                project_id: ctx_split_h.project_id.clone(),
-                                path: ctx_split_h.layout_path.clone(),
-                                direction: SplitDirection::Horizontal,
-                                shell_type: None,
-                            },
-                            cx,
-                        );
-                    }
-                }),
-            )
-            .child(
-                header_button_base(
-                    HeaderAction::AddTab,
-                    &id_suffix,
-                    ButtonSize::COMPACT,
-                    &t,
-                    Some("New tab (right-click to choose a shell or agent)"),
-                    None,
-                )
-                .on_mouse_down(MouseButton::Right, {
-                    let in_group = !standalone;
-                    cx.listener(move |this, _, _window, cx| {
-                        this.open_new_terminal_menu(
-                            crate::layout::layout_container::NewTerminalTarget::Tab { in_group },
-                            cx,
-                        );
-                    })
-                })
-                .on_click(move |_, _window, cx| {
-                    if let Some(ref dispatcher) = ctx_add_tab.action_dispatcher {
-                        dispatcher.add_tab(
-                            &ctx_add_tab.project_id,
-                            &ctx_add_tab.layout_path,
-                            !ctx_add_tab.standalone,
-                            cx,
-                        );
-                    }
-                }),
-            )
+            .child(new_pane_button(
+                HeaderAction::SplitVertical,
+                NewTerminalTarget::Split(SplitDirection::Vertical),
+                cx,
+            ))
+            .child(new_pane_button(
+                HeaderAction::SplitHorizontal,
+                NewTerminalTarget::Split(SplitDirection::Horizontal),
+                cx,
+            ))
+            .child(new_pane_button(
+                HeaderAction::AddTab,
+                NewTerminalTarget::Tab {
+                    in_group: !standalone,
+                },
+                cx,
+            ))
+            .children(self.render_new_terminal_menu(cx))
             .child(more_button)
             .child({
                 header_button_base(
