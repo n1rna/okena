@@ -107,6 +107,23 @@ pub fn header_button_base(
     gpui_action: Option<Box<dyn Action>>,
 ) -> Stateful<Div> {
     let tooltip_text = tooltip_override.unwrap_or_else(|| action.tooltip());
+    header_button_plain(action, id_suffix, size, t).tooltip(move |_window, cx| {
+        let mut tooltip = Tooltip::new(tooltip_text);
+        if let Some(ref action) = gpui_action {
+            tooltip = tooltip.action(action.as_ref(), None);
+        }
+        tooltip.build(_window, cx)
+    })
+}
+
+/// A header button with no tooltip, for one that opens something of its own
+/// on hover: a tooltip would land on top of it.
+pub fn header_button_plain(
+    action: HeaderAction,
+    id_suffix: &str,
+    size: ButtonSize,
+    t: &ThemeColors,
+) -> Stateful<Div> {
     let bg_hover = t.bg_hover;
 
     let base = div()
@@ -126,14 +143,7 @@ pub fn header_button_base(
                 .path(action.icon())
                 .size(px(size.icon))
                 .text_color(rgb(t.text_secondary)),
-        )
-        .tooltip(move |_window, cx| {
-            let mut tooltip = Tooltip::new(tooltip_text);
-            if let Some(ref action) = gpui_action {
-                tooltip = tooltip.action(action.as_ref(), None);
-            }
-            tooltip.build(_window, cx)
-        });
+        );
 
     // Apply hover style - red for close, normal for others
     if action.is_close() {

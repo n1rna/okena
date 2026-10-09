@@ -96,9 +96,15 @@ pub struct LayoutContainer<D: ActionDispatch> {
     pub(super) action_dispatcher: Option<D>,
     pub(super) tab_scroll_handle: ScrollHandle,
     pub(super) last_scrolled_to_tab: Option<usize>,
-    /// Open "new terminal kind" menu, if any. Carries what the choice applies
-    /// to so one menu serves the split and new-tab buttons alike.
+    /// Open "new terminal kind" strip, if any. Carries what the choice applies
+    /// to so one strip serves the split and new-tab buttons alike.
     pub(super) new_terminal_menu: Option<NewTerminalMenu>,
+    /// Bumped by every hover change on the buttons and the strip, so a
+    /// delayed open or close only lands if nothing happened since.
+    pub(super) new_terminal_hover: u64,
+    /// Where each of the three buttons was last painted, for anchoring the
+    /// strip under the one hovered. Indexed by `NewTerminalTarget::button_index`.
+    pub(super) new_terminal_anchors: [Bounds<Pixels>; 3],
 }
 
 /// What a pending shell choice will create.
@@ -108,7 +114,18 @@ pub enum NewTerminalTarget {
     Tab { in_group: bool },
 }
 
-/// An open "what should this terminal run?" menu.
+impl NewTerminalTarget {
+    /// Which of the header's three buttons opens this target.
+    pub(super) fn button_index(&self) -> usize {
+        match self {
+            Self::Split(okena_core::types::SplitDirection::Vertical) => 0,
+            Self::Split(okena_core::types::SplitDirection::Horizontal) => 1,
+            Self::Tab { .. } => 2,
+        }
+    }
+}
+
+/// An open "what should this terminal run?" strip.
 #[derive(Clone, Debug)]
 pub struct NewTerminalMenu {
     pub target: NewTerminalTarget,
@@ -164,6 +181,8 @@ impl<D: ActionDispatch + Send + Sync> LayoutContainer<D> {
             tab_scroll_handle: ScrollHandle::new(),
             last_scrolled_to_tab: None,
             new_terminal_menu: None,
+            new_terminal_hover: 0,
+            new_terminal_anchors: Default::default(),
         }
     }
 
@@ -737,10 +756,6 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
             }
         }
 
-        // Built before the match: the arms borrow `children` out of `layout`,
-        // which would conflict with taking `&mut self` again here.
-        let new_terminal_menu = self.render_new_terminal_menu(cx);
-
         match layout {
             Some(LayoutNode::Terminal {
                 terminal_id,
@@ -762,20 +777,9 @@ impl<D: ActionDispatch + Send + Sync> Render for LayoutContainer<D> {
             Some(LayoutNode::Tabs {
                 ref children,
                 active_tab,
-            }) => {
-                let tabs = self.render_tabs(children, active_tab, window, cx);
-                // Layered over the tabs so the picker sits above the terminal
-                // content rather than displacing it.
-                match new_terminal_menu {
-                    Some(menu) => div()
-                        .relative()
-                        .size_full()
-                        .child(tabs)
-                        .child(menu)
-                        .into_any_element(),
-                    None => tabs.into_any_element(),
-                }
-            }
+            }) => self
+                .render_tabs(children, active_tab, window, cx)
+                .into_any_element(),
 
             None => div()
                 .size_full()
