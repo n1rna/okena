@@ -851,6 +851,19 @@ pub fn execute_action(
             settings,
             cx,
         ),
+        ActionRequest::AgentMoveToSpace { project_id, space } => {
+            let Some(target) = okena_core::spaces::find_space(&settings.spaces, &space) else {
+                return ActionResult::Err(format!("No space is called {space}."));
+            };
+            let space_id = target.id.clone();
+            match ws.move_agent_to_space(&project_id, &space_id, cx) {
+                Ok(moved) => ActionResult::Ok(Some(serde_json::json!({
+                    "space_id": space_id,
+                    "moved": moved,
+                }))),
+                Err(e) => ActionResult::Err(e),
+            }
+        }
         ActionRequest::TaskDeleteWorkspace {
             project_id,
             force,

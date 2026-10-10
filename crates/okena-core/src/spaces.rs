@@ -265,6 +265,20 @@ pub fn nth_space(spaces: &[SpaceData], n: usize) -> Option<&SpaceData> {
     n.checked_sub(1).and_then(|i| spaces.get(i))
 }
 
+/// The space `wanted` names: its id, or else its name, ignoring case and the
+/// whitespace around it.
+///
+/// An id wins over a name, so a space named like another space's id cannot
+/// hide it. What a person types into the CLI or an agent passes over MCP is a
+/// name far more often than an id.
+pub fn find_space<'a>(spaces: &'a [SpaceData], wanted: &str) -> Option<&'a SpaceData> {
+    let wanted = wanted.trim();
+    spaces.iter().find(|s| s.id == wanted).or_else(|| {
+        let wanted = wanted.to_lowercase();
+        spaces.iter().find(|s| s.name.to_lowercase() == wanted)
+    })
+}
+
 /// How the selector splits its spaces when they do not all fit.
 ///
 /// `shown` are drawn as dots, in order; `overflow` go behind the **+N** chip,
@@ -567,6 +581,29 @@ mod tests {
 
     fn spaces(ids: &[&str]) -> Vec<SpaceData> {
         ids.iter().map(|id| SpaceData::new(*id, *id)).collect()
+    }
+
+    #[test]
+    fn a_space_is_found_by_its_id_or_its_name() {
+        let all = vec![
+            SpaceData::new("default", "Default"),
+            SpaceData::new("client-a", "Client A"),
+        ];
+        let found = |wanted: &str| find_space(&all, wanted).map(|s| s.id.as_str());
+        assert_eq!(found("client-a"), Some("client-a"));
+        assert_eq!(found("Client A"), Some("client-a"));
+        assert_eq!(found("  client a "), Some("client-a"));
+        assert_eq!(found("Client B"), None);
+        assert_eq!(found(""), None);
+    }
+
+    #[test]
+    fn an_id_wins_over_another_spaces_name() {
+        let all = vec![
+            SpaceData::new("work", "Personal"),
+            SpaceData::new("personal", "work"),
+        ];
+        assert_eq!(find_space(&all, "work").map(|s| s.id.as_str()), Some("work"));
     }
 
     #[test]

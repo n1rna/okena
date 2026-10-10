@@ -616,6 +616,61 @@ impl Workspace {
         }
     }
 
+    /// Move the agent session `project_id`, with every agent listed under it,
+    /// into the space `space_id`. Returns the ids that moved, the agent first.
+    ///
+    /// Its sub-agents go with it, as they do when it is dragged in the Agents
+    /// list: a coordinator split from its agents would leave them listed loose
+    /// in the space it left. Only sessions move — their worktrees stay under
+    /// their repositories, in the repositories' space. A closed session moves
+    /// alone, having no live group. The caller checks that `space_id` is a
+    /// space; this knows projects, not settings.
+    pub fn move_agent_to_space(
+        &mut self,
+        project_id: &str,
+        space_id: &str,
+        cx: &mut impl WorkspaceCx,
+    ) -> Result<Vec<String>, String> {
+        let project = self
+            .project(project_id)
+            .ok_or_else(|| format!("No project {project_id}."))?;
+        if project.agent_role().is_none() {
+            return Err(format!("{} is not an agent session.", project.name));
+        }
+        if project.connection_id.is_some() {
+            return Err(format!(
+                "{} runs on a remote connection, whose spaces are that machine's.",
+                project.name
+            ));
+        }
+        if project.space_id == space_id {
+            return Err(format!("{} is already in that space.", project.name));
+        }
+        let from = project.space_id.clone();
+        let live: Vec<&ProjectData> = self
+            .data
+            .projects
+            .iter()
+            .filter(|p| p.space_id == from && p.agent_role().is_some() && !p.is_closed())
+            .collect();
+        let mut moving = agent_order::group_of(&live, project_id);
+        if moving.is_empty() {
+            moving.push(project_id.to_string());
+        }
+
+        self.mutate_data(cx, |data| {
+            for p in data.projects.iter_mut().filter(|p| moving.contains(&p.id)) {
+                p.space_id = space_id.to_string();
+            }
+            // A folder belongs to one space: one left behind would hold a
+            // project it can no longer show.
+            for folder in data.folders.iter_mut().filter(|f| f.space_id != space_id) {
+                folder.project_ids.retain(|id| !moving.contains(id));
+            }
+        });
+        Ok(moving)
+    }
+
     /// Whether `project` belongs to the space showing.
     ///
     /// The one place "belongs to the space showing" is spelled out, so a list,

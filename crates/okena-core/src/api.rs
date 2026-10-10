@@ -2440,6 +2440,15 @@ pub enum ActionRequest {
         #[serde(default)]
         fresh: bool,
     },
+    /// Move an agent session to another space, with every agent listed under
+    /// it. `space` is the space's id or its name. Nothing stops: the agents
+    /// keep running, and from then on read the new space's task connection.
+    /// Refused for a project that is not an agent session, for one on a remote
+    /// connection, and for a space that does not exist.
+    AgentMoveToSpace {
+        project_id: String,
+        space: String,
+    },
     RenameProjectDirectory {
         project_id: String,
         new_name: String,
@@ -3548,6 +3557,19 @@ mod tests {
         assert_eq!(old.closed_at, None);
         assert!(!old.cwd_missing);
         assert_eq!(old.agent_usage, None);
+    }
+
+    #[test]
+    fn a_move_to_space_names_the_space_however_it_was_given() {
+        let moved: ActionRequest = serde_json::from_value(serde_json::json!({
+            "action": "agent_move_to_space", "project_id": "s1", "space": "Client A",
+        }))
+        .unwrap();
+        assert!(matches!(
+            moved,
+            ActionRequest::AgentMoveToSpace { ref project_id, ref space }
+                if project_id == "s1" && space == "Client A"
+        ));
     }
 
     #[test]

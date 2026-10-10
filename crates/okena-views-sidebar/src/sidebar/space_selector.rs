@@ -19,6 +19,13 @@ use okena_ui::theme::theme;
 use okena_ui::tokens::ui_text_ms;
 
 use super::Sidebar;
+use crate::drag::AgentDrag;
+
+/// Whether the agent session `project` can be moved to the space `space_id`:
+/// it is a local one, and it is not there already.
+pub(super) fn movable_to(project: &okena_workspace::state::ProjectData, space_id: &str) -> bool {
+    project.agent_role().is_some() && project.connection_id.is_none() && project.space_id != space_id
+}
 
 /// Width one dot takes, including the gap after it.
 const DOT_SLOT: f32 = 18.0;
@@ -104,6 +111,24 @@ impl Sidebar {
         self.dispatch_daemon_action(ActionRequest::SpaceActivate { space_id }, cx);
     }
 
+    /// Move the agent `project_id`, with the agents under it, to `space_id`.
+    /// Like a switch, this asks the daemon; the agent leaves this space's list
+    /// when the next snapshot says it has moved.
+    pub(crate) fn move_agent_to_space(
+        &mut self,
+        project_id: String,
+        space_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch_daemon_action(
+            ActionRequest::AgentMoveToSpace {
+                project_id,
+                space: space_id,
+            },
+            cx,
+        );
+    }
+
     pub(super) fn render_space_selector(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let spaces = okena_workspace::spaces_state::spaces(cx);
@@ -178,6 +203,9 @@ impl Sidebar {
         let t = theme(cx);
         let id = space.id.clone();
         let menu_id = space.id.clone();
+        let drop_id = space.id.clone();
+        let accepts_id = space.id.clone();
+        let workspace = self.workspace.clone();
         let name = SharedString::from(space.name.clone());
         let hover_name = name.clone();
         // An agent waiting on you colours the dot even from a space you have
@@ -191,6 +219,10 @@ impl Sidebar {
         };
         div()
             .id(SharedString::from(format!("space-dot-{id}")))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("space-dot-{id}")
+            })
             .cursor_pointer()
             .flex()
             .items_center()
@@ -210,6 +242,23 @@ impl Sidebar {
             .tooltip(move |window, cx| {
                 Tooltip::new(hover_name.clone()).build(window, cx)
             })
+            // An agent dropped on a space's dot moves there, its sub-agents
+            // with it. Only somewhere it is not already, and never one on a
+            // remote connection, whose spaces are another machine's.
+            .rounded_full()
+            .can_drop(move |drag, _window, cx| {
+                drag.downcast_ref::<AgentDrag>().is_some_and(|drag| {
+                    workspace.read(cx).project(&drag.project_id).is_some_and(|p| {
+                        movable_to(p, &accepts_id)
+                    })
+                })
+            })
+            .drag_over::<AgentDrag>(move |style, _, _, _| {
+                style.bg(okena_ui::theme::with_alpha(t.border_active, 0.35))
+            })
+            .on_drop(cx.listener(move |this, drag: &AgentDrag, _window, cx| {
+                this.move_agent_to_space(drag.project_id.clone(), drop_id.clone(), cx);
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _window, cx| {

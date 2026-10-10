@@ -1135,6 +1135,10 @@ fn strip_remote_ids(action: ActionRequest, connection_id: &str) -> ActionRequest
             project_id: s(&project_id),
             fresh,
         },
+        ActionRequest::AgentMoveToSpace { project_id, space } => ActionRequest::AgentMoveToSpace {
+            project_id: s(&project_id),
+            space,
+        },
         ActionRequest::TaskDeleteWorkspace {
             project_id,
             force,

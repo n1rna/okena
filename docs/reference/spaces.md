@@ -162,6 +162,31 @@ account while you look at Default.
 A session an agent starts inherits the space of the repositories it was handed
 (`Workspace::place_in_space_of`), for the same reason.
 
+### Moving an agent to another space
+
+An agent session can be moved to another space, from any of:
+
+- its right-click menu in the Agents list: **Move to space**, listing every
+  other space
+- dragging it onto a space's dot in the selector
+- `okena project space <session> <space>`, or the `agent_move_to_space` action
+- `okena_move_to_space` over MCP, which moves the agent's own session unless
+  it names another
+
+The space is named by id or by name (`okena_core::spaces::find_space`).
+
+The agents listed under it go with it — the same group a drag in the Agents
+list carries (`agent_order::group_of`) — so a coordinator is never split from
+the agents it started. Moving a sub-agent moves it and what is under it, and
+leaves its parent where it is. A closed session moves alone.
+
+Nothing stops. The agents keep running and, from their next MCP call, read the
+new space's task connection and filters. Only the sessions move: their
+worktrees stay under their repositories, in the repositories' space, and a
+folder in the old space lets go of them.
+
+An agent on a remote connection cannot be moved: its spaces are that machine's.
+
 ## Clients
 
 Every client is space-aware. The daemon sends the spaces, which one is showing,
@@ -206,6 +231,7 @@ keep working:
 | `Connection`, id minting | `crates/okena-core/src/connections.rs` |
 | The connection registry and credentials | `crates/okena-tasks/src/store.rs` |
 | create / rename / delete / activate, and what a space holds | `crates/okena-workspace/src/spaces.rs` |
+| Moving an agent and its group (`Workspace::move_agent_to_space`) | `crates/okena-workspace/src/state.rs` |
 | `spaces` / `active_space` in settings, and the migration | `crates/okena-workspace/src/settings.rs` |
 | Filtering the sidebar and the overviews | `crates/okena-workspace/src/visibility.rs` |
 | The shared list the selector draws | `crates/okena-workspace/src/spaces_state.rs` |
