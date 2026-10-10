@@ -112,6 +112,27 @@ pub fn order_live(
     top.into_iter().chain(rest).flatten().collect()
 }
 
+/// The agent `id` and every session listed under it, in list order: what
+/// moves when that agent moves, and what a drag of it carries.
+///
+/// `sessions` is every live session listed together, as for [`order_live`].
+/// Empty when `id` is not one of them — a closed session has no group.
+pub fn group_of(sessions: &[&ProjectData], id: &str) -> Vec<String> {
+    let listed = order_live(sessions, &[], AgentSortMode::Name);
+    let Some(at) = listed.iter().position(|agent| agent.id == id) else {
+        return Vec::new();
+    };
+    let depth = listed[at].depth;
+    std::iter::once(listed[at].id.clone())
+        .chain(
+            listed[at + 1..]
+                .iter()
+                .take_while(|agent| agent.depth > depth)
+                .map(|agent| agent.id.clone()),
+        )
+        .collect()
+}
+
 /// Where in the Agents list a dragged agent was let go.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentDrop {
@@ -197,7 +218,7 @@ pub fn plan_drop(
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentDrop, DropPlan, order_live, plan_drop};
+    use super::{AgentDrop, DropPlan, group_of, order_live, plan_drop};
     use crate::{AgentSortMode, ProjectData};
 
     /// A free-form session, last active at `at`.
@@ -325,6 +346,28 @@ mod tests {
             shape(&sessions, &arranged, AgentSortMode::Activity),
             ["*first", "*second"]
         );
+    }
+
+    #[test]
+    fn an_agents_group_is_it_and_everything_under_it() {
+        let mut started = session("helper", 40);
+        started.started_by = Some("story-1".into());
+        let sessions = [
+            session("solo", 90),
+            on_task("epic", 10, "E", None),
+            on_task("story-1", 20, "S1", Some("E")),
+            on_task("story-2", 30, "S2", Some("E")),
+            started,
+        ];
+        let refs: Vec<&ProjectData> = sessions.iter().collect();
+        let mut epic = group_of(&refs, "epic");
+        epic.sort();
+        assert_eq!(epic, order(&["epic", "helper", "story-1", "story-2"]));
+        let mut story = group_of(&refs, "story-1");
+        story.sort();
+        assert_eq!(story, order(&["helper", "story-1"]));
+        assert_eq!(group_of(&refs, "solo"), order(&["solo"]));
+        assert!(group_of(&refs, "gone").is_empty());
     }
 
     #[test]

@@ -147,6 +147,7 @@ fn dispatch(cli: Cli) -> i32 {
             ProjectCmd::Rename { project, name } => commands::cli_project_rename(&project, &name),
             ProjectCmd::Color { project, color } => commands::cli_project_color(&project, &color),
             ProjectCmd::Focus { project } => commands::cli_project_focus(&project, window),
+            ProjectCmd::Space { project, space } => commands::cli_project_space(&project, &space),
         },
 
         Command::Worktree { cmd } => match cmd {

@@ -43,6 +43,7 @@ okena key okena:0 ctrl-c               # interrupt
 
 - Projects: `okena project add <path> | clone <url> | rm | rename | color | focus | show | hide`
   (`clone` takes `--into <parent-dir>` (default CWD), `--dir <name>`, `--name <n>`)
+- Move an agent session (and the agents under it) to another space: `okena project space <session> <space>` — the space by id or name
 - Layout: `okena term new | close | rename | split <h|v> | tab | focus | minimize | fullscreen`
   (`split h` = stacked top/bottom, `split v` = side by side left/right)
 - Worktrees: `okena worktree add <project> <branch> [--new-branch] | rm`

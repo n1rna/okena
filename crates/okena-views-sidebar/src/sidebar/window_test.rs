@@ -437,6 +437,64 @@ fn the_menu_pins_at_the_end_of_the_pinned_agents_and_unpins(cx: &mut TestAppCont
     assert_eq!(dispatched(&actions), ["pin p1"]);
 }
 
+/// Default, showing, and Client A beside it.
+fn publish_two_spaces(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        let state = cx.new(|_| okena_workspace::spaces_state::SpacesState::new());
+        state.update(cx, |state, cx| {
+            state.set(
+                vec![
+                    okena_core::spaces::SpaceData::new("default", "Default"),
+                    okena_core::spaces::SpaceData::new("client-a", "Client A"),
+                ],
+                "default".into(),
+                cx,
+            );
+        });
+        cx.set_global(okena_workspace::spaces_state::GlobalSpacesState(state));
+    });
+}
+
+fn moves(actions: &Actions) -> Vec<String> {
+    actions
+        .borrow()
+        .iter()
+        .filter_map(|action| match action {
+            ActionRequest::AgentMoveToSpace { project_id, space } => {
+                Some(format!("{project_id} -> {space}"))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn an_agents_menu_offers_every_other_space_to_move_to(cx: &mut TestAppContext) {
+    publish_two_spaces(cx);
+    let (_sidebar, actions, vcx) = draw(cx, agents_data(), SidebarList::Agents);
+    right_click(vcx, "agent-card-epic");
+    assert!(
+        vcx.debug_bounds("agent-menu-move-default").is_none(),
+        "not the space it is already in"
+    );
+    press(vcx, "agent-menu-move-client-a");
+    assert_eq!(moves(&actions), ["epic -> client-a"]);
+    assert!(vcx.debug_bounds("agent-menu-move-client-a").is_none(), "the menu closed");
+}
+
+#[gpui::test]
+fn an_agent_dropped_on_a_space_moves_there(cx: &mut TestAppContext) {
+    publish_two_spaces(cx);
+    let (_sidebar, actions, vcx) = draw(cx, agents_data(), SidebarList::Agents);
+    drag(vcx, "agent-card-u1", "space-dot-client-a");
+    assert_eq!(moves(&actions), ["u1 -> client-a"]);
+
+    // Dropped on the space it is already in, nothing is asked.
+    actions.borrow_mut().clear();
+    drag(vcx, "agent-card-u1", "space-dot-default");
+    assert!(moves(&actions).is_empty());
+}
+
 #[gpui::test]
 fn a_sub_agents_menu_does_not_offer_to_pin_it(cx: &mut TestAppContext) {
     let (_sidebar, _actions, vcx) = draw(cx, agents_data(), SidebarList::Agents);

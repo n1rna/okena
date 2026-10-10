@@ -409,6 +409,13 @@ pub enum ProjectCmd {
         /// Project (id / name / path)
         project: String,
     },
+    /// Move an agent session, with the agents under it, to another space
+    Space {
+        /// Agent session (id / name / path)
+        project: String,
+        /// Space to move it to (id or name)
+        space: String,
+    },
 }
 
 #[derive(Subcommand)]

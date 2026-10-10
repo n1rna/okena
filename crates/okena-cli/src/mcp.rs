@@ -396,6 +396,31 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "okena_move_to_space",
+            "description":
+                "Move an agent session to another okena space, with every agent \
+                 listed under it. Only when the user asks for it: a space is \
+                 theirs to arrange. Defaults to this session. Nothing stops — \
+                 the agents keep running and from then on read the new space's \
+                 task connection and filters.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "space": {
+                        "type": "string",
+                        "description": "The space to move to, by name or id."
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description":
+                            "The agent session to move. Defaults to this session."
+                    }
+                },
+                "required": ["space"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "okena_start_work",
             "description":
                 "Start an agent on one or more tasks, each in worktrees of its own. \
@@ -702,6 +727,7 @@ fn call_tool(params: &Value) -> Result<Value, Value> {
         "okena_set_task_state" => set_task_state(&args),
         "okena_comment_task" => comment_task(&args),
         "okena_start_work" => start_work(&args),
+        "okena_move_to_space" => move_to_space(&args),
         "okena_register_asset" => register_asset(&args),
         "okena_context_search" => context_search(&args),
         "okena_context_read" => context_read(&args),
@@ -840,6 +866,21 @@ fn report_status(args: &Value) -> Result<Value, String> {
         .to_string(),
     )?;
     Ok(json!({ "ok": true, "project_id": session.project.id }))
+}
+
+/// Move a session to another space: this one unless `project_id` names
+/// another. The daemon resolves the space by id or name.
+fn move_to_space(args: &Value) -> Result<Value, String> {
+    let space = str_arg(args, "space").ok_or("`space` is required")?;
+    let project_id = match str_arg(args, "project_id") {
+        Some(id) => id.to_string(),
+        None => current_session()?.project.id,
+    };
+    action(&json!({
+        "action": "agent_move_to_space",
+        "project_id": project_id,
+        "space": space,
+    }))
 }
 
 /// The task this session was started for, or an explicit one.
@@ -2335,6 +2376,7 @@ mod tests {
                 "okena_list_containers",
                 "okena_list_projects",
                 "okena_list_subtasks",
+                "okena_move_to_space",
                 "okena_register_asset",
                 "okena_report_status",
                 "okena_set_task_state",

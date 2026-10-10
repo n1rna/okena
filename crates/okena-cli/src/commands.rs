@@ -1349,6 +1349,18 @@ pub fn cli_project_rename(project: &str, name: &str) -> i32 {
     })
 }
 
+/// `okena project space <project> <space>`
+pub fn cli_project_space(project: &str, space: &str) -> i32 {
+    with_state_post(|state| {
+        let p = resolve::resolve_project(state, project)?;
+        Ok(serde_json::json!({
+            "action": "agent_move_to_space",
+            "project_id": p.id,
+            "space": space,
+        }))
+    })
+}
+
 /// `okena project color <project> <color>`
 pub fn cli_project_color(project: &str, color: &str) -> i32 {
     let color = match validate_color(color) {

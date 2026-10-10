@@ -2051,6 +2051,101 @@ mod gpui_tests {
         });
     }
 
+    /// Rows for the move tests: a coordinator with a sub-agent it started, an
+    /// unrelated agent, and a repository, all in Default, plus a folder there
+    /// holding the coordinator.
+    fn agents_in_default() -> WorkspaceData {
+        let row = |id: &str, extra: serde_json::Value| -> crate::state::ProjectData {
+            let mut v = serde_json::json!({ "id": id, "name": id, "path": "/tmp/x" });
+            if let (Some(v), Some(extra)) = (v.as_object_mut(), extra.as_object()) {
+                v.extend(extra.clone());
+            }
+            serde_json::from_value(v).expect("project row")
+        };
+        let mut data = make_workspace_data();
+        data.projects = vec![
+            row("lead", serde_json::json!({ "custom_session": "coordinate" })),
+            row(
+                "helper",
+                serde_json::json!({ "custom_session": "help", "started_by": "lead" }),
+            ),
+            row("other", serde_json::json!({ "custom_session": "other" })),
+            row("repo", serde_json::json!({})),
+        ];
+        data.project_order = vec!["lead".into(), "helper".into(), "other".into(), "repo".into()];
+        data.folders = vec![
+            serde_json::from_value(serde_json::json!({
+                "id": "f", "name": "Agents", "project_ids": ["lead", "other"],
+            }))
+            .expect("folder row"),
+        ];
+        data
+    }
+
+    #[gpui::test]
+    fn moving_an_agent_takes_its_sub_agents_and_nothing_else(cx: &mut gpui::TestAppContext) {
+        let workspace = cx.new(|_cx| Workspace::new(agents_in_default()));
+        let moved = workspace
+            .update(cx, |ws: &mut Workspace, cx| {
+                ws.move_agent_to_space("lead", "client-a", cx)
+            })
+            .expect("move");
+        assert_eq!(moved, vec!["lead".to_string(), "helper".to_string()]);
+
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            let space = |id: &str| ws.project(id).map(|p| p.space_id.clone());
+            assert_eq!(space("lead").as_deref(), Some("client-a"));
+            assert_eq!(space("helper").as_deref(), Some("client-a"));
+            assert_eq!(space("other").as_deref(), Some("default"));
+            assert_eq!(space("repo").as_deref(), Some("default"));
+            // Default's folder no longer holds an agent it cannot show.
+            assert_eq!(
+                ws.folder("f").map(|f| f.project_ids.clone()),
+                Some(vec!["other".to_string()])
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn moving_a_sub_agent_leaves_its_parent_where_it_is(cx: &mut gpui::TestAppContext) {
+        let workspace = cx.new(|_cx| Workspace::new(agents_in_default()));
+        let moved = workspace
+            .update(cx, |ws: &mut Workspace, cx| {
+                ws.move_agent_to_space("helper", "client-a", cx)
+            })
+            .expect("move");
+        assert_eq!(moved, vec!["helper".to_string()]);
+        workspace.update(cx, |ws: &mut Workspace, _cx| {
+            assert_eq!(
+                ws.project("lead").map(|p| p.space_id.as_str()),
+                Some("default")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn only_a_local_agent_moves_and_only_somewhere_new(cx: &mut gpui::TestAppContext) {
+        let mut data = agents_in_default();
+        if let Some(p) = data.projects.iter_mut().find(|p| p.id == "other") {
+            p.connection_id = Some("laptop".into());
+        }
+        let workspace = cx.new(|_cx| Workspace::new(data));
+        workspace.update(cx, |ws: &mut Workspace, cx| {
+            let refused = |result: Result<Vec<String>, String>| result.expect_err("refused");
+            assert!(refused(ws.move_agent_to_space("repo", "client-a", cx)).contains("not an agent"));
+            assert!(refused(ws.move_agent_to_space("other", "client-a", cx)).contains("remote"));
+            assert!(refused(ws.move_agent_to_space("lead", "default", cx)).contains("already"));
+            assert!(refused(ws.move_agent_to_space("gone", "client-a", cx)).contains("No project"));
+            assert!(
+                ws.data()
+                    .projects
+                    .iter()
+                    .all(|p| p.space_id == "default"),
+                "a refused move changes nothing"
+            );
+        });
+    }
+
     #[gpui::test]
     fn a_project_added_in_one_space_is_absent_in_the_other(cx: &mut gpui::TestAppContext) {
         // The acceptance walk-through, at the entity layer: add a project in

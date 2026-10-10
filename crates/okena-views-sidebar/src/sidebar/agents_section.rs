@@ -832,6 +832,19 @@ impl Sidebar {
         let Some(name) = name else {
             return div().into_any_element();
         };
+        // The other spaces it can go to: none for an agent on a remote
+        // connection, whose spaces are that machine's.
+        let destinations: Vec<(String, String)> = {
+            let workspace = self.workspace.read(cx);
+            match workspace.project(&id) {
+                Some(project) => okena_workspace::spaces_state::spaces(cx)
+                    .into_iter()
+                    .filter(|space| super::space_selector::movable_to(project, &space.id))
+                    .map(|space| (space.id, space.name))
+                    .collect(),
+                None => Vec::new(),
+            }
+        };
         let mut panel = okena_ui::menu::context_menu_panel("agent-menu", &t)
             .min_w(px(180.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -860,16 +873,43 @@ impl Sidebar {
                     ),
             );
         }
+        let rename_id = id.clone();
         panel = panel.child(
             okena_ui::menu::menu_item("agent-menu-rename", "icons/edit.svg", "Rename", &t)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _, window, cx| {
                         this.agent_menu = None;
-                        this.start_project_rename(id.clone(), name.clone(), window, cx);
+                        this.start_project_rename(rename_id.clone(), name.clone(), window, cx);
                     }),
                 ),
         );
+        if !destinations.is_empty() {
+            panel = panel.child(okena_ui::menu::menu_section("Move to space", &t));
+        }
+        for (space_id, space_name) in destinations {
+            let project_id = id.clone();
+            panel = panel.child(
+                okena_ui::menu::menu_item(
+                    SharedString::from(format!("agent-menu-move-{space_id}")),
+                    "icons/folder.svg",
+                    SharedString::from(space_name),
+                    &t,
+                )
+                .debug_selector({
+                    let space_id = space_id.clone();
+                    move || format!("agent-menu-move-{space_id}")
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.agent_menu = None;
+                        this.move_agent_to_space(project_id.clone(), space_id.clone(), cx);
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
         // Deferred so it paints over the cards it was opened from, which come
         // later in the sidebar than this does.
         deferred(anchored().position(at).snap_to_window().child(panel))
