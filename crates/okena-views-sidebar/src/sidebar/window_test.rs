@@ -455,6 +455,16 @@ fn publish_two_spaces(cx: &mut TestAppContext) {
     });
 }
 
+/// The agents as the window holds them: mirrored from its own daemon, under
+/// that daemon's connection.
+fn from_the_local_daemon(mut data: WorkspaceData) -> WorkspaceData {
+    for project in &mut data.projects {
+        project.connection_id =
+            Some(okena_transport::client::LOCAL_DAEMON_CONNECTION_ID.to_string());
+    }
+    data
+}
+
 fn moves(actions: &Actions) -> Vec<String> {
     actions
         .borrow()
@@ -471,7 +481,8 @@ fn moves(actions: &Actions) -> Vec<String> {
 #[gpui::test]
 fn an_agents_menu_offers_every_other_space_to_move_to(cx: &mut TestAppContext) {
     publish_two_spaces(cx);
-    let (_sidebar, actions, vcx) = draw(cx, agents_data(), SidebarList::Agents);
+    let data = from_the_local_daemon(agents_data());
+    let (_sidebar, actions, vcx) = draw(cx, data, SidebarList::Agents);
     right_click(vcx, "agent-card-epic");
     assert!(
         vcx.debug_bounds("agent-menu-move-default").is_none(),
@@ -485,13 +496,28 @@ fn an_agents_menu_offers_every_other_space_to_move_to(cx: &mut TestAppContext) {
 #[gpui::test]
 fn an_agent_dropped_on_a_space_moves_there(cx: &mut TestAppContext) {
     publish_two_spaces(cx);
-    let (_sidebar, actions, vcx) = draw(cx, agents_data(), SidebarList::Agents);
+    let data = from_the_local_daemon(agents_data());
+    let (_sidebar, actions, vcx) = draw(cx, data, SidebarList::Agents);
     drag(vcx, "agent-card-u1", "space-dot-client-a");
     assert_eq!(moves(&actions), ["u1 -> client-a"]);
 
     // Dropped on the space it is already in, nothing is asked.
     actions.borrow_mut().clear();
     drag(vcx, "agent-card-u1", "space-dot-default");
+    assert!(moves(&actions).is_empty());
+}
+
+#[gpui::test]
+fn an_agent_from_another_machine_offers_no_space_to_move_to(cx: &mut TestAppContext) {
+    publish_two_spaces(cx);
+    let mut data = agents_data();
+    for project in &mut data.projects {
+        project.connection_id = Some("office-mac".to_string());
+    }
+    let (_sidebar, actions, vcx) = draw(cx, data, SidebarList::Agents);
+    right_click(vcx, "agent-card-epic");
+    assert!(vcx.debug_bounds("agent-menu-move-client-a").is_none());
+    drag(vcx, "agent-card-u1", "space-dot-client-a");
     assert!(moves(&actions).is_empty());
 }
 
