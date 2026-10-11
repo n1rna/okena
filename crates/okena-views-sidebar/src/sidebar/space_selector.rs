@@ -24,7 +24,13 @@ use crate::drag::AgentDrag;
 /// Whether the agent session `project` can be moved to the space `space_id`:
 /// it is a local one, and it is not there already.
 pub(super) fn movable_to(project: &okena_workspace::state::ProjectData, space_id: &str) -> bool {
-    project.agent_role().is_some() && project.connection_id.is_none() && project.space_id != space_id
+    // The client mirrors its own daemon's projects under the local daemon's
+    // connection, so only another connection makes an agent remote.
+    let local = project
+        .connection_id
+        .as_deref()
+        .is_none_or(|id| id == okena_transport::client::LOCAL_DAEMON_CONNECTION_ID);
+    project.agent_role().is_some() && local && project.space_id != space_id
 }
 
 /// Width one dot takes, including the gap after it.
